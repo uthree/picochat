@@ -5,7 +5,6 @@ from picochat.model.gpt import (
     SelfAttention,
     SwiGLU,
     Transformer,
-    WordEmbedding,
     rms_norm,
     rotate_half,
 )
