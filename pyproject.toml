@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "datasets>=5.0.0",
     "einops>=0.8.2",
     "lightning>=2.6.5",
     "rustbpe>=0.1.0",
