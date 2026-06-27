@@ -6,7 +6,8 @@ from torch import Tensor
 
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
-    return x / (x.square().mean(-1, keepdim=True).sqrt() + eps)
+    with torch.amp.autocast(device_type="cuda", enabled=False):
+        return x / (x.square().mean(-1, keepdim=True).sqrt() + eps)
 
 
 def rotate_half(x: Tensor) -> Tensor:
@@ -93,20 +94,21 @@ class SelfAttention(nn.Module):
         return y, cache
 
     def _rope(self, x, offset: int = 0) -> Tensor:
-        if not hasattr(self, "sin"):
-            t = (torch.arange(self.rope_base) + offset)[:, None].float()
-            f = (
-                self.rope_base
-                ** (torch.linspace(0.0, 1.0, self.d_head // 2).repeat_interleave(2))
-            )[None, :]
-            theta = t / f
-            self.register_buffer("sin", torch.sin(theta))
-            self.register_buffer("cos", torch.cos(theta))
-        sin, cos = (
-            self.sin[offset : offset + x.shape[-2], :],
-            self.cos[offset : offset + x.shape[-2], :],
-        )
-        x = x * cos + rotate_half(x) * sin
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            if not hasattr(self, "sin"):
+                t = (torch.arange(self.rope_base) + offset)[:, None].float()
+                f = (
+                    self.rope_base
+                    ** (torch.linspace(0.0, 1.0, self.d_head // 2).repeat_interleave(2))
+                )[None, :]
+                theta = t / f
+                self.register_buffer("sin", torch.sin(theta))
+                self.register_buffer("cos", torch.cos(theta))
+            sin, cos = (
+                self.sin[offset : offset + x.shape[-2], :],
+                self.cos[offset : offset + x.shape[-2], :],
+            )
+            x = x * cos + rotate_half(x) * sin
         return x
 
 
