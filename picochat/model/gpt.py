@@ -31,10 +31,10 @@ class SwiGLU(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         x = rms_norm(x)
-        x = self.proj_up(x) * self.proj_gate(x).silu()
-        x = F.dropout(x, self.p_dropout)
+        x = self.proj_up(x) * F.silu(self.proj_gate(x))
+        x = F.dropout(x, self.p_dropout, training=self.training)
         x = self.proj_down(x)
-        x = F.dropout(x, self.p_dropout)
+        x = F.dropout(x, self.p_dropout, training=self.training)
         return x
 
 
@@ -74,9 +74,21 @@ class SelfAttention(nn.Module):
         cache = torch.stack([key, value])
         offset = key.shape[-2] - query.shape[-2]
         query, key = self._rope(query, offset=offset), self._rope(key)
-        attn = F.scaled_dot_product_attention(
-            query, key, value, is_causal=True, enable_gqa=True
-        )
+        if offset == 0:
+            attn = F.scaled_dot_product_attention(
+                query, key, value, is_causal=True, enable_gqa=True
+            )
+        else:
+            # cached decoding: query is shorter than key, so is_causal would
+            # align top-left and mask out the cache. Build a bottom-right
+            # aligned causal mask instead (query pos i attends to keys <= i+offset).
+            q_len, k_len = query.shape[-2], key.shape[-2]
+            mask = torch.ones(q_len, k_len, dtype=torch.bool, device=query.device).tril(
+                diagonal=offset
+            )
+            attn = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=mask, enable_gqa=True
+            )
         y = self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
         return y, cache
 
@@ -108,6 +120,7 @@ class Transformer(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
     ):
+        super().__init__()
         self.n_layers = n_layers
         self.attn = nn.ModuleList(
             [
@@ -126,7 +139,7 @@ class Transformer(nn.Module):
             cache = [None] * self.n_layers  # type: ignore
         for i in range(self.n_layers):
             s = x
-            x, cache[i] = self.attn(x, cache[i])  # type: ignore
+            x, cache[i] = self.attn[i](x, cache[i])  # type: ignore
             x = x + s
             s = x
             x = self.ffn[i](x)
@@ -141,18 +154,12 @@ class WordEmbedding(nn.Module):
         vocab_size: int,
         d_model: int,
         d_embed: int = 128,
-        n_prediction_heads: int = 4,  # for multi token prediction
     ):
         super().__init__()
         self.embed = nn.Sequential(
             nn.Embedding(vocab_size, d_embed), nn.Linear(d_embed, d_model, bias=False)
         )
-        self.lmheads = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(d_model, d_embed, bias=False),
-                    nn.Linear(d_embed, vocab_size, bias=False),
-                )
-                for _ in range(n_prediction_heads)
-            ]
+        self.lmhead = nn.Sequential(
+            nn.Linear(d_model, d_embed, bias=False),
+            nn.Linear(d_embed, vocab_size, bias=False),
         )
