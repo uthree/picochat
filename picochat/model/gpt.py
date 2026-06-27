@@ -121,13 +121,18 @@ class Transformer(nn.Module):
         n_groups: int | None = None,
         rope_base: int = 10000,
         d_ffn: int | None = None,
+        n_attn_layers: int | None = None,
     ):
         super().__init__()
+        if n_attn_layers is None:
+            n_attn_layers = n_layers
+        assert n_layers % n_attn_layers == 0
+        self.n_attn_layers = n_attn_layers
         self.n_layers = n_layers
         self.attn = nn.ModuleList(
             [
                 SelfAttention(d_model, n_heads, n_groups=n_groups, rope_base=rope_base)
-                for _ in range(n_layers)
+                for _ in range(n_attn_layers)
             ]
         )
         self.ffn = nn.ModuleList(
@@ -141,7 +146,8 @@ class Transformer(nn.Module):
             cache = [None] * self.n_layers  # type: ignore
         for i in range(self.n_layers):
             s = x
-            x, cache[i] = self.attn[i](x, cache[i])  # type: ignore
+            j = i % self.n_attn_layers
+            x, cache[i] = self.attn[j](x, cache[i])  # type: ignore
             x = x + s
             s = x
             x = self.ffn[i](x)

@@ -191,3 +191,70 @@ def test_transformer_backward():
     out, _ = model(x, None)
     out.sum().backward()
     assert x.grad is not None
+
+
+# ---------------------------------------------------------------------------
+# cross-layer attention sharing (n_attn_layers)
+# ---------------------------------------------------------------------------
+def test_attn_layers_default_to_n_layers():
+    model = Transformer(d_model=32, n_heads=4, n_layers=4)
+    assert model.n_attn_layers == 4
+    assert len(model.attn) == 4
+    # one FFN per layer regardless of sharing
+    assert len(model.ffn) == 4
+
+
+def test_shared_attention_module_count():
+    model = Transformer(d_model=32, n_heads=4, n_layers=6, n_attn_layers=2)
+    assert len(model.attn) == 2  # only 2 distinct attention modules
+    assert len(model.ffn) == 6  # ffn stays per-layer
+
+
+def test_shared_attention_reduces_params():
+    full = Transformer(d_model=32, n_heads=4, n_layers=6)
+    shared = Transformer(d_model=32, n_heads=4, n_layers=6, n_attn_layers=2)
+    n_full = sum(p.numel() for p in full.parameters())
+    n_shared = sum(p.numel() for p in shared.parameters())
+    assert n_shared < n_full
+
+
+def test_shared_attention_modules_are_identical_objects():
+    # cyclic sharing: layer i uses attn[i % n_attn_layers]
+    model = Transformer(d_model=32, n_heads=4, n_layers=6, n_attn_layers=2)
+    assert model.attn[0] is not model.attn[1]
+    # weights are genuinely tied (same parameter tensor reused)
+    shared_params = {id(p) for p in model.attn[0].parameters()}
+    # forward must run through the shared modules without index errors
+    out, cache = model(torch.randn(1, 5, 32), None)
+    assert out.shape == (1, 5, 32)
+    assert len(cache) == 6  # cache is still per-layer
+    assert len(shared_params) > 0
+
+
+@pytest.mark.parametrize(
+    "n_layers,n_attn_layers,expected_max_index",
+    [(6, 2, 1), (8, 2, 1), (6, 3, 2), (4, 1, 0)],
+)
+def test_shared_attention_cyclic_mapping(n_layers, n_attn_layers, expected_max_index):
+    # forward should never index past the available attention modules
+    model = Transformer(
+        d_model=16, n_heads=4, n_layers=n_layers, n_attn_layers=n_attn_layers
+    )
+    mapping = [i % model.n_attn_layers for i in range(n_layers)]
+    assert max(mapping) == expected_max_index
+    out, _ = model(torch.randn(1, 4, 16), None)
+    assert out.shape == (1, 4, 16)
+
+
+def test_n_attn_layers_must_divide_n_layers():
+    with pytest.raises(AssertionError):
+        Transformer(d_model=16, n_heads=4, n_layers=5, n_attn_layers=2)
+
+
+def test_shared_attention_backward_updates_shared_module():
+    model = Transformer(d_model=16, n_heads=4, n_layers=4, n_attn_layers=2)
+    out, _ = model(torch.randn(2, 5, 16), None)
+    out.sum().backward()
+    # a parameter of a shared attention module must accumulate gradient
+    grad = model.attn[0].proj_q.weight.grad
+    assert grad is not None and grad.abs().sum() > 0
