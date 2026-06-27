@@ -1,8 +1,11 @@
+import lightning as L
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.optimizer import Optimizer
 
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
@@ -156,11 +159,17 @@ class Transformer(nn.Module):
         return x, cache  # type: ignore
 
 
-class WordEmbedding(nn.Module):
+class TransformerLM(nn.Module):
     def __init__(
         self,
         vocab_size: int,
         d_model: int,
+        n_heads: int,
+        n_layers: int,
+        n_groups: int | None = None,
+        rope_base: int = 10000,
+        d_ffn: int | None = None,
+        n_attn_layers: int | None = None,
         d_embed: int = 128,
     ):
         super().__init__()
@@ -171,3 +180,40 @@ class WordEmbedding(nn.Module):
             nn.Linear(d_model, d_embed, bias=False),
             nn.Linear(d_embed, vocab_size, bias=False),
         )
+        self.transformer = Transformer(
+            d_model,
+            n_heads,
+            n_layers,
+            n_groups=n_groups,
+            rope_base=rope_base,
+            d_ffn=d_ffn,
+            n_attn_layers=n_attn_layers,
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.embed(x)
+        x = self.transformer(x)
+        x = self.lmhead(x)
+        return x
+
+
+class GPT(L.LightningModule):
+    def __init__(self, transformer_lm: TransformerLM, pad_idx: int = 0):
+        self.model = transformer_lm
+        self.pad_idx = pad_idx
+        super().__init__()
+
+    def _loss(self, x: Tensor) -> Tensor:
+        logits = self.model(x)
+        loss = F.cross_entropy(logits, x, ignore_index=self.pad_idx)
+        return loss
+
+    def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
+        return self._loss(batch)
+
+    def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
+        return self._loss(batch)
+
+    def configure_optimizers(self) -> Optimizer:
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        return optimizer
