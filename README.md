@@ -7,5 +7,6 @@ We applied several improvements to a decoder-only Transformer, such as GPT.
 - RMS Normalization
 - QK Normalization
 - SwiGLU
+- Share attention parameters across layers
 - Flash Attention
 - Factorized Embedding
