@@ -136,14 +136,9 @@ class Transformer(nn.Module):
         n_groups: int | None = None,
         rope_base: int = 10000,
         d_ffn: int | None = None,
-        n_attn_layers: int | None = None,
         max_seq_len: int = 4096,
     ):
         super().__init__()
-        if n_attn_layers is None:
-            n_attn_layers = n_layers
-        assert n_layers % n_attn_layers == 0
-        self.n_attn_layers = n_attn_layers
         self.n_layers = n_layers
         self.attn = nn.ModuleList(
             [
@@ -154,7 +149,7 @@ class Transformer(nn.Module):
                     rope_base=rope_base,
                     max_seq_len=max_seq_len,
                 )
-                for _ in range(n_attn_layers)
+                for _ in range(n_layers)
             ]
         )
         self.ffn = nn.ModuleList(
@@ -168,8 +163,7 @@ class Transformer(nn.Module):
             cache = [None] * self.n_layers  # type: ignore
         for i in range(self.n_layers):
             s = x
-            j = i % self.n_attn_layers
-            x, cache[i] = self.attn[j](x, cache[i])  # type: ignore
+            x, cache[i] = self.attn[i](x, cache[i])  # type: ignore
             x = x + s
             s = x
             x = self.ffn[i](x)
@@ -190,19 +184,12 @@ class TransformerLM(nn.Module):
         d_ffn: int | None = None,
         n_attn_layers: int | None = None,
         max_seq_len: int = 4096,
-        tie_embeddings: bool = True,
-        init_std: float = 0.02,
     ):
         super().__init__()
         self.n_layers = n_layers
-        self.init_std = init_std
-        # Full-dimension embedding (keeps the output logits full-rank). Weight tying
-        # shares the input embedding and output projection to save parameters
-        # (the standard choice for LLMs).
+
         self.embed = nn.Embedding(vocab_size, d_model)
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
-        if tie_embeddings:
-            self.lmhead.weight = self.embed.weight
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -210,29 +197,8 @@ class TransformerLM(nn.Module):
             n_groups=n_groups,
             rope_base=rope_base,
             d_ffn=d_ffn,
-            n_attn_layers=n_attn_layers,
             max_seq_len=max_seq_len,
         )
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        # GPT-2 style: init all weights with normal(0, init_std) and zero biases,
-        # then scale down only the projections that write into the residual path
-        # (proj_o / proj_down) by 1/sqrt(2*n_layers). This keeps the variance of the
-        # residual stream roughly constant regardless of depth.
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
-        scaled_std = self.init_std / math.sqrt(2 * self.n_layers)
-        for m in self.modules():
-            if isinstance(m, SelfAttention):
-                nn.init.normal_(m.proj_o.weight, mean=0.0, std=scaled_std)
-            elif isinstance(m, SwiGLU):
-                nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
 
     def forward(
         self, x: Tensor, cache: list[Tensor | None] | None
@@ -248,11 +214,11 @@ class TransformerLM(nn.Module):
 # Param counts are measured with vocab=64k and weight tying (one shared
 # vocab x d_model embedding matrix).
 MODEL_PRESETS: dict[str, dict] = {
-    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~57M
-    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~132M
-    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4),  # ~355M
-    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8),  # ~1.3B
-    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5),  # ~2.6B
+    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~70M
+    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~150M
+    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4),  # ~500M
+    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8),  # ~1.5B
+    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5),  # ~3B
 }
 
 

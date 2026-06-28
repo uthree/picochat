@@ -200,73 +200,6 @@ def test_transformer_backward():
 
 
 # ---------------------------------------------------------------------------
-# cross-layer attention sharing (n_attn_layers)
-# ---------------------------------------------------------------------------
-def test_attn_layers_default_to_n_layers():
-    model = Transformer(d_model=32, n_heads=4, n_layers=4)
-    assert model.n_attn_layers == 4
-    assert len(model.attn) == 4
-    # one FFN per layer regardless of sharing
-    assert len(model.ffn) == 4
-
-
-def test_shared_attention_module_count():
-    model = Transformer(d_model=32, n_heads=4, n_layers=6, n_attn_layers=2)
-    assert len(model.attn) == 2  # only 2 distinct attention modules
-    assert len(model.ffn) == 6  # ffn stays per-layer
-
-
-def test_shared_attention_reduces_params():
-    full = Transformer(d_model=32, n_heads=4, n_layers=6)
-    shared = Transformer(d_model=32, n_heads=4, n_layers=6, n_attn_layers=2)
-    n_full = sum(p.numel() for p in full.parameters())
-    n_shared = sum(p.numel() for p in shared.parameters())
-    assert n_shared < n_full
-
-
-def test_shared_attention_modules_are_identical_objects():
-    # cyclic sharing: layer i uses attn[i % n_attn_layers]
-    model = Transformer(d_model=32, n_heads=4, n_layers=6, n_attn_layers=2)
-    assert model.attn[0] is not model.attn[1]
-    # weights are genuinely tied (same parameter tensor reused)
-    shared_params = {id(p) for p in model.attn[0].parameters()}
-    # forward must run through the shared modules without index errors
-    out, cache = model(torch.randn(1, 5, 32), None)
-    assert out.shape == (1, 5, 32)
-    assert len(cache) == 6  # cache is still per-layer
-    assert len(shared_params) > 0
-
-
-@pytest.mark.parametrize(
-    "n_layers,n_attn_layers,expected_max_index",
-    [(6, 2, 1), (8, 2, 1), (6, 3, 2), (4, 1, 0)],
-)
-def test_shared_attention_cyclic_mapping(n_layers, n_attn_layers, expected_max_index):
-    # forward should never index past the available attention modules
-    model = Transformer(
-        d_model=16, n_heads=4, n_layers=n_layers, n_attn_layers=n_attn_layers
-    )
-    mapping = [i % model.n_attn_layers for i in range(n_layers)]
-    assert max(mapping) == expected_max_index
-    out, _ = model(torch.randn(1, 4, 16), None)
-    assert out.shape == (1, 4, 16)
-
-
-def test_n_attn_layers_must_divide_n_layers():
-    with pytest.raises(AssertionError):
-        Transformer(d_model=16, n_heads=4, n_layers=5, n_attn_layers=2)
-
-
-def test_shared_attention_backward_updates_shared_module():
-    model = Transformer(d_model=16, n_heads=4, n_layers=4, n_attn_layers=2)
-    out, _ = model(torch.randn(2, 5, 16), None)
-    out.sum().backward()
-    # a parameter of a shared attention module must accumulate gradient
-    grad = model.attn[0].proj_q.weight.grad
-    assert grad is not None and grad.abs().sum() > 0
-
-
-# ---------------------------------------------------------------------------
 # TransformerLM
 # ---------------------------------------------------------------------------
 def test_transformer_lm_logits_shape():
@@ -373,18 +306,8 @@ def test_gpt_loss_backward_reaches_embedding(gpt_module):
     assert gpt_module.model.embed.weight.grad is not None
 
 
-def test_embeddings_tied_by_default():
-    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
-    # input embedding and output projection are the same tensor (weight tying)
-    assert lm.lmhead.weight is lm.embed.weight
-    # full dimension (no factorization), so the logits are full-rank
-    assert lm.lmhead.weight.shape == (40, 32)
-
-
 def test_embeddings_untied_when_disabled():
-    lm = TransformerLM(
-        vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=False
-    )
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     assert lm.lmhead.weight is not lm.embed.weight
 
 
@@ -481,24 +404,6 @@ def test_build_lm_pico_forward():
 def test_build_lm_overrides_preset():
     lm = build_lm("pico", vocab_size=50, n_layers=2)
     assert lm.transformer.n_layers == 2  # overridden from preset's 8
-
-
-# ---------------------------------------------------------------------------
-# weight initialization (GPT-2 style + residual scaling)
-# ---------------------------------------------------------------------------
-def test_init_std_and_residual_scaling():
-    torch.manual_seed(0)
-    lm = TransformerLM(vocab_size=200, d_model=128, n_heads=4, n_layers=8)
-    attn = lm.transformer.attn[0]
-    ffn = lm.transformer.ffn[0]
-    # ordinary Linear layers have std ~= init_std (0.02)
-    assert attn.proj_q.weight.std().item() == pytest.approx(0.02, rel=0.15)
-    # residual projections use 0.02 / sqrt(2*n_layers)
-    scaled = 0.02 / (2 * 8) ** 0.5
-    assert attn.proj_o.weight.std().item() == pytest.approx(scaled, rel=0.2)
-    assert ffn.proj_down.weight.std().item() == pytest.approx(scaled, rel=0.2)
-    # biases are initialized to 0
-    assert torch.all(ffn.proj_up.bias == 0)
 
 
 def test_init_gives_near_uniform_loss():
