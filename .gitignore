@@ -218,3 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 weights/
+
+# training artifacts
+lightning_logs/
+data/*.bin

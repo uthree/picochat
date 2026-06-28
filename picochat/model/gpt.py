@@ -199,10 +199,13 @@ class TransformerLM(nn.Module):
 
 
 class GPT(L.LightningModule):
-    def __init__(self, transformer_lm: TransformerLM, pad_idx: int = 0):
+    def __init__(
+        self, transformer_lm: TransformerLM, pad_idx: int = 0, lr: float = 1e-4
+    ):
         super().__init__()
         self.model = transformer_lm
         self.pad_idx = pad_idx
+        self.lr = lr
 
     def _loss(self, x: Tensor) -> Tensor:
         logits, _cache = self.model(x, None)
@@ -212,12 +215,21 @@ class GPT(L.LightningModule):
         loss = F.cross_entropy(logits, targets, ignore_index=self.pad_idx)
         return loss
 
+    def _log(self, name: str, value: Tensor, **kwargs) -> None:
+        # Trainer に接続されているときだけ記録する（テストで step を直接呼ぶ場合は no-op）。
+        if self._trainer is not None:
+            self.log(name, value, prog_bar=True, **kwargs)
+
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        return self._loss(batch)
+        loss = self._loss(batch)
+        self._log("train_loss", loss)
+        return loss
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        return self._loss(batch)
+        loss = self._loss(batch)
+        self._log("val_loss", loss, sync_dist=True)
+        return loss
 
     def configure_optimizers(self) -> Optimizer:
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         return optimizer
