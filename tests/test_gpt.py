@@ -345,7 +345,7 @@ def test_gpt_weight_decay_excludes_bias_and_embedding(gpt_module):
     assert decay_group["weight_decay"] > 0
     assert no_decay_group["weight_decay"] == 0.0
     # embedding と bias（1次元）は weight decay 対象から除外される。
-    embed_weight = gpt_module.model.embed[0].weight
+    embed_weight = gpt_module.model.embed.weight
     no_decay_ids = {id(p) for p in no_decay_group["params"]}
     assert id(embed_weight) in no_decay_ids
     assert all(p.ndim >= 2 for p in decay_group["params"])
@@ -370,7 +370,22 @@ def test_gpt_configure_optimizers_with_schedule():
 def test_gpt_loss_backward_reaches_embedding(gpt_module):
     batch = torch.randint(1, 40, (2, 6))
     gpt_module.training_step(batch, 0).backward()
-    assert gpt_module.model.embed[0].weight.grad is not None
+    assert gpt_module.model.embed.weight.grad is not None
+
+
+def test_embeddings_tied_by_default():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    # 入力埋め込みと出力射影が同一テンソル（weight tying）
+    assert lm.lmhead.weight is lm.embed.weight
+    # full 次元（分解なし）でロジットがフルランク
+    assert lm.lmhead.weight.shape == (40, 32)
+
+
+def test_embeddings_untied_when_disabled():
+    lm = TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=False
+    )
+    assert lm.lmhead.weight is not lm.embed.weight
 
 
 def test_gpt_pad_targets_are_ignored(gpt_module):

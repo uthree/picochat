@@ -187,17 +187,16 @@ class TransformerLM(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         n_attn_layers: int | None = None,
-        d_embed: int = 128,
         max_seq_len: int = 4096,
+        tie_embeddings: bool = True,
     ):
         super().__init__()
-        self.embed = nn.Sequential(
-            nn.Embedding(vocab_size, d_embed), nn.Linear(d_embed, d_model, bias=False)
-        )
-        self.lmhead = nn.Sequential(
-            nn.Linear(d_model, d_embed, bias=False),
-            nn.Linear(d_embed, vocab_size, bias=False),
-        )
+        # full 次元の埋め込み（出力ロジットをフルランクに保つ）。weight tying で
+        # 入力埋め込みと出力射影を共有し、パラメータを節約する（LLM の定石）。
+        self.embed = nn.Embedding(vocab_size, d_model)
+        self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
+        if tie_embeddings:
+            self.lmhead.weight = self.embed.weight
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -220,13 +219,13 @@ class TransformerLM(nn.Module):
 
 # スケールラダー。同じ TransformerLM 引数で pico〜3B を切り替えるためのプリセット。
 # 制約: d_model % n_heads == 0, n_heads % n_groups == 0。d_head は 64 か 128。
-# params は vocab=64k 込みの実測値（因子化埋め込み d_embed=128 のぶん約16Mを含む）。
+# params は vocab=64k・weight tying 込みの実測値（tied 埋め込み vocab×d_model を1枚共有）。
 MODEL_PRESETS: dict[str, dict] = {
-    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~41M
-    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~99M
-    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4),  # ~306M
-    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8),  # ~1.2B
-    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5),  # ~2.4B
+    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~57M
+    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~132M
+    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4),  # ~355M
+    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8),  # ~1.3B
+    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5),  # ~2.6B
 }
 
 
