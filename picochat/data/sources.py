@@ -42,6 +42,33 @@ PRESETS: dict[str, DatasetSpec] = {
     ),
     "wikipedia-en": DatasetSpec("wikimedia/wikipedia", "20231101.en"),
     "wikipedia-ja": DatasetSpec("wikimedia/wikipedia", "20231101.ja"),
+    "fineweb-ja": DatasetSpec("HuggingFaceFW/fineweb-2", "jpn_Jpan"),
+}
+
+
+@dataclass
+class Mixture:
+    """複数ソースを文字数バジェット比で混ぜたコーパス。
+
+    BPE は出現頻度ベースなので順番は問わない。weights は「読み出す文字数」の
+    配分で、語彙がどの言語にどれだけ割かれるかを実質的に決める（バイト均衡）。
+    """
+
+    specs: list[DatasetSpec]
+    weights: list[float]
+
+
+# トークナイザ学習用レシピ。日本語と英語を文字数でおよそ 50:50 に均す。
+RECIPES: dict[str, Mixture] = {
+    "ja-en": Mixture(
+        specs=[
+            PRESETS["wikipedia-ja"],
+            PRESETS["fineweb-ja"],
+            PRESETS["wikipedia-en"],
+            PRESETS["cosmopedia"],
+        ],
+        weights=[0.25, 0.25, 0.25, 0.25],  # JP 0.5 / EN 0.5
+    ),
 }
 
 
@@ -49,15 +76,36 @@ def iter_texts(
     spec: DatasetSpec,
     streaming: bool = True,
     limit: int | None = None,
+    max_chars: int | None = None,
 ) -> Iterator[str]:
-    """spec の指すデータセットから空でないテキストを1件ずつ yield する。"""
+    """spec の指すデータセットから空でないテキストを1件ずつ yield する。
+
+    max_chars を指定すると、累計文字数がそれに達した時点で打ち切る（バイト均衡用）。
+    """
     ds = load_dataset(spec.path, spec.name, split=spec.split, streaming=streaming)
     if limit is not None:
         ds = ds.take(limit) if streaming else ds.select(range(min(limit, len(ds))))
+    n_chars = 0
     for row in ds:
         text = spec.to_text(row)
         if text and text.strip():
             yield text
+            if max_chars is not None:
+                n_chars += len(text)
+                if n_chars >= max_chars:
+                    return
+
+
+def iter_mixture(
+    mix: Mixture,
+    total_chars: int,
+    streaming: bool = True,
+) -> Iterator[str]:
+    """Mixture の各ソースを weights 配分の文字数バジェットまで読んで連結する。"""
+    for spec, w in zip(mix.specs, mix.weights):
+        yield from iter_texts(
+            spec, streaming=streaming, max_chars=int(total_chars * w)
+        )
 
 
 def resolve_spec(preset: str | None, dataset: str | None) -> DatasetSpec:
