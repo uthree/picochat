@@ -1,8 +1,9 @@
-"""scripts/preprocess.py が生成した flat uint16 バイナリを読む Dataset。
+"""Dataset that reads the flat uint16 binary produced by scripts/preprocess.py.
 
-ファイルは padding なしで連結された連続トークン列。block_size+1 の窓でスライスして
-返すと、GPT._loss が内部で1つシフトして次トークン予測の損失を計算する
-（系列長 block_size+1 -> 実効コンテキスト block_size）。
+The file is a continuous token stream concatenated without padding. Slicing a
+block_size+1 window and returning it lets GPT._loss shift by one internally to
+compute the next-token prediction loss (sequence length block_size+1 ->
+effective context block_size).
 """
 
 import numpy as np
@@ -17,25 +18,28 @@ class PackedDataset(Dataset):
     def __init__(self, path: str, block_size: int = 1024, random: bool = True):
         """
         Args:
-            path: preprocess.py が出力した .bin ファイル
-            block_size: 実効コンテキスト長。各サンプルは block_size+1 トークン。
-            random: True ならランダムオフセット、False なら非重複の連続ブロック。
+            path: the .bin file produced by preprocess.py
+            block_size: effective context length. Each sample is block_size+1 tokens.
+            random: True for random offsets, False for non-overlapping contiguous
+                blocks.
         """
         self.path = path
         self.block_size = block_size
         self.random = random
-        # 長さだけ先に確定させる。memmap 本体は worker fork 後に開く（下記）。
+        # Determine the length up front. The memmap itself is opened after the
+        # worker fork (see below).
         n = np.memmap(path, dtype=DTYPE, mode="r").shape[0]
         self.n_tokens = int(n)
         self._data: np.memmap | None = None
         assert self.n_tokens > block_size, (
-            f"corpus ({self.n_tokens} tokens) が block_size+1 ({block_size + 1}) より短い"
+            f"corpus ({self.n_tokens} tokens) is shorter than "
+            f"block_size+1 ({block_size + 1})"
         )
 
     @property
     def data(self) -> np.memmap:
-        # DataLoader の worker プロセスごとに開き直す（memmap を __init__ で持つと
-        # fork 後にファイルディスクリプタを共有して壊れることがある）。
+        # Reopen per DataLoader worker process: holding the memmap from __init__
+        # can break because the file descriptor would be shared across the fork.
         if self._data is None:
             self._data = np.memmap(self.path, dtype=DTYPE, mode="r")
         return self._data

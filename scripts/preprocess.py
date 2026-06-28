@@ -1,8 +1,9 @@
-"""HF データセットをトークナイズし、packing 済みの flat uint16 バイナリに変換する。
+"""Tokenize an HF dataset and convert it into a packed, flat uint16 binary.
 
-各文書を encode し末尾に <eos> を付けて連結し、1本の連続したトークン列として
-.bin に書き出す。padding は一切入れず、学習側（PackedDataset）が読み出し時に
-block_size+1 の窓でスライスする。vocab_size <= 65535 なら uint16 で収まる。
+Each document is encoded, an <eos> is appended, and everything is concatenated
+into a single continuous token stream written to a .bin file. No padding is
+added; the training side (PackedDataset) slices a block_size+1 window at read
+time. uint16 is enough when vocab_size <= 65535.
 """
 
 import argparse
@@ -14,7 +15,7 @@ import numpy as np
 from picochat.data.sources import iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
-DTYPE = np.uint16  # vocab_size <= 65535 を前提
+DTYPE = np.uint16  # assumes vocab_size <= 65535
 EOS_TOKEN = "</s>"
 
 
@@ -24,24 +25,24 @@ def main():
         "-t", "--tokenizer", type=str, default="weights/tokenizer.json"
     )
     parser.add_argument(
-        "-o", "--output", type=str, required=True, help="出力 .bin パス"
+        "-o", "--output", type=str, required=True, help="output .bin path"
     )
     parser.add_argument("-p", "--preset", type=str, default=None)
     parser.add_argument("-d", "--dataset", type=str, default=None)
     parser.add_argument(
-        "-s", "--split", type=str, default=None, help="spec の split を上書き"
+        "-s", "--split", type=str, default=None, help="override the spec's split"
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--no-streaming", action="store_true")
     parser.add_argument(
-        "--log-every", type=int, default=10000, help="N 文書ごとに進捗を表示"
+        "--log-every", type=int, default=10000, help="report progress every N docs"
     )
     args = parser.parse_args()
 
     enc = load_tokenizer(args.tokenizer)
     eos_id = enc._special_tokens[EOS_TOKEN]
     assert enc.n_vocab <= np.iinfo(DTYPE).max + 1, (
-        f"vocab {enc.n_vocab} は {DTYPE} に収まらない"
+        f"vocab {enc.n_vocab} does not fit in {DTYPE}"
     )
 
     spec = resolve_spec(args.preset, args.dataset)

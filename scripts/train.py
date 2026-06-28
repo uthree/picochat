@@ -1,7 +1,8 @@
-"""preprocess.py が生成した .bin で TransformerLM を事前学習する。
+"""Pretrain a TransformerLM on the .bin produced by preprocess.py.
 
-学習ループ自体は書かず、GPT(LightningModule) を L.Trainer で回す。
-勾配クリップ・混合精度・勾配累積・チェックポイントは Trainer 側で設定する。
+We do not write a training loop ourselves; we run GPT(LightningModule) with an
+L.Trainer. Gradient clipping, mixed precision, gradient accumulation, and
+checkpointing are all configured on the Trainer side.
 """
 
 import argparse
@@ -25,9 +26,9 @@ def main():
     p.add_argument("--max-seq-len", type=int, default=4096)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=4)
-    # model: --size でスケールラダーのプリセットを選び、必要なら個別フラグで上書き
+    # model: pick a scale-ladder preset with --size, override individual fields if needed
     p.add_argument(
-        "--size", type=str, default="pico", help=f"スケール {list(MODEL_PRESETS)}"
+        "--size", type=str, default="pico", help=f"scale {list(MODEL_PRESETS)}"
     )
     p.add_argument("--d-model", type=int, default=None)
     p.add_argument("--n-heads", type=int, default=None)
@@ -73,8 +74,8 @@ def main():
         )
         monitor = "val_loss"
 
-    # モデルは各位置で block_size+1 トークンを処理するので max_seq_len で収まること。
-    assert args.block_size < args.max_seq_len, "block_size+1 <= max_seq_len が必要"
+    # The model processes block_size+1 tokens per position, so it must fit in max_seq_len.
+    assert args.block_size < args.max_seq_len, "block_size+1 <= max_seq_len required"
     overrides = {
         k: v
         for k, v in {

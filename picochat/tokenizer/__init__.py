@@ -6,7 +6,7 @@ from typing import Iterator
 import rustbpe
 import tiktoken
 
-# GPT-2 のパターンに「数字は1桁ずつ区切る」改変（\p{N}+ -> \p{N}）だけ加えたもの。
+# GPT-2's pattern with one change: split digits one at a time (\p{N}+ -> \p{N}).
 PATTERN = (
     r"'s|'t|'re|'ve|'m|'ll|'d"  # English contractions
     r"| ?\p{L}+"  # words (any script)

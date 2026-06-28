@@ -64,8 +64,9 @@ class SelfAttention(nn.Module):
         self.proj_k = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
         self.proj_v = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
         self.proj_o = nn.Linear(self.d_head * n_heads, d_model, bias=False)
-        # RoPE の sin/cos テーブルを最大系列長ぶん事前計算する。派生値なので
-        # state_dict には保存せず（persistent=False）、max_seq_len 変更にも追従する。
+        # Precompute the RoPE sin/cos tables up to max_seq_len. They are derived
+        # values, so keep them out of state_dict (persistent=False) so checkpoints
+        # stay small and a different max_seq_len does not clash on load.
         sin, cos = self._rope_tables(max_seq_len)
         self.register_buffer("sin", sin, persistent=False)
         self.register_buffer("cos", cos, persistent=False)
@@ -104,7 +105,8 @@ class SelfAttention(nn.Module):
         return y, cache
 
     def _rope_tables(self, max_seq_len: int) -> tuple[Tensor, Tensor]:
-        # 絶対位置 0..max_seq_len-1 に対する sin/cos を作る（offset はスライス側で扱う）。
+        # Build sin/cos for absolute positions 0..max_seq_len-1 (offset is handled
+        # later when slicing).
         t = torch.arange(max_seq_len)[:, None].float()
         f = (
             self.rope_base
@@ -116,7 +118,7 @@ class SelfAttention(nn.Module):
     def _rope(self, x, offset: int = 0) -> Tensor:
         seq_len = x.shape[-2]
         assert offset + seq_len <= self.max_seq_len, (
-            f"position {offset + seq_len} が max_seq_len={self.max_seq_len} を超えた"
+            f"position {offset + seq_len} exceeds max_seq_len={self.max_seq_len}"
         )
         with torch.amp.autocast(device_type="cuda", enabled=False):
             sin = self.sin[offset : offset + seq_len, :]
@@ -194,8 +196,9 @@ class TransformerLM(nn.Module):
         super().__init__()
         self.n_layers = n_layers
         self.init_std = init_std
-        # full 次元の埋め込み（出力ロジットをフルランクに保つ）。weight tying で
-        # 入力埋め込みと出力射影を共有し、パラメータを節約する（LLM の定石）。
+        # Full-dimension embedding (keeps the output logits full-rank). Weight tying
+        # shares the input embedding and output projection to save parameters
+        # (the standard choice for LLMs).
         self.embed = nn.Embedding(vocab_size, d_model)
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
         if tie_embeddings:
@@ -213,9 +216,10 @@ class TransformerLM(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        # GPT-2 流: 全重みを normal(0, init_std)・bias 0 で初期化し、残差パスに
-        # 書き込む射影（proj_o / proj_down）だけ 1/sqrt(2*n_layers) でスケールダウン。
-        # これで残差ストリームの分散が深さによらずほぼ一定に保たれる。
+        # GPT-2 style: init all weights with normal(0, init_std) and zero biases,
+        # then scale down only the projections that write into the residual path
+        # (proj_o / proj_down) by 1/sqrt(2*n_layers). This keeps the variance of the
+        # residual stream roughly constant regardless of depth.
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
@@ -239,9 +243,10 @@ class TransformerLM(nn.Module):
         return x, cache
 
 
-# スケールラダー。同じ TransformerLM 引数で pico〜3B を切り替えるためのプリセット。
-# 制約: d_model % n_heads == 0, n_heads % n_groups == 0。d_head は 64 か 128。
-# params は vocab=64k・weight tying 込みの実測値（tied 埋め込み vocab×d_model を1枚共有）。
+# Scale ladder. Presets to switch between pico..3B with the same TransformerLM args.
+# Constraints: d_model % n_heads == 0, n_heads % n_groups == 0. d_head is 64 or 128.
+# Param counts are measured with vocab=64k and weight tying (one shared
+# vocab x d_model embedding matrix).
 MODEL_PRESETS: dict[str, dict] = {
     "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~57M
     "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~132M
@@ -257,7 +262,8 @@ def build_lm(
     max_seq_len: int = 4096,
     **overrides,
 ) -> TransformerLM:
-    """プリセット名から TransformerLM を作る。overrides で個別に上書き可能。"""
+    """Build a TransformerLM from a preset name. Individual fields can be
+    overridden via overrides."""
     if size not in MODEL_PRESETS:
         raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
     cfg = {**MODEL_PRESETS[size], **overrides}
@@ -295,7 +301,8 @@ class GPT(L.LightningModule):
         return loss
 
     def _log(self, name: str, value: Tensor, **kwargs) -> None:
-        # Trainer に接続されているときだけ記録する（テストで step を直接呼ぶ場合は no-op）。
+        # Only log when attached to a Trainer (no-op when a step is called directly,
+        # e.g. in tests).
         if self._trainer is not None:
             self.log(name, value, prog_bar=True, **kwargs)
 
@@ -310,8 +317,8 @@ class GPT(L.LightningModule):
         return loss
 
     def _param_groups(self) -> list[dict]:
-        # weight decay は 2次元以上の重みにだけ掛ける。bias（1次元）と
-        # embedding は除外する（rms_norm は学習パラメータを持たないので対象外）。
+        # Apply weight decay only to weights with 2+ dims. Exclude biases (1-dim)
+        # and embeddings (rms_norm has no learnable params, so nothing to exclude there).
         embed_ids = {
             id(p)
             for m in self.model.modules()
@@ -332,7 +339,7 @@ class GPT(L.LightningModule):
         ]
 
     def _lr_lambda(self, step: int) -> float:
-        # 線形 warmup -> cosine decay（min_lr_ratio まで下げる）。
+        # Linear warmup -> cosine decay (down to min_lr_ratio).
         if step < self.warmup_steps:
             return (step + 1) / max(1, self.warmup_steps)
         if self.max_steps is None or step >= self.max_steps:
@@ -348,7 +355,7 @@ class GPT(L.LightningModule):
             self._param_groups(), lr=self.lr, betas=self.betas
         )
         if self.max_steps is None:
-            # 学習ホライズンが不明なときはスケジューラ無し（optimizer のみ）。
+            # No schedule when the training horizon is unknown (optimizer only).
             return optimizer
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self._lr_lambda)
         return {

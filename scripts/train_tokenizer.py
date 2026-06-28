@@ -26,34 +26,38 @@ def main():
         "--recipe",
         type=str,
         default=None,
-        help=f"複数ソースを混ぜたレシピ名 {list(RECIPES)}",
+        help=f"name of a multi-source mixing recipe {list(RECIPES)}",
     )
     parser.add_argument(
         "--total-chars",
         type=int,
         default=500_000_000,
-        help="レシピ使用時に読み出す総文字数（言語間でバイト均衡）",
+        help="total characters to read when using a recipe (byte-balanced across languages)",
     )
     parser.add_argument(
-        "-p", "--preset", type=str, default=None, help="picochat.data.sources のプリセット名"
+        "-p",
+        "--preset",
+        type=str,
+        default=None,
+        help="preset name from picochat.data.sources",
     )
     parser.add_argument(
         "-d",
         "--dataset",
         type=str,
         default=None,
-        help='"path[:name[:split[:text_key]]]" 形式の HF データセット指定',
+        help='HF dataset in "path[:name[:split[:text_key]]]" form',
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="学習に使う先頭テキスト件数（動作確認用）",
+        help="number of leading texts to train on (for sanity checks)",
     )
     parser.add_argument(
         "--no-streaming",
         action="store_true",
-        help="streaming を無効化（全件ダウンロードしてから処理）",
+        help="disable streaming (download everything before processing)",
     )
     args = parser.parse_args()
 

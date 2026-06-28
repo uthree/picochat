@@ -330,7 +330,7 @@ def test_gpt_validation_step_returns_scalar(gpt_module):
 
 
 def test_gpt_configure_optimizers(gpt_module):
-    # max_steps が無いときは optimizer だけ（スケジューラ無し）を返す。
+    # without max_steps it returns just the optimizer (no scheduler)
     opt = gpt_module.configure_optimizers()
     assert isinstance(opt, torch.optim.AdamW)
     # optimizer must cover the model parameters
@@ -344,7 +344,7 @@ def test_gpt_weight_decay_excludes_bias_and_embedding(gpt_module):
     decay_group, no_decay_group = opt.param_groups
     assert decay_group["weight_decay"] > 0
     assert no_decay_group["weight_decay"] == 0.0
-    # embedding と bias（1次元）は weight decay 対象から除外される。
+    # embeddings and biases (1-dim) are excluded from weight decay
     embed_weight = gpt_module.model.embed.weight
     no_decay_ids = {id(p) for p in no_decay_group["params"]}
     assert id(embed_weight) in no_decay_ids
@@ -360,7 +360,7 @@ def test_gpt_configure_optimizers_with_schedule():
     config = gpt.configure_optimizers()
     assert isinstance(config["optimizer"], torch.optim.AdamW)
     assert config["lr_scheduler"]["interval"] == "step"
-    # warmup: step 0 はほぼ 0、warmup 終端で 1.0、その後 cosine で min_lr_ratio へ。
+    # warmup: ~0 at step 0, 1.0 at the end of warmup, then cosine down to min_lr_ratio
     assert gpt._lr_lambda(0) < gpt._lr_lambda(5)
     assert gpt._lr_lambda(9) == pytest.approx(1.0)
     assert gpt._lr_lambda(100) == pytest.approx(0.1)
@@ -375,9 +375,9 @@ def test_gpt_loss_backward_reaches_embedding(gpt_module):
 
 def test_embeddings_tied_by_default():
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
-    # 入力埋め込みと出力射影が同一テンソル（weight tying）
+    # input embedding and output projection are the same tensor (weight tying)
     assert lm.lmhead.weight is lm.embed.weight
-    # full 次元（分解なし）でロジットがフルランク
+    # full dimension (no factorization), so the logits are full-rank
     assert lm.lmhead.weight.shape == (40, 32)
 
 
@@ -491,18 +491,18 @@ def test_init_std_and_residual_scaling():
     lm = TransformerLM(vocab_size=200, d_model=128, n_heads=4, n_layers=8)
     attn = lm.transformer.attn[0]
     ffn = lm.transformer.ffn[0]
-    # 通常の Linear は std ~= init_std(0.02)
+    # ordinary Linear layers have std ~= init_std (0.02)
     assert attn.proj_q.weight.std().item() == pytest.approx(0.02, rel=0.15)
-    # 残差射影は 0.02 / sqrt(2*n_layers)
+    # residual projections use 0.02 / sqrt(2*n_layers)
     scaled = 0.02 / (2 * 8) ** 0.5
     assert attn.proj_o.weight.std().item() == pytest.approx(scaled, rel=0.2)
     assert ffn.proj_down.weight.std().item() == pytest.approx(scaled, rel=0.2)
-    # bias は 0 初期化
+    # biases are initialized to 0
     assert torch.all(ffn.proj_up.bias == 0)
 
 
 def test_init_gives_near_uniform_loss():
-    # 小さい初期化 -> ロジットがほぼ 0 -> ほぼ一様分布 -> loss ~= ln(vocab)
+    # small init -> logits near 0 -> near-uniform distribution -> loss ~= ln(vocab)
     import math
 
     lm = TransformerLM(vocab_size=200, d_model=64, n_heads=4, n_layers=4)

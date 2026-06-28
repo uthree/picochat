@@ -1,10 +1,11 @@
-"""HuggingFace のテキストデータセットを共通の文字列イテレータに変換する。
+"""Turn HuggingFace text datasets into a common iterator of strings.
 
-トークナイザ学習（scripts/train_tokenizer.py）と前処理（scripts/preprocess.py）の
-両方が「データセットからテキストを1件ずつ流す」処理を必要とするので、ここに集約する。
+Both tokenizer training (scripts/train_tokenizer.py) and preprocessing
+(scripts/preprocess.py) need to stream text from a dataset one item at a time,
+so that logic is centralized here.
 
-streaming=True なら巨大なデータセットでもシャードを遅延ダウンロードするため、
-limit を併用すれば先頭 N 件だけで動作確認できる。
+With streaming=True even huge datasets download shards lazily, so combining it
+with `limit` lets you do a quick sanity check on just the first N items.
 """
 
 from dataclasses import dataclass, field
@@ -15,11 +16,11 @@ from datasets import load_dataset
 
 @dataclass
 class DatasetSpec:
-    path: str  # HF Hub のリポジトリ ID 例: "roneneldan/TinyStories"
-    name: str | None = None  # config / subset 名 例: "20231101.en"
+    path: str  # HF Hub repo id, e.g. "roneneldan/TinyStories"
+    name: str | None = None  # config / subset name, e.g. "20231101.en"
     split: str = "train"
-    text_key: str = "text"  # テキストが入っているカラム名
-    # 複数カラムを1つのテキストに整形したい場合（例: GSM8K の question + answer）
+    text_key: str = "text"  # column that holds the text
+    # Use this to format several columns into one text (e.g. GSM8K question + answer).
     format: Callable[[dict], str] | None = field(default=None, repr=False)
 
     def to_text(self, row: dict) -> str:
@@ -28,12 +29,12 @@ class DatasetSpec:
         return row[self.text_key]
 
 
-# よく使うデータセットのプリセット。--preset で参照する。
+# Presets for commonly used datasets, referenced via --preset.
 PRESETS: dict[str, DatasetSpec] = {
-    # 動作確認用（小さい順）
+    # For sanity checks (smallest first)
     "wikitext": DatasetSpec("Salesforce/wikitext", "wikitext-2-raw-v1"),  # ~4MB
     "tinystories": DatasetSpec("roneneldan/TinyStories"),  # ~2GB
-    # 本番候補
+    # Production candidates
     "cosmopedia": DatasetSpec("HuggingFaceTB/cosmopedia", "web_samples_v2"),
     "gsm8k": DatasetSpec(
         "openai/gsm8k",
@@ -48,17 +49,19 @@ PRESETS: dict[str, DatasetSpec] = {
 
 @dataclass
 class Mixture:
-    """複数ソースを文字数バジェット比で混ぜたコーパス。
+    """A corpus that mixes several sources by a character-count budget.
 
-    BPE は出現頻度ベースなので順番は問わない。weights は「読み出す文字数」の
-    配分で、語彙がどの言語にどれだけ割かれるかを実質的に決める（バイト均衡）。
+    BPE is frequency-based, so ordering does not matter. `weights` allocates the
+    number of characters read from each source, which effectively determines how
+    much of the vocabulary each language gets (byte balancing).
     """
 
     specs: list[DatasetSpec]
     weights: list[float]
 
 
-# トークナイザ学習用レシピ。日本語と英語を文字数でおよそ 50:50 に均す。
+# Recipes for tokenizer training. Balance Japanese and English to roughly 50:50
+# by character count.
 RECIPES: dict[str, Mixture] = {
     "ja-en": Mixture(
         specs=[
@@ -78,9 +81,10 @@ def iter_texts(
     limit: int | None = None,
     max_chars: int | None = None,
 ) -> Iterator[str]:
-    """spec の指すデータセットから空でないテキストを1件ずつ yield する。
+    """Yield non-empty texts one at a time from the dataset described by `spec`.
 
-    max_chars を指定すると、累計文字数がそれに達した時点で打ち切る（バイト均衡用）。
+    When max_chars is set, stop once the cumulative character count reaches it
+    (used for byte balancing).
     """
     ds = load_dataset(spec.path, spec.name, split=spec.split, streaming=streaming)
     if limit is not None:
@@ -101,7 +105,8 @@ def iter_mixture(
     total_chars: int,
     streaming: bool = True,
 ) -> Iterator[str]:
-    """Mixture の各ソースを weights 配分の文字数バジェットまで読んで連結する。"""
+    """Read each source of the Mixture up to its weighted character budget and
+    concatenate them."""
     for spec, w in zip(mix.specs, mix.weights):
         yield from iter_texts(
             spec, streaming=streaming, max_chars=int(total_chars * w)
@@ -109,9 +114,9 @@ def iter_mixture(
 
 
 def resolve_spec(preset: str | None, dataset: str | None) -> DatasetSpec:
-    """CLI 引数から DatasetSpec を解決する。
+    """Resolve a DatasetSpec from CLI arguments.
 
-    --preset <name> か、--dataset "path[:name[:split[:text_key]]]" のいずれか。
+    Either --preset <name> or --dataset "path[:name[:split[:text_key]]]".
     """
     if preset is not None:
         if preset not in PRESETS:
