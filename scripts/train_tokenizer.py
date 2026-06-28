@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--vocab-size", type=int, default=32000)
     parser.add_argument("-o", "--output", type=str, default="weights/tokenizer.json")
-    # TODO: load dataset and train tokenizer
+    args = parser.parse_args()
 
 
 if __name__ == "__main__":
