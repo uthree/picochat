@@ -11,30 +11,30 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage1
-init_from: null  # first stage trains from scratch
+init_from: null # first stage trains from scratch
 
 model:
-  size: pico
-  max_seq_len: 4096
+    size: pico
+    max_seq_len: 4096
 
 data:
-  block_size: 1024
-  train_bin:
-    - data/tinystories.bin
-    - data/children-stories.bin
-    - data/gsm8k.bin
-  val_bin: null
+    block_size: 1024
+    train_bin:
+        - data/tinystories.bin
+        - data/children-stories.bin
+        - data/gsm8k.bin
+    val_bin: null
 
 optim:
-  lr: 3.0e-4
-  weight_decay: 0.1
-  warmup_steps: 2000
-  max_steps: 20000
+    lr: 3.0e-4
+    weight_decay: 0.1
+    warmup_steps: 2000
+    max_steps: 20000
 
 trainer:
-  batch_size: 16
-  accumulate: 4
-  grad_clip: 1.0
-  precision: bf16-mixed
-  num_workers: 4
-  val_check_interval: 1000
+    batch_size: 16
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 4
+    val_check_interval: 1000
