@@ -1,0 +1,47 @@
+# Curriculum stage 2 / 3: educational / textbook (Phi-style high pedagogical value).
+# Warm-starts from stage 1's checkpoint (continual learning): weights are loaded,
+# the optimizer and LR schedule restart for this stage. Japanese starts
+# contributing here via fineweb-edu-ja.
+#
+# Preprocess the bins first, e.g.:
+#   python scripts/preprocess.py -p tiny-textbooks       -o data/tiny-textbooks.bin
+#   python scripts/preprocess.py -p tiny-orca-textbooks  -o data/tiny-orca-textbooks.bin
+#   python scripts/preprocess.py -p textbooks            -o data/textbooks.bin
+#   python scripts/preprocess.py -p cosmopedia           -o data/cosmopedia.bin
+#   python scripts/preprocess.py -p fineweb-edu          -o data/fineweb-edu.bin
+#   python scripts/preprocess.py -p fineweb-edu-ja       -o data/fineweb-edu-ja.bin
+#
+# Then: python scripts/train.py --config configs/stage2_educational.yml
+
+tokenizer: weights/tokenizer.json
+output_dir: weights/stage2
+init_from: weights/stage1/last.ckpt
+
+model:
+  size: pico
+  max_seq_len: 4096
+
+data:
+  block_size: 1024
+  train_bin:
+    - data/tiny-textbooks.bin
+    - data/tiny-orca-textbooks.bin
+    - data/textbooks.bin
+    - data/cosmopedia.bin
+    - data/fineweb-edu.bin
+    - data/fineweb-edu-ja.bin
+  val_bin: null
+
+optim:
+  lr: 2.0e-4  # slightly lower than stage 1 (continual learning)
+  weight_decay: 0.1
+  warmup_steps: 1000
+  max_steps: 40000
+
+trainer:
+  batch_size: 16
+  accumulate: 4
+  grad_clip: 1.0
+  precision: bf16-mixed
+  num_workers: 4
+  val_check_interval: 1000

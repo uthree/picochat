@@ -1,0 +1,39 @@
+# Curriculum stage 3 / 3: general knowledge / broad web (most diverse, least filtered).
+# Warm-starts from stage 2's checkpoint.
+#
+# Preprocess the bins first, e.g.:
+#   python scripts/preprocess.py -p wikipedia-en  -o data/wikipedia-en.bin
+#   python scripts/preprocess.py -p wikipedia-ja  -o data/wikipedia-ja.bin
+#   python scripts/preprocess.py -p fineweb-ja    -o data/fineweb-ja.bin
+#
+# Then: python scripts/train.py --config configs/stage3_general.yml
+
+tokenizer: weights/tokenizer.json
+output_dir: weights/stage3
+init_from: weights/stage2/last.ckpt
+
+model:
+  size: pico
+  max_seq_len: 4096
+
+data:
+  block_size: 1024
+  train_bin:
+    - data/wikipedia-en.bin
+    - data/wikipedia-ja.bin
+    - data/fineweb-ja.bin
+  val_bin: null
+
+optim:
+  lr: 1.5e-4  # lower again for the final stage
+  weight_decay: 0.1
+  warmup_steps: 1000
+  max_steps: 60000
+
+trainer:
+  batch_size: 16
+  accumulate: 4
+  grad_clip: 1.0
+  precision: bf16-mixed
+  num_workers: 4
+  val_check_interval: 1000

@@ -1,130 +1,140 @@
-"""Pretrain a TransformerLM on the .bin produced by preprocess.py.
+"""Train one stage from a YAML recipe.
 
-We do not write a training loop ourselves; we run GPT(LightningModule) with an
-L.Trainer. Gradient clipping, mixed precision, gradient accumulation, and
-checkpointing are all configured on the Trainer side.
+A stage = one training run defined entirely by a config file (model size, data
+bins, optimizer, trainer). We do NOT orchestrate multiple stages here; to run a
+curriculum, train one stage, then point the next stage's config at the produced
+checkpoint via `init_from` to warm-start (continual learning) with a fresh
+optimizer and LR schedule.
+
+    python scripts/train.py --config configs/stage1_basic.yml
+
+The model architecture must stay the same across stages that chain via
+`init_from` (only the data / schedule change).
 """
 
 import argparse
+from pathlib import Path
 
 import lightning as L
+import torch
+import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from picochat.data.pretrain import PackedDataset
-from picochat.model.gpt import GPT, MODEL_PRESETS, build_lm
+from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
+
+# Fields under `model:` that override the scale-ladder preset.
+MODEL_OVERRIDES = ("d_model", "n_kv_heads", "d_head", "n_layers", "tie_embeddings")
+
+
+def make_dataset(bins, block_size: int, random: bool):
+    """Build a (Concat)PackedDataset from a single path or a list of paths."""
+    if isinstance(bins, str):
+        bins = [bins]
+    parts = [PackedDataset(b, block_size=block_size, random=random) for b in bins]
+    return parts[0] if len(parts) == 1 else ConcatDataset(parts)
 
 
 def main():
     p = argparse.ArgumentParser()
-    # data
-    p.add_argument("--train-bin", type=str, required=True)
-    p.add_argument("--val-bin", type=str, default=None)
-    p.add_argument("--tokenizer", type=str, default="weights/tokenizer.json")
-    p.add_argument("--block-size", type=int, default=1024)
-    p.add_argument("--max-seq-len", type=int, default=4096)
-    p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--num-workers", type=int, default=4)
-    # model: pick a scale-ladder preset with --size, override individual fields if needed
+    p.add_argument("--config", type=str, required=True, help="stage recipe (YAML)")
     p.add_argument(
-        "--size", type=str, default="pico", help=f"scale {list(MODEL_PRESETS)}"
-    )
-    p.add_argument("--d-model", type=int, default=None)
-    p.add_argument("--n-kv-heads", type=int, default=None)
-    p.add_argument("--n-layers", type=int, default=None)
-    p.add_argument("--d-head", type=int, default=None)
-    p.add_argument(
-        "--tie-embeddings",
-        action=argparse.BooleanOptionalAction,
+        "--init-from",
+        type=str,
         default=None,
-        help="tie input/output embeddings (default: per-preset)",
+        help="checkpoint to warm-start from (overrides config's init_from)",
     )
-    # optim / trainer
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--weight-decay", type=float, default=0.1)
-    p.add_argument("--warmup-steps", type=int, default=2000)
-    p.add_argument("--max-steps", type=int, default=10000)
-    p.add_argument("--accumulate", type=int, default=1)
-    p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--precision", type=str, default="bf16-mixed")
-    p.add_argument("--val-check-interval", type=int, default=500)
-    p.add_argument("--ckpt-dir", type=str, default="weights")
     p.add_argument("--accelerator", type=str, default="auto")
     args = p.parse_args()
 
-    vocab_size = load_tokenizer(args.tokenizer).n_vocab
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
 
-    train_ds = PackedDataset(args.train_bin, block_size=args.block_size, random=True)
+    model_cfg = dict(cfg.get("model", {}))
+    data_cfg = cfg.get("data", {})
+    optim_cfg = cfg.get("optim", {})
+    trainer_cfg = cfg.get("trainer", {})
+    tokenizer_path = cfg.get("tokenizer", "weights/tokenizer.json")
+    output_dir = cfg.get("output_dir", "weights")
+    init_from = args.init_from or cfg.get("init_from")
+
+    vocab_size = load_tokenizer(tokenizer_path).n_vocab
+
+    # --- data ---
+    block_size = data_cfg.get("block_size", 1024)
+    max_seq_len = model_cfg.pop("max_seq_len", 4096)
+    assert block_size < max_seq_len, "block_size+1 <= max_seq_len required"
+    batch_size = trainer_cfg.get("batch_size", 16)
+    num_workers = trainer_cfg.get("num_workers", 4)
+
+    train_ds = make_dataset(data_cfg["train_bin"], block_size, random=True)
     train_dl = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
-        persistent_workers=args.num_workers > 0,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
         pin_memory=True,
         drop_last=True,
     )
 
     val_dl = None
     monitor = None
-    if args.val_bin is not None:
-        val_ds = PackedDataset(args.val_bin, block_size=args.block_size, random=False)
+    if data_cfg.get("val_bin"):
+        val_ds = make_dataset(data_cfg["val_bin"], block_size, random=False)
         val_dl = DataLoader(
             val_ds,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            persistent_workers=args.num_workers > 0,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
             pin_memory=True,
         )
         monitor = "val_loss"
 
-    # The model processes block_size+1 tokens per position, so it must fit in max_seq_len.
-    assert args.block_size < args.max_seq_len, "block_size+1 <= max_seq_len required"
-    overrides = {
-        k: v
-        for k, v in {
-            "d_model": args.d_model,
-            "n_kv_heads": args.n_kv_heads,
-            "n_layers": args.n_layers,
-            "d_head": args.d_head,
-            "tie_embeddings": args.tie_embeddings,
-        }.items()
-        if v is not None
-    }
-    lm = build_lm(
-        args.size,
-        vocab_size=vocab_size,
-        max_seq_len=args.max_seq_len,
-        **overrides,
-    )
+    # --- model ---
+    size = model_cfg.pop("size", "pico")
+    overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
+    lm = build_lm(size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
+
+    max_steps = optim_cfg.get("max_steps", 10000)
     gpt = GPT(
         lm,
         pad_idx=0,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        warmup_steps=args.warmup_steps,
-        max_steps=args.max_steps,
+        lr=optim_cfg.get("lr", 3e-4),
+        weight_decay=optim_cfg.get("weight_decay", 0.1),
+        warmup_steps=optim_cfg.get("warmup_steps", 2000),
+        max_steps=max_steps,
     )
 
-    ckpt = ModelCheckpoint(
-        dirpath=args.ckpt_dir,
+    # --- continual learning: warm-start weights from a previous stage ---
+    if init_from:
+        ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
+        state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+        gpt.load_state_dict(state)
+        print(f"warm-started weights from {init_from}", flush=True)
+
+    val_check_interval = trainer_cfg.get("val_check_interval", 500)
+    ckpt_cb = ModelCheckpoint(
+        dirpath=output_dir,
         filename="picochat-{step}",
         monitor=monitor,
         save_last=True,
         save_top_k=3 if monitor else 1,
-        every_n_train_steps=args.val_check_interval if monitor is None else None,
+        every_n_train_steps=val_check_interval if monitor is None else None,
     )
 
     trainer = L.Trainer(
         accelerator=args.accelerator,
-        max_steps=args.max_steps,
-        precision=args.precision,
-        gradient_clip_val=args.grad_clip,
-        accumulate_grad_batches=args.accumulate,
-        val_check_interval=args.val_check_interval if val_dl is not None else 1.0,
-        callbacks=[ckpt],
+        max_steps=max_steps,
+        precision=trainer_cfg.get("precision", "bf16-mixed"),
+        gradient_clip_val=trainer_cfg.get("grad_clip", 1.0),
+        accumulate_grad_batches=trainer_cfg.get("accumulate", 1),
+        val_check_interval=val_check_interval if val_dl is not None else 1.0,
+        callbacks=[ckpt_cb],
     )
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     trainer.fit(gpt, train_dl, val_dl)
 
 

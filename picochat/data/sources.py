@@ -98,35 +98,6 @@ RECIPES: dict[str, Mixture] = {
 }
 
 
-# Curriculum stages for pretraining, ordered easy -> advanced. The idea (Phi /
-# curriculum-learning style) is to teach fundamentals first: early stages use
-# simple, basic text (elementary/middle-school level), later stages add textbook
-# and broad web knowledge. Preprocess each stage to its own .bin and feed them to
-# training in this order.
-#
-# Note: easy Japanese text is scarce on the Hub. The "basic" stage is mostly
-# English (TinyStories / children's stories have no JP equivalent); Japanese
-# starts contributing from the "educational" stage via fineweb-edu-ja.
-CURRICULUM: list[tuple[str, list[str]]] = [
-    # 1. Simplest: tiny-vocabulary stories + grade-school math.
-    ("basic", ["tinystories", "children-stories", "gsm8k"]),
-    # 2. Educational: textbook-like synthetic data + edu-filtered web (JP+EN).
-    (
-        "educational",
-        [
-            "tiny-textbooks",
-            "tiny-orca-textbooks",
-            "textbooks",
-            "cosmopedia",
-            "fineweb-edu",
-            "fineweb-edu-ja",
-        ],
-    ),
-    # 3. General knowledge / broad web (most diverse, least filtered).
-    ("general", ["wikipedia-en", "wikipedia-ja", "fineweb-ja"]),
-]
-
-
 def iter_texts(
     spec: DatasetSpec,
     streaming: bool = True,
