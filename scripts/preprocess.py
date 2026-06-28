@@ -1,9 +1,9 @@
-"""Tokenize an HF dataset and convert it into a packed, flat uint16 binary.
+"""Tokenize an HF dataset and convert it into a packed, flat token binary.
 
 Each document is encoded, an <eos> is appended, and everything is concatenated
 into a single continuous token stream written to a .bin file. No padding is
 added; the training side (PackedDataset) slices a block_size+1 window at read
-time. uint16 is enough when vocab_size <= 65535.
+time. Tokens are stored as uint32 (DTYPE), which fits vocab up to ~4.29B.
 """
 
 import argparse
@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
+from picochat.data.pretrain import DTYPE  # uint32; shared with the reader
 from picochat.data.sources import iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
-DTYPE = np.uint16  # assumes vocab_size <= 65535
 EOS_TOKEN = "</s>"
 
 

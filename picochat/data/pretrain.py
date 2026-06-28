@@ -1,4 +1,4 @@
-"""Dataset that reads the flat uint16 binary produced by scripts/preprocess.py.
+"""Dataset that reads the flat token binary produced by scripts/preprocess.py.
 
 The file is a continuous token stream concatenated without padding. Slicing a
 block_size+1 window and returning it lets GPT._loss shift by one internally to
@@ -11,7 +11,9 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-DTYPE = np.uint16
+# 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
+# Writer (scripts/preprocess.py) imports this so the two never diverge.
+DTYPE = np.uint32
 
 
 class PackedDataset(Dataset):
