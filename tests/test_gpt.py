@@ -86,43 +86,60 @@ def test_swiglu_eval_is_deterministic():
 # SelfAttention
 # ---------------------------------------------------------------------------
 def test_attention_output_shape():
-    attn = SelfAttention(32, 4)
+    attn = SelfAttention(32, d_head=8)
     x = torch.randn(2, 6, 32)
     y = attn(x)
     assert y.shape == x.shape
 
 
 def test_attention_cache_shape():
-    attn = SelfAttention(32, 4)
+    attn = SelfAttention(32, d_head=8)
     x = torch.randn(2, 6, 32)
     _, cache = attn.decode(x)
-    # cache stacks [key, value]; each has n_groups heads and seq-len 6
-    assert cache.shape == (2, 2, attn.n_groups, 6, attn.d_head)
+    # cache stacks [key, value]; each has n_kv_heads heads and seq-len 6
+    assert cache.shape == (2, 2, attn.n_kv_heads, 6, attn.d_head)
 
 
 def test_attention_grouped_query_dims():
-    attn = SelfAttention(32, 8, n_groups=2)
-    assert attn.n_groups == 2
-    assert attn.proj_q.out_features == 32  # 8 heads
-    assert attn.proj_k.out_features == attn.d_head * 2  # 2 groups
-    assert attn.proj_v.out_features == attn.d_head * 2
+    # d_model=32, d_head=4 -> 8 query heads; 2 KV heads.
+    attn = SelfAttention(32, n_kv_heads=2, d_head=4)
+    assert attn.n_query_heads == 8  # d_model // d_head
+    assert attn.n_kv_heads == 2
+    assert attn.proj_q.out_features == 4 * 8  # d_head * n_query_heads == d_model
+    assert attn.proj_k.out_features == 4 * 2  # d_head * n_kv_heads
+    assert attn.proj_v.out_features == 4 * 2
+    assert attn.proj_o.in_features == 4 * 8
     y = attn(torch.randn(2, 4, 32))
     assert y.shape == (2, 4, 32)
 
 
-def test_attention_invalid_head_division():
+def test_query_heads_derived_from_d_head():
+    # query-head count is d_model // d_head; proj_q stays square.
+    attn = SelfAttention(64, d_head=16)
+    assert attn.n_query_heads == 4
+    assert attn.n_kv_heads == 4  # defaults to MHA
+    assert attn.proj_q.out_features == 64  # square
+
+
+def test_attention_invalid_d_head_indivisible():
     with pytest.raises(AssertionError):
-        SelfAttention(30, 4)  # 30 not divisible by 4
+        SelfAttention(32, d_head=64)  # 32 not divisible by 64
+
+
+def test_attention_invalid_d_head_odd():
+    with pytest.raises(AssertionError):
+        SelfAttention(30, d_head=15)  # divides d_model but RoPE needs even d_head
 
 
 def test_attention_invalid_group_division():
+    # d_model=32, d_head=8 -> 4 query heads; 3 KV heads does not divide 4.
     with pytest.raises(AssertionError):
-        SelfAttention(32, 8, n_groups=3)  # 8 not divisible by 3
+        SelfAttention(32, n_kv_heads=3, d_head=8)
 
 
 def test_attention_causal_prefix_invariance():
     # causal attention: earlier outputs must not depend on later tokens
-    attn = SelfAttention(32, 4).eval()
+    attn = SelfAttention(32, d_head=8).eval()
     x = torch.randn(1, 6, 32)
     full = attn(x)
     prefix = attn(x[:, :3])
@@ -130,7 +147,7 @@ def test_attention_causal_prefix_invariance():
 
 
 def test_attention_cache_matches_full_forward():
-    attn = SelfAttention(32, 4).eval()
+    attn = SelfAttention(32, d_head=8).eval()
     x = torch.randn(1, 5, 32)
     full = attn(x)
 
@@ -141,14 +158,14 @@ def test_attention_cache_matches_full_forward():
 
 
 def test_attention_cache_grows():
-    attn = SelfAttention(32, 4).eval()
+    attn = SelfAttention(32, d_head=8).eval()
     _, cache = attn.decode(torch.randn(1, 4, 32))
     _, cache2 = attn.decode(torch.randn(1, 1, 32), cache=cache)
     assert cache2.shape[-2] == 5
 
 
 def test_attention_backward():
-    attn = SelfAttention(32, 4)
+    attn = SelfAttention(32, d_head=8)
     x = torch.randn(2, 5, 32, requires_grad=True)
     y = attn(x)
     y.sum().backward()
@@ -159,7 +176,7 @@ def test_attention_backward():
 # Transformer
 # ---------------------------------------------------------------------------
 def test_transformer_output_shape():
-    model = Transformer(d_model=32, n_heads=4, n_layers=3)
+    model = Transformer(d_model=32, d_head=8, n_layers=3)
     x = torch.randn(2, 7, 32)
     out = model(x)
     assert out.shape == x.shape
@@ -167,7 +184,7 @@ def test_transformer_output_shape():
 
 def test_transformer_cache_per_layer():
     n_layers = 3
-    model = Transformer(d_model=32, n_heads=4, n_layers=n_layers)
+    model = Transformer(d_model=32, d_head=8, n_layers=n_layers)
     out, cache = model.decode(torch.randn(2, 7, 32))
     assert len(cache) == n_layers
     assert all(c is not None for c in cache)
@@ -175,7 +192,7 @@ def test_transformer_cache_per_layer():
 
 def test_transformer_incremental_matches_full():
     torch.manual_seed(0)
-    model = Transformer(d_model=32, n_heads=4, n_layers=2).eval()
+    model = Transformer(d_model=32, d_head=8, n_layers=2).eval()
     x = torch.randn(1, 5, 32)
     full = model(x)
 
@@ -185,14 +202,14 @@ def test_transformer_incremental_matches_full():
 
 
 def test_transformer_grouped_query():
-    model = Transformer(d_model=32, n_heads=8, n_layers=2, n_groups=2)
+    model = Transformer(d_model=32, n_layers=2, n_kv_heads=2, d_head=4)
     out, cache = model.decode(torch.randn(2, 4, 32))
     assert out.shape == (2, 4, 32)
-    assert cache[0].shape[2] == 2  # n_groups heads cached
+    assert cache[0].shape[2] == 2  # n_kv_heads heads cached
 
 
 def test_transformer_backward():
-    model = Transformer(d_model=32, n_heads=4, n_layers=2)
+    model = Transformer(d_model=32, d_head=8, n_layers=2)
     x = torch.randn(2, 5, 32, requires_grad=True)
     out = model(x)
     out.sum().backward()
@@ -204,7 +221,7 @@ def test_transformer_backward():
 # ---------------------------------------------------------------------------
 def test_transformer_lm_logits_shape():
     vocab_size = 40
-    lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2)
+    lm = TransformerLM(vocab_size=vocab_size, d_model=32, d_head=8, n_layers=2)
     tokens = torch.randint(0, vocab_size, (2, 5))
     logits = lm(tokens)
     assert logits.shape == (2, 5, vocab_size)
@@ -212,7 +229,7 @@ def test_transformer_lm_logits_shape():
 
 def test_transformer_lm_incremental_matches_full():
     vocab_size = 40
-    lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2).eval()
+    lm = TransformerLM(vocab_size=vocab_size, d_model=32, d_head=8, n_layers=2).eval()
     tokens = torch.randint(0, vocab_size, (1, 5))
     full = lm(tokens)
 
@@ -237,7 +254,7 @@ class _RandomTokenDataset(Dataset):
 
 @pytest.fixture
 def gpt_module():
-    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    lm = TransformerLM(vocab_size=40, d_model=32, d_head=8, n_layers=2)
     return GPT(lm, pad_idx=0)
 
 
@@ -287,7 +304,7 @@ def test_gpt_weight_decay_excludes_bias_and_embedding(gpt_module):
 
 
 def test_gpt_configure_optimizers_with_schedule():
-    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    lm = TransformerLM(vocab_size=40, d_model=32, d_head=8, n_layers=2)
     gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, min_lr_ratio=0.1)
     config = gpt.configure_optimizers()
     assert isinstance(config["optimizer"], torch.optim.AdamW)
@@ -307,13 +324,13 @@ def test_gpt_loss_backward_reaches_embedding(gpt_module):
 
 def test_embeddings_untied_when_disabled():
     lm = TransformerLM(
-        vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=False
+        vocab_size=40, d_model=32, d_head=8, n_layers=2, tie_embeddings=False
     )
     assert lm.lmhead.weight is not lm.embed.weight
 
 
 def test_embeddings_tied_by_default():
-    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    lm = TransformerLM(vocab_size=40, d_model=32, d_head=8, n_layers=2)
     assert lm.lmhead.weight is lm.embed.weight
 
 
@@ -360,7 +377,7 @@ def test_gpt_overfits_single_batch(gpt_module):
 # RoPE max_seq_len (decoupled from rope_base)
 # ---------------------------------------------------------------------------
 def test_rope_table_sized_by_max_seq_len():
-    attn = SelfAttention(32, 4, max_seq_len=128)
+    attn = SelfAttention(32, d_head=8, max_seq_len=128)
     # table length is max_seq_len, not rope_base (10000)
     assert attn.sin.shape[0] == 128
     assert attn.cos.shape[0] == 128
@@ -368,20 +385,20 @@ def test_rope_table_sized_by_max_seq_len():
 
 def test_rope_tables_not_in_state_dict():
     # derived buffers must not bloat checkpoints / break loading on resize
-    keys = SelfAttention(32, 4, max_seq_len=128).state_dict().keys()
+    keys = SelfAttention(32, d_head=8, max_seq_len=128).state_dict().keys()
     assert not any(k.endswith("sin") or k.endswith("cos") for k in keys)
 
 
 def test_rope_allows_context_beyond_10000():
     # the old code capped positions at rope_base=10000; now it is configurable
-    attn = SelfAttention(16, 2, max_seq_len=12000).eval()
+    attn = SelfAttention(16, d_head=8, max_seq_len=12000).eval()
     x = torch.randn(1, 11000, 16)
     out = attn(x)
     assert out.shape == (1, 11000, 16)
 
 
 def test_rope_raises_past_max_seq_len():
-    attn = SelfAttention(32, 4, max_seq_len=16).eval()
+    attn = SelfAttention(32, d_head=8, max_seq_len=16).eval()
     with pytest.raises(AssertionError):
         attn(torch.randn(1, 17, 32))
 
@@ -397,8 +414,10 @@ def test_build_lm_unknown_size_raises():
 @pytest.mark.parametrize("size", list(MODEL_PRESETS))
 def test_preset_dims_are_consistent(size):
     cfg = MODEL_PRESETS[size]
-    assert cfg["d_model"] % cfg["n_heads"] == 0
-    assert cfg["n_heads"] % cfg["n_groups"] == 0
+    assert cfg["d_model"] % cfg["d_head"] == 0  # query heads tile d_model
+    assert cfg["d_head"] % 2 == 0  # RoPE pairs
+    n_query_heads = cfg["d_model"] // cfg["d_head"]
+    assert n_query_heads % cfg["n_kv_heads"] == 0  # GQA grouping
 
 
 def test_build_lm_pico_forward():
@@ -443,7 +462,7 @@ def test_tie_embeddings_override():
 
 
 def test_tied_embeddings_share_gradient():
-    lm = build_lm("pico", vocab_size=40, n_layers=1, d_model=16)
+    lm = build_lm("pico", vocab_size=40, n_layers=1, d_model=16, d_head=8)
     assert lm.tie_embeddings
     lm(torch.randint(0, 40, (1, 4))).sum().backward()
     # one shared parameter -> appears once in parameters()
@@ -457,7 +476,7 @@ def test_init_gives_near_uniform_loss():
     # small init -> logits near 0 -> near-uniform distribution -> loss ~= ln(vocab)
     import math
 
-    lm = TransformerLM(vocab_size=200, d_model=64, n_heads=4, n_layers=4)
+    lm = TransformerLM(vocab_size=200, d_model=64, d_head=8, n_layers=4)
     gpt = GPT(lm)
     loss = gpt._loss(torch.randint(0, 200, (4, 16))).item()
     assert loss == pytest.approx(math.log(200), abs=0.5)

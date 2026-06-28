@@ -46,25 +46,30 @@ class SelfAttention(nn.Module):
     def __init__(
         self,
         d_model: int,
-        n_heads: int,
-        n_groups: int | None = None,
+        n_kv_heads: int | None = None,
+        d_head: int = 64,
         rope_base: int = 10000,
         max_seq_len: int = 4096,
     ):
         super().__init__()
         self.rope_base = rope_base
         self.max_seq_len = max_seq_len
-        self.n_heads = n_heads
         self.d_model = d_model
-        self.d_head = d_model // n_heads
-        self.n_groups = n_heads if n_groups is None else n_groups
-        assert n_heads % self.n_groups == 0
-        assert d_model % n_heads == 0
+        self.d_head = d_head
+        # Query heads tile the model dim (proj_q stays square); GQA is specified by
+        # the KV-head count. Parameterizing by (d_head, n_kv_heads) keeps params
+        # monotonic: increasing either number only ever adds parameters, unlike the
+        # old (n_heads, n_groups) where more query heads shrank d_head.
+        self.n_query_heads = d_model // d_head
+        self.n_kv_heads = self.n_query_heads if n_kv_heads is None else n_kv_heads
+        assert d_model % d_head == 0  # query heads tile d_model
+        assert self.n_query_heads % self.n_kv_heads == 0  # GQA grouping
+        assert d_head % 2 == 0  # RoPE rotates dimension pairs
 
-        self.proj_q = nn.Linear(d_model, self.d_head * n_heads, bias=False)
-        self.proj_k = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
-        self.proj_v = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
-        self.proj_o = nn.Linear(self.d_head * n_heads, d_model, bias=False)
+        self.proj_q = nn.Linear(d_model, d_head * self.n_query_heads, bias=False)
+        self.proj_k = nn.Linear(d_model, d_head * self.n_kv_heads, bias=False)
+        self.proj_v = nn.Linear(d_model, d_head * self.n_kv_heads, bias=False)
+        self.proj_o = nn.Linear(d_head * self.n_query_heads, d_model, bias=False)
 
         sin, cos = self._rope_tables(max_seq_len)
         self.register_buffer("sin", sin, persistent=False)
@@ -141,8 +146,8 @@ class TransformerLayer(nn.Module):
     def __init__(
         self,
         d_model: int,
-        n_heads: int,
-        n_groups: int | None = None,
+        n_kv_heads: int | None = None,
+        d_head: int = 64,
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
@@ -150,8 +155,8 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.attn = SelfAttention(
             d_model,
-            n_heads,
-            n_groups=n_groups,
+            n_kv_heads=n_kv_heads,
+            d_head=d_head,
             rope_base=rope_base,
             max_seq_len=max_seq_len,
         )
@@ -176,9 +181,9 @@ class Transformer(nn.Module):
     def __init__(
         self,
         d_model: int,
-        n_heads: int,
         n_layers: int,
-        n_groups: int | None = None,
+        n_kv_heads: int | None = None,
+        d_head: int = 64,
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
@@ -189,8 +194,8 @@ class Transformer(nn.Module):
             [
                 TransformerLayer(
                     d_model,
-                    n_heads,
-                    n_groups=n_groups,
+                    n_kv_heads=n_kv_heads,
+                    d_head=d_head,
                     rope_base=rope_base,
                     d_ffn=d_ffn,
                     max_seq_len=max_seq_len,
@@ -219,9 +224,9 @@ class TransformerLM(nn.Module):
         self,
         vocab_size: int,
         d_model: int,
-        n_heads: int,
         n_layers: int,
-        n_groups: int | None = None,
+        n_kv_heads: int | None = None,
+        d_head: int = 64,
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
@@ -237,9 +242,9 @@ class TransformerLM(nn.Module):
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
         self.transformer = Transformer(
             d_model,
-            n_heads,
             n_layers,
-            n_groups=n_groups,
+            n_kv_heads=n_kv_heads,
+            d_head=d_head,
             rope_base=rope_base,
             d_ffn=d_ffn,
             max_seq_len=max_seq_len,
@@ -287,22 +292,25 @@ class TransformerLM(nn.Module):
 
 
 # Scale ladder. Presets to switch between pico..3B with the same TransformerLM args.
-# Constraints: d_model % n_heads == 0, n_heads % n_groups == 0. d_head is 64 or 128.
+# GQA is specified by n_kv_heads; the query-head count is derived as d_model//d_head
+# (proj_q stays square). Constraints: d_model % d_head == 0, (d_model//d_head) %
+# n_kv_heads == 0, d_head even. Parameterizing by (d_head, n_kv_heads) keeps params
+# monotonic. The derived query heads here are 8/12/16/16/20 (== old n_heads).
 # vocab_size and tie_embeddings are scale-dependent: small models use a smaller
 # vocab (64k is oversized there -> many undertrained rows) and tie embeddings;
 # larger models use the full 64k vocab and untie to give the output its own
 # capacity. Param counts below include the (tied or untied) embeddings.
 MODEL_PRESETS: dict[str, dict] = {
-    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2,
-                 vocab_size=32000, tie_embeddings=True),  # ~40M
-    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4,
-                  vocab_size=32000, tie_embeddings=True),  # ~107M
-    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4,
-                 vocab_size=64000, tie_embeddings=False),  # ~421M
-    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8,
-                   vocab_size=64000, tie_embeddings=False),  # ~1.5B
-    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5,
-                  vocab_size=64000, tie_embeddings=False),  # ~2.7B
+    "pico": dict(d_model=512, n_layers=8, n_kv_heads=2,
+                 d_head=64, vocab_size=32000, tie_embeddings=True),  # ~40M
+    "small": dict(d_model=768, n_layers=12, n_kv_heads=4,
+                  d_head=64, vocab_size=32000, tie_embeddings=True),  # ~107M
+    "base": dict(d_model=1024, n_layers=24, n_kv_heads=4,
+                 d_head=64, vocab_size=64000, tie_embeddings=False),  # ~421M
+    "medium": dict(d_model=2048, n_layers=24, n_kv_heads=8,
+                   d_head=128, vocab_size=64000, tie_embeddings=False),  # ~1.5B
+    "large": dict(d_model=2560, n_layers=32, n_kv_heads=5,
+                  d_head=128, vocab_size=64000, tie_embeddings=False),  # ~2.7B
 }
 
 

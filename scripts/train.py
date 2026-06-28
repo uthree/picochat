@@ -31,9 +31,9 @@ def main():
         "--size", type=str, default="pico", help=f"scale {list(MODEL_PRESETS)}"
     )
     p.add_argument("--d-model", type=int, default=None)
-    p.add_argument("--n-heads", type=int, default=None)
+    p.add_argument("--n-kv-heads", type=int, default=None)
     p.add_argument("--n-layers", type=int, default=None)
-    p.add_argument("--n-groups", type=int, default=None)
+    p.add_argument("--d-head", type=int, default=None)
     p.add_argument(
         "--tie-embeddings",
         action=argparse.BooleanOptionalAction,
@@ -85,9 +85,9 @@ def main():
         k: v
         for k, v in {
             "d_model": args.d_model,
-            "n_heads": args.n_heads,
+            "n_kv_heads": args.n_kv_heads,
             "n_layers": args.n_layers,
-            "n_groups": args.n_groups,
+            "d_head": args.d_head,
             "tie_embeddings": args.tie_embeddings,
         }.items()
         if v is not None
