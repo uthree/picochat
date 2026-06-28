@@ -306,8 +306,15 @@ def test_gpt_loss_backward_reaches_embedding(gpt_module):
 
 
 def test_embeddings_untied_when_disabled():
-    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    lm = TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=False
+    )
     assert lm.lmhead.weight is not lm.embed.weight
+
+
+def test_embeddings_tied_by_default():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    assert lm.lmhead.weight is lm.embed.weight
 
 
 def test_gpt_pad_targets_are_ignored(gpt_module):
@@ -403,6 +410,47 @@ def test_build_lm_pico_forward():
 def test_build_lm_overrides_preset():
     lm = build_lm("pico", vocab_size=50, n_layers=2)
     assert lm.transformer.n_layers == 2  # overridden from preset's 8
+
+
+def test_build_lm_uses_preset_vocab_by_default():
+    # pico/small default to a 32k vocab; base+ to 64k.
+    assert build_lm("pico").embed.num_embeddings == 32000
+    assert build_lm("small").embed.num_embeddings == 32000
+    assert build_lm("base").embed.num_embeddings == 64000
+
+
+def test_build_lm_vocab_override():
+    lm = build_lm("pico", vocab_size=123)
+    assert lm.embed.num_embeddings == 123
+    assert lm.lmhead.out_features == 123
+
+
+def test_preset_tie_defaults():
+    # small scales tie (lmhead shares the embedding matrix); large scales untie.
+    pico = build_lm("pico")
+    assert pico.lmhead.weight is pico.embed.weight
+    small = build_lm("small")
+    assert small.lmhead.weight is small.embed.weight
+    base = build_lm("base")
+    assert base.lmhead.weight is not base.embed.weight
+
+
+def test_tie_embeddings_override():
+    untied = build_lm("pico", tie_embeddings=False)
+    assert untied.lmhead.weight is not untied.embed.weight
+    tied = build_lm("base", tie_embeddings=True)
+    assert tied.lmhead.weight is tied.embed.weight
+
+
+def test_tied_embeddings_share_gradient():
+    lm = build_lm("pico", vocab_size=40, n_layers=1, d_model=16)
+    assert lm.tie_embeddings
+    lm(torch.randint(0, 40, (1, 4))).sum().backward()
+    # one shared parameter -> appears once in parameters()
+    n_embed_params = sum(
+        1 for p in lm.parameters() if p is lm.embed.weight
+    )
+    assert n_embed_params == 1
 
 
 def test_init_gives_near_uniform_loss():

@@ -34,6 +34,12 @@ def main():
     p.add_argument("--n-heads", type=int, default=None)
     p.add_argument("--n-layers", type=int, default=None)
     p.add_argument("--n-groups", type=int, default=None)
+    p.add_argument(
+        "--tie-embeddings",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="tie input/output embeddings (default: per-preset)",
+    )
     # optim / trainer
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.1)
@@ -82,6 +88,7 @@ def main():
             "n_heads": args.n_heads,
             "n_layers": args.n_layers,
             "n_groups": args.n_groups,
+            "tie_embeddings": args.tie_embeddings,
         }.items()
         if v is not None
     }

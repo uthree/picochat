@@ -225,9 +225,13 @@ class TransformerLM(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
+        tie_embeddings: bool = True,
+        init_std: float = 0.02,
     ):
         super().__init__()
         self.n_layers = n_layers
+        self.tie_embeddings = tie_embeddings
+        self.init_std = init_std
 
         self.embed = nn.Embedding(vocab_size, d_model)
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
@@ -240,6 +244,34 @@ class TransformerLM(nn.Module):
             d_ffn=d_ffn,
             max_seq_len=max_seq_len,
         )
+        self._init_weights()
+        if tie_embeddings:
+            # Share one matrix for input/output. At small scale + large vocab this
+            # is the better operating point (param-efficient, and rare-token rows
+            # get gradient from input occurrences too, not just when they are the
+            # target). Untie at larger scale to give the output its own capacity.
+            # Tie after init so the output reuses the embedding's small init std;
+            # the default nn.Embedding init (std 1) would blow up the tied logits.
+            self.lmhead.weight = self.embed.weight
+
+    def _init_weights(self) -> None:
+        # GPT-2 style: init every weight with normal(0, init_std) and zero biases,
+        # then scale down the projections that write into the residual stream
+        # (proj_o / proj_down) by 1/sqrt(2*n_layers) so the residual variance stays
+        # roughly constant with depth.
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
+        scaled_std = self.init_std / math.sqrt(2 * self.n_layers)
+        for m in self.modules():
+            if isinstance(m, SelfAttention):
+                nn.init.normal_(m.proj_o.weight, mean=0.0, std=scaled_std)
+            elif isinstance(m, SwiGLU):
+                nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.embed(x)
@@ -256,29 +288,39 @@ class TransformerLM(nn.Module):
 
 # Scale ladder. Presets to switch between pico..3B with the same TransformerLM args.
 # Constraints: d_model % n_heads == 0, n_heads % n_groups == 0. d_head is 64 or 128.
-# Param counts are measured with vocab=64k and weight tying (one shared
-# vocab x d_model embedding matrix).
+# vocab_size and tie_embeddings are scale-dependent: small models use a smaller
+# vocab (64k is oversized there -> many undertrained rows) and tie embeddings;
+# larger models use the full 64k vocab and untie to give the output its own
+# capacity. Param counts below include the (tied or untied) embeddings.
 MODEL_PRESETS: dict[str, dict] = {
-    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~70M
-    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~150M
-    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4),  # ~500M
-    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8),  # ~1.5B
-    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5),  # ~3B
+    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2,
+                 vocab_size=32000, tie_embeddings=True),  # ~40M
+    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4,
+                  vocab_size=32000, tie_embeddings=True),  # ~107M
+    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4,
+                 vocab_size=64000, tie_embeddings=False),  # ~421M
+    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8,
+                   vocab_size=64000, tie_embeddings=False),  # ~1.5B
+    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5,
+                  vocab_size=64000, tie_embeddings=False),  # ~2.7B
 }
 
 
 def build_lm(
     size: str,
-    vocab_size: int,
+    vocab_size: int | None = None,
     max_seq_len: int = 4096,
     **overrides,
 ) -> TransformerLM:
-    """Build a TransformerLM from a preset name. Individual fields can be
-    overridden via overrides."""
+    """Build a TransformerLM from a preset name. vocab_size defaults to the
+    preset's recommended value; pass it explicitly (e.g. the tokenizer's actual
+    vocab) to override. Any other field can be overridden via overrides."""
     if size not in MODEL_PRESETS:
         raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
     cfg = {**MODEL_PRESETS[size], **overrides}
-    return TransformerLM(vocab_size=vocab_size, max_seq_len=max_seq_len, **cfg)
+    if vocab_size is not None:
+        cfg["vocab_size"] = vocab_size
+    return TransformerLM(max_seq_len=max_seq_len, **cfg)
 
 
 class GPT(L.LightningModule):
