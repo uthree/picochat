@@ -8,9 +8,11 @@ import tiktoken
 
 PATTERN = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"  # English contractions
+    r"|\p{Han}{1,2}"  # kanji
     r"|[^\r\n\p{L}\p{N}]?\p{L}+"  # Words (alphabetical/Unicode characters)
     r"|\p{N}"  # Digits: Always separate each digit.
     r"|\s+(?!\S)"  # trailing space
+    r"|\t"  # tab
     r"|\s+"  # whitespace
 )
 
@@ -51,7 +53,7 @@ def train_tokenizer(
     tokenizer = rustbpe.Tokenizer()
     tokenizer.train_from_iterator(
         text_iterator,
-        vocab_size=vocab_size,
+        vocab_size=vocab_size - len(special_tokens),
         pattern=PATTERN,
     )
     mergeable_ranks = {bytes(k): v for k, v in tokenizer.get_mergeable_ranks()}

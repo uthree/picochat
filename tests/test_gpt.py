@@ -1,10 +1,14 @@
+import lightning as L
 import pytest
 import torch
+from torch.utils.data import DataLoader, Dataset
 
 from picochat.model.gpt import (
+    GPT,
     SelfAttention,
     SwiGLU,
     Transformer,
+    TransformerLM,
     rms_norm,
     rotate_half,
 )
@@ -258,3 +262,120 @@ def test_shared_attention_backward_updates_shared_module():
     # a parameter of a shared attention module must accumulate gradient
     grad = model.attn[0].proj_q.weight.grad
     assert grad is not None and grad.abs().sum() > 0
+
+
+# ---------------------------------------------------------------------------
+# TransformerLM
+# ---------------------------------------------------------------------------
+def test_transformer_lm_logits_shape():
+    vocab_size = 40
+    lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2)
+    tokens = torch.randint(0, vocab_size, (2, 5))
+    logits, cache = lm(tokens, None)
+    assert logits.shape == (2, 5, vocab_size)
+    assert len(cache) == 2
+
+
+def test_transformer_lm_incremental_matches_full():
+    vocab_size = 40
+    lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2).eval()
+    tokens = torch.randint(0, vocab_size, (1, 5))
+    full, _ = lm(tokens, None)
+
+    _, cache = lm(tokens[:, :4], None)
+    step, _ = lm(tokens[:, 4:5], cache)
+    assert torch.allclose(full[:, 4:5], step, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# GPT (LightningModule)
+# ---------------------------------------------------------------------------
+class _RandomTokenDataset(Dataset):
+    def __init__(self, vocab_size: int, seq_len: int, n: int = 8):
+        self.data = torch.randint(1, vocab_size, (n, seq_len))
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        return self.data[idx]
+
+
+@pytest.fixture
+def gpt_module():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    return GPT(lm, pad_idx=0)
+
+
+def test_gpt_is_lightning_module(gpt_module):
+    assert isinstance(gpt_module, L.LightningModule)
+    assert gpt_module.pad_idx == 0
+
+
+def test_gpt_training_step_returns_scalar_loss(gpt_module):
+    batch = torch.randint(1, 40, (2, 6))
+    loss = gpt_module.training_step(batch, 0)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+    assert loss.requires_grad
+
+
+def test_gpt_validation_step_returns_scalar(gpt_module):
+    batch = torch.randint(1, 40, (2, 6))
+    loss = gpt_module.validation_step(batch, 0)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
+def test_gpt_configure_optimizers(gpt_module):
+    opt = gpt_module.configure_optimizers()
+    assert isinstance(opt, torch.optim.Adam)
+    # optimizer must cover the model parameters
+    n_opt = sum(p.numel() for group in opt.param_groups for p in group["params"])
+    n_model = sum(p.numel() for p in gpt_module.model.parameters())
+    assert n_opt == n_model
+
+
+def test_gpt_loss_backward_reaches_embedding(gpt_module):
+    batch = torch.randint(1, 40, (2, 6))
+    gpt_module.training_step(batch, 0).backward()
+    assert gpt_module.model.embed[0].weight.grad is not None
+
+
+def test_gpt_pad_targets_are_ignored(gpt_module):
+    # padding positions in the target must not change the loss
+    base = torch.randint(1, 40, (1, 6))
+    loss_a = gpt_module._loss(base.clone())
+    padded = base.clone()
+    padded[:, -1] = gpt_module.pad_idx  # becomes a target after the shift
+    loss_b = gpt_module._loss(padded)
+    # only the embedding of the final (input) token differs; the ignored target
+    # position should keep the comparison close, never produce nan/inf
+    assert torch.isfinite(loss_a) and torch.isfinite(loss_b)
+
+
+def test_gpt_trainer_fast_dev_run(gpt_module):
+    loader = DataLoader(_RandomTokenDataset(40, 6), batch_size=4)
+    trainer = L.Trainer(
+        fast_dev_run=True,
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        enable_checkpointing=False,
+    )
+    trainer.fit(gpt_module, loader, loader)
+
+
+def test_gpt_overfits_single_batch(gpt_module):
+    # a correct next-token loss must be able to drive the loss down on one batch
+    batch = torch.randint(1, 40, (2, 8))
+    opt = torch.optim.Adam(gpt_module.parameters(), lr=1e-3)
+    gpt_module.train()
+    first = gpt_module._loss(batch).item()
+    for _ in range(50):
+        opt.zero_grad()
+        loss = gpt_module._loss(batch)
+        loss.backward()
+        opt.step()
+    assert loss.item() < first

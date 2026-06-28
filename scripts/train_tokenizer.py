@@ -1,6 +1,6 @@
 import argparse
 
-from picochat.tokenizer import train_tokenizer
+from picochat.tokenizer import load_tokenizer, train_tokenizer
 
 NUM_RESERVED_SPECIAL_TOKENS = 16
 SPECIAL_TOKENS = [
@@ -12,12 +12,6 @@ SPECIAL_TOKENS = [
     "</think>",  # Stop thinking
     "<s>",  # start decoding
     "</s>",  # stop decoding
-    "<inst>",  # begin of instruction
-    "</inst>",  # end of instruction
-    "<audio>",  # start audio embedding
-    "</audio>",  # stop audio embedding
-    "<image>",  # start image embedding
-    "</image>",  # stop image embedding
 ] + [f"<reserved_token_{n}>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
 
 

@@ -189,22 +189,27 @@ class TransformerLM(nn.Module):
             n_attn_layers=n_attn_layers,
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self, x: Tensor, cache: list[Tensor | None] | None
+    ) -> tuple[Tensor, list[Tensor]]:
         x = self.embed(x)
-        x = self.transformer(x)
+        x, cache = self.transformer(x, cache=cache)
         x = self.lmhead(x)
-        return x
+        return x, cache
 
 
 class GPT(L.LightningModule):
     def __init__(self, transformer_lm: TransformerLM, pad_idx: int = 0):
+        super().__init__()
         self.model = transformer_lm
         self.pad_idx = pad_idx
-        super().__init__()
 
     def _loss(self, x: Tensor) -> Tensor:
-        logits = self.model(x)
-        loss = F.cross_entropy(logits, x, ignore_index=self.pad_idx)
+        logits, _cache = self.model(x, None)
+        # next-token prediction: the output at position i predicts token i+1.
+        logits = rearrange(logits[:, :-1], "b l v -> (b l) v")
+        targets = rearrange(x[:, 1:], "b l -> (b l)")
+        loss = F.cross_entropy(logits, targets, ignore_index=self.pad_idx)
         return loss
 
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
