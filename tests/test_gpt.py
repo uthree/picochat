@@ -481,3 +481,31 @@ def test_build_lm_pico_forward():
 def test_build_lm_overrides_preset():
     lm = build_lm("pico", vocab_size=50, n_layers=2)
     assert lm.transformer.n_layers == 2  # overridden from preset's 8
+
+
+# ---------------------------------------------------------------------------
+# weight initialization (GPT-2 style + residual scaling)
+# ---------------------------------------------------------------------------
+def test_init_std_and_residual_scaling():
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=200, d_model=128, n_heads=4, n_layers=8)
+    attn = lm.transformer.attn[0]
+    ffn = lm.transformer.ffn[0]
+    # 通常の Linear は std ~= init_std(0.02)
+    assert attn.proj_q.weight.std().item() == pytest.approx(0.02, rel=0.15)
+    # 残差射影は 0.02 / sqrt(2*n_layers)
+    scaled = 0.02 / (2 * 8) ** 0.5
+    assert attn.proj_o.weight.std().item() == pytest.approx(scaled, rel=0.2)
+    assert ffn.proj_down.weight.std().item() == pytest.approx(scaled, rel=0.2)
+    # bias は 0 初期化
+    assert torch.all(ffn.proj_up.bias == 0)
+
+
+def test_init_gives_near_uniform_loss():
+    # 小さい初期化 -> ロジットがほぼ 0 -> ほぼ一様分布 -> loss ~= ln(vocab)
+    import math
+
+    lm = TransformerLM(vocab_size=200, d_model=64, n_heads=4, n_layers=4)
+    gpt = GPT(lm)
+    loss = gpt._loss(torch.randint(0, 200, (4, 16))).item()
+    assert loss == pytest.approx(math.log(200), abs=0.5)

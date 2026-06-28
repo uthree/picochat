@@ -189,8 +189,11 @@ class TransformerLM(nn.Module):
         n_attn_layers: int | None = None,
         max_seq_len: int = 4096,
         tie_embeddings: bool = True,
+        init_std: float = 0.02,
     ):
         super().__init__()
+        self.n_layers = n_layers
+        self.init_std = init_std
         # full 次元の埋め込み（出力ロジットをフルランクに保つ）。weight tying で
         # 入力埋め込みと出力射影を共有し、パラメータを節約する（LLM の定石）。
         self.embed = nn.Embedding(vocab_size, d_model)
@@ -207,6 +210,25 @@ class TransformerLM(nn.Module):
             n_attn_layers=n_attn_layers,
             max_seq_len=max_seq_len,
         )
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # GPT-2 流: 全重みを normal(0, init_std)・bias 0 で初期化し、残差パスに
+        # 書き込む射影（proj_o / proj_down）だけ 1/sqrt(2*n_layers) でスケールダウン。
+        # これで残差ストリームの分散が深さによらずほぼ一定に保たれる。
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
+        scaled_std = self.init_std / math.sqrt(2 * self.n_layers)
+        for m in self.modules():
+            if isinstance(m, SelfAttention):
+                nn.init.normal_(m.proj_o.weight, mean=0.0, std=scaled_std)
+            elif isinstance(m, SwiGLU):
+                nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
 
     def forward(
         self, x: Tensor, cache: list[Tensor | None] | None
