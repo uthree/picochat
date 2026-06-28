@@ -5,10 +5,12 @@ from torch.utils.data import DataLoader, Dataset
 
 from picochat.model.gpt import (
     GPT,
+    MODEL_PRESETS,
     SelfAttention,
     SwiGLU,
     Transformer,
     TransformerLM,
+    build_lm,
     rms_norm,
     rotate_half,
 )
@@ -408,3 +410,59 @@ def test_gpt_overfits_single_batch(gpt_module):
         loss.backward()
         opt.step()
     assert loss.item() < first
+
+
+# ---------------------------------------------------------------------------
+# RoPE max_seq_len (decoupled from rope_base)
+# ---------------------------------------------------------------------------
+def test_rope_table_sized_by_max_seq_len():
+    attn = SelfAttention(32, 4, max_seq_len=128)
+    # table length is max_seq_len, not rope_base (10000)
+    assert attn.sin.shape[0] == 128
+    assert attn.cos.shape[0] == 128
+
+
+def test_rope_tables_not_in_state_dict():
+    # derived buffers must not bloat checkpoints / break loading on resize
+    keys = SelfAttention(32, 4, max_seq_len=128).state_dict().keys()
+    assert not any(k.endswith("sin") or k.endswith("cos") for k in keys)
+
+
+def test_rope_allows_context_beyond_10000():
+    # the old code capped positions at rope_base=10000; now it is configurable
+    attn = SelfAttention(16, 2, max_seq_len=12000).eval()
+    x = torch.randn(1, 11000, 16)
+    out, _ = attn(x)
+    assert out.shape == (1, 11000, 16)
+
+
+def test_rope_raises_past_max_seq_len():
+    attn = SelfAttention(32, 4, max_seq_len=16).eval()
+    with pytest.raises(AssertionError):
+        attn(torch.randn(1, 17, 32))
+
+
+# ---------------------------------------------------------------------------
+# scale-ladder presets
+# ---------------------------------------------------------------------------
+def test_build_lm_unknown_size_raises():
+    with pytest.raises(ValueError):
+        build_lm("gigantic", vocab_size=32)
+
+
+@pytest.mark.parametrize("size", list(MODEL_PRESETS))
+def test_preset_dims_are_consistent(size):
+    cfg = MODEL_PRESETS[size]
+    assert cfg["d_model"] % cfg["n_heads"] == 0
+    assert cfg["n_heads"] % cfg["n_groups"] == 0
+
+
+def test_build_lm_pico_forward():
+    lm = build_lm("pico", vocab_size=50, max_seq_len=64)
+    logits, _ = lm(torch.randint(0, 50, (2, 16)), None)
+    assert logits.shape == (2, 16, 50)
+
+
+def test_build_lm_overrides_preset():
+    lm = build_lm("pico", vocab_size=50, n_layers=2)
+    assert lm.transformer.n_layers == 2  # overridden from preset's 8

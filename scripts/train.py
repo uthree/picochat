@@ -11,7 +11,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
 from picochat.data.pretrain import PackedDataset
-from picochat.model.gpt import GPT, TransformerLM
+from picochat.model.gpt import GPT, MODEL_PRESETS, build_lm
 from picochat.tokenizer import load_tokenizer
 
 
@@ -22,12 +22,16 @@ def main():
     p.add_argument("--val-bin", type=str, default=None)
     p.add_argument("--tokenizer", type=str, default="weights/tokenizer.json")
     p.add_argument("--block-size", type=int, default=1024)
+    p.add_argument("--max-seq-len", type=int, default=4096)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=4)
-    # model
-    p.add_argument("--d-model", type=int, default=512)
-    p.add_argument("--n-heads", type=int, default=8)
-    p.add_argument("--n-layers", type=int, default=8)
+    # model: --size でスケールラダーのプリセットを選び、必要なら個別フラグで上書き
+    p.add_argument(
+        "--size", type=str, default="pico", help=f"スケール {list(MODEL_PRESETS)}"
+    )
+    p.add_argument("--d-model", type=int, default=None)
+    p.add_argument("--n-heads", type=int, default=None)
+    p.add_argument("--n-layers", type=int, default=None)
     p.add_argument("--n-groups", type=int, default=None)
     p.add_argument("--n-attn-layers", type=int, default=None)
     # optim / trainer
@@ -69,13 +73,24 @@ def main():
         )
         monitor = "val_loss"
 
-    lm = TransformerLM(
+    # モデルは各位置で block_size+1 トークンを処理するので max_seq_len で収まること。
+    assert args.block_size < args.max_seq_len, "block_size+1 <= max_seq_len が必要"
+    overrides = {
+        k: v
+        for k, v in {
+            "d_model": args.d_model,
+            "n_heads": args.n_heads,
+            "n_layers": args.n_layers,
+            "n_groups": args.n_groups,
+            "n_attn_layers": args.n_attn_layers,
+        }.items()
+        if v is not None
+    }
+    lm = build_lm(
+        args.size,
         vocab_size=vocab_size,
-        d_model=args.d_model,
-        n_heads=args.n_heads,
-        n_layers=args.n_layers,
-        n_groups=args.n_groups,
-        n_attn_layers=args.n_attn_layers,
+        max_seq_len=args.max_seq_len,
+        **overrides,
     )
     gpt = GPT(
         lm,

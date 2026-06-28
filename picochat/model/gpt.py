@@ -49,9 +49,11 @@ class SelfAttention(nn.Module):
         n_heads: int,
         n_groups: int | None = None,
         rope_base: int = 10000,
+        max_seq_len: int = 4096,
     ):
         super().__init__()
         self.rope_base = rope_base
+        self.max_seq_len = max_seq_len
         self.n_heads = n_heads
         self.d_model = d_model
         self.d_head = d_model // n_heads
@@ -62,6 +64,11 @@ class SelfAttention(nn.Module):
         self.proj_k = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
         self.proj_v = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
         self.proj_o = nn.Linear(self.d_head * n_heads, d_model, bias=False)
+        # RoPE の sin/cos テーブルを最大系列長ぶん事前計算する。派生値なので
+        # state_dict には保存せず（persistent=False）、max_seq_len 変更にも追従する。
+        sin, cos = self._rope_tables(max_seq_len)
+        self.register_buffer("sin", sin, persistent=False)
+        self.register_buffer("cos", cos, persistent=False)
 
     def forward(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
         x = rms_norm(x)
@@ -96,21 +103,24 @@ class SelfAttention(nn.Module):
         y = self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
         return y, cache
 
+    def _rope_tables(self, max_seq_len: int) -> tuple[Tensor, Tensor]:
+        # 絶対位置 0..max_seq_len-1 に対する sin/cos を作る（offset はスライス側で扱う）。
+        t = torch.arange(max_seq_len)[:, None].float()
+        f = (
+            self.rope_base
+            ** (torch.linspace(0.0, 1.0, self.d_head // 2).repeat_interleave(2))
+        )[None, :]
+        theta = t / f
+        return torch.sin(theta), torch.cos(theta)
+
     def _rope(self, x, offset: int = 0) -> Tensor:
+        seq_len = x.shape[-2]
+        assert offset + seq_len <= self.max_seq_len, (
+            f"position {offset + seq_len} が max_seq_len={self.max_seq_len} を超えた"
+        )
         with torch.amp.autocast(device_type="cuda", enabled=False):
-            if not hasattr(self, "sin"):
-                t = (torch.arange(self.rope_base) + offset)[:, None].float()
-                f = (
-                    self.rope_base
-                    ** (torch.linspace(0.0, 1.0, self.d_head // 2).repeat_interleave(2))
-                )[None, :]
-                theta = t / f
-                self.register_buffer("sin", torch.sin(theta))
-                self.register_buffer("cos", torch.cos(theta))
-            sin, cos = (
-                self.sin[offset : offset + x.shape[-2], :],
-                self.cos[offset : offset + x.shape[-2], :],
-            )
+            sin = self.sin[offset : offset + seq_len, :]
+            cos = self.cos[offset : offset + seq_len, :]
             x = x * cos + rotate_half(x) * sin
         return x
 
@@ -125,6 +135,7 @@ class Transformer(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         n_attn_layers: int | None = None,
+        max_seq_len: int = 4096,
     ):
         super().__init__()
         if n_attn_layers is None:
@@ -134,7 +145,13 @@ class Transformer(nn.Module):
         self.n_layers = n_layers
         self.attn = nn.ModuleList(
             [
-                SelfAttention(d_model, n_heads, n_groups=n_groups, rope_base=rope_base)
+                SelfAttention(
+                    d_model,
+                    n_heads,
+                    n_groups=n_groups,
+                    rope_base=rope_base,
+                    max_seq_len=max_seq_len,
+                )
                 for _ in range(n_attn_layers)
             ]
         )
@@ -171,6 +188,7 @@ class TransformerLM(nn.Module):
         d_ffn: int | None = None,
         n_attn_layers: int | None = None,
         d_embed: int = 128,
+        max_seq_len: int = 4096,
     ):
         super().__init__()
         self.embed = nn.Sequential(
@@ -188,6 +206,7 @@ class TransformerLM(nn.Module):
             rope_base=rope_base,
             d_ffn=d_ffn,
             n_attn_layers=n_attn_layers,
+            max_seq_len=max_seq_len,
         )
 
     def forward(
@@ -197,6 +216,31 @@ class TransformerLM(nn.Module):
         x, cache = self.transformer(x, cache=cache)
         x = self.lmhead(x)
         return x, cache
+
+
+# スケールラダー。同じ TransformerLM 引数で pico〜3B を切り替えるためのプリセット。
+# 制約: d_model % n_heads == 0, n_heads % n_groups == 0。d_head は 64 か 128。
+# params は vocab=64k 込みの実測値（因子化埋め込み d_embed=128 のぶん約16Mを含む）。
+MODEL_PRESETS: dict[str, dict] = {
+    "pico": dict(d_model=512, n_layers=8, n_heads=8, n_groups=2),  # ~41M
+    "small": dict(d_model=768, n_layers=12, n_heads=12, n_groups=4),  # ~99M
+    "base": dict(d_model=1024, n_layers=24, n_heads=16, n_groups=4),  # ~306M
+    "medium": dict(d_model=2048, n_layers=24, n_heads=16, n_groups=8),  # ~1.2B
+    "large": dict(d_model=2560, n_layers=32, n_heads=20, n_groups=5),  # ~2.4B
+}
+
+
+def build_lm(
+    size: str,
+    vocab_size: int,
+    max_seq_len: int = 4096,
+    **overrides,
+) -> TransformerLM:
+    """プリセット名から TransformerLM を作る。overrides で個別に上書き可能。"""
+    if size not in MODEL_PRESETS:
+        raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
+    cfg = {**MODEL_PRESETS[size], **overrides}
+    return TransformerLM(vocab_size=vocab_size, max_seq_len=max_seq_len, **cfg)
 
 
 class GPT(L.LightningModule):
