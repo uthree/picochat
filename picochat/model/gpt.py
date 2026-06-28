@@ -94,9 +94,7 @@ class SelfAttention(nn.Module):
         )
         return self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
 
-    def decode(
-        self, x: Tensor, cache: Tensor | None = None
-    ) -> tuple[Tensor, Tensor]:
+    def decode(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
         # Inference path: append the new keys/values to the cache and attend over
         # the full prefix. Returns the updated cache (stacked [key, value]).
         query, key, value = self._project(x)
@@ -168,9 +166,7 @@ class TransformerLayer(nn.Module):
         x = self.ffn(x) + x
         return x
 
-    def decode(
-        self, x: Tensor, cache: Tensor | None = None
-    ) -> tuple[Tensor, Tensor]:
+    def decode(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
         a, cache = self.attn.decode(x, cache)
         x = a + x
         x = self.ffn(x) + x
@@ -301,16 +297,46 @@ class TransformerLM(nn.Module):
 # larger models use the full 64k vocab and untie to give the output its own
 # capacity. Param counts below include the (tied or untied) embeddings.
 MODEL_PRESETS: dict[str, dict] = {
-    "pico": dict(d_model=512, n_layers=8, n_kv_heads=2,
-                 d_head=64, vocab_size=32000, tie_embeddings=True),  # ~40M
-    "small": dict(d_model=768, n_layers=12, n_kv_heads=4,
-                  d_head=64, vocab_size=32000, tie_embeddings=True),  # ~107M
-    "base": dict(d_model=1024, n_layers=24, n_kv_heads=4,
-                 d_head=64, vocab_size=64000, tie_embeddings=False),  # ~421M
-    "medium": dict(d_model=2048, n_layers=24, n_kv_heads=8,
-                   d_head=128, vocab_size=64000, tie_embeddings=False),  # ~1.5B
-    "large": dict(d_model=2560, n_layers=32, n_kv_heads=5,
-                  d_head=128, vocab_size=64000, tie_embeddings=False),  # ~2.7B
+    "pico": dict(
+        d_model=512,
+        n_layers=8,
+        n_kv_heads=2,
+        d_head=64,
+        vocab_size=32000,
+        tie_embeddings=True,
+    ),  # ~40M
+    "small": dict(
+        d_model=768,
+        n_layers=12,
+        n_kv_heads=4,
+        d_head=64,
+        vocab_size=32000,
+        tie_embeddings=True,
+    ),  # ~107M
+    "base": dict(
+        d_model=1024,
+        n_layers=24,
+        n_kv_heads=4,
+        d_head=64,
+        vocab_size=64000,
+        tie_embeddings=False,
+    ),  # ~421M
+    "medium": dict(
+        d_model=2048,
+        n_layers=24,
+        n_kv_heads=8,
+        d_head=128,
+        vocab_size=64000,
+        tie_embeddings=False,
+    ),  # ~1.5B
+    "large": dict(
+        d_model=2560,
+        n_layers=32,
+        n_kv_heads=5,
+        d_head=128,
+        vocab_size=64000,
+        tie_embeddings=False,
+    ),  # ~2.7B
 }
 
 
@@ -361,20 +387,15 @@ class GPT(L.LightningModule):
         loss = F.cross_entropy(logits, targets, ignore_index=self.pad_idx)
         return loss
 
-    def _log(self, name: str, value: Tensor, **kwargs) -> None:
-        # Only log when attached to a Trainer (no-op when a step is called directly,
-        # e.g. in tests).
-        if self._trainer is not None:
-            self.log(name, value, prog_bar=True, **kwargs)
-
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
-        self._log("train_loss", loss)
+        self.log("train_loss", loss)
+        self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
         return loss
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
-        self._log("val_loss", loss, sync_dist=True)
+        self.log("valid_loss", loss)
         return loss
 
     def _param_groups(self) -> list[dict]:

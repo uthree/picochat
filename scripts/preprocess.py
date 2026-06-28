@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
 from picochat.data.sources import iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
@@ -21,9 +22,7 @@ EOS_TOKEN = "</s>"
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-t", "--tokenizer", type=str, default="weights/tokenizer.json"
-    )
+    parser.add_argument("-t", "--tokenizer", type=str, default="weights/tokenizer.json")
     parser.add_argument(
         "-o", "--output", type=str, required=True, help="output .bin path"
     )
@@ -63,12 +62,11 @@ def main():
             np.asarray(ids, dtype=DTYPE).tofile(f)
             n_docs += 1
             n_tokens += len(ids)
-            if n_docs % args.log_every == 0:
-                rate = n_tokens / (time.time() - start)
-                print(
-                    f"{n_docs:,} docs | {n_tokens:,} tokens | {rate:,.0f} tok/s",
-                    flush=True,
-                )
+            rate = n_tokens / (time.time() - start)
+            bar.set_description(
+                desc=f"{n_docs:,} docs | {n_tokens:,} tokens | {rate:,.0f} tok/s",
+            )
+            bar.update()
 
     print(
         f"done: {n_docs:,} docs, {n_tokens:,} tokens -> {output} "
