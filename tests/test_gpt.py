@@ -328,12 +328,41 @@ def test_gpt_validation_step_returns_scalar(gpt_module):
 
 
 def test_gpt_configure_optimizers(gpt_module):
+    # max_steps が無いときは optimizer だけ（スケジューラ無し）を返す。
     opt = gpt_module.configure_optimizers()
-    assert isinstance(opt, torch.optim.Adam)
+    assert isinstance(opt, torch.optim.AdamW)
     # optimizer must cover the model parameters
     n_opt = sum(p.numel() for group in opt.param_groups for p in group["params"])
     n_model = sum(p.numel() for p in gpt_module.model.parameters())
     assert n_opt == n_model
+
+
+def test_gpt_weight_decay_excludes_bias_and_embedding(gpt_module):
+    opt = gpt_module.configure_optimizers()
+    decay_group, no_decay_group = opt.param_groups
+    assert decay_group["weight_decay"] > 0
+    assert no_decay_group["weight_decay"] == 0.0
+    # embedding と bias（1次元）は weight decay 対象から除外される。
+    embed_weight = gpt_module.model.embed[0].weight
+    no_decay_ids = {id(p) for p in no_decay_group["params"]}
+    assert id(embed_weight) in no_decay_ids
+    assert all(p.ndim >= 2 for p in decay_group["params"])
+    assert all(
+        p.ndim < 2 or id(p) == id(embed_weight) for p in no_decay_group["params"]
+    )
+
+
+def test_gpt_configure_optimizers_with_schedule():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, min_lr_ratio=0.1)
+    config = gpt.configure_optimizers()
+    assert isinstance(config["optimizer"], torch.optim.AdamW)
+    assert config["lr_scheduler"]["interval"] == "step"
+    # warmup: step 0 はほぼ 0、warmup 終端で 1.0、その後 cosine で min_lr_ratio へ。
+    assert gpt._lr_lambda(0) < gpt._lr_lambda(5)
+    assert gpt._lr_lambda(9) == pytest.approx(1.0)
+    assert gpt._lr_lambda(100) == pytest.approx(0.1)
+    assert gpt._lr_lambda(55) == pytest.approx(0.55, abs=0.05)
 
 
 def test_gpt_loss_backward_reaches_embedding(gpt_module):

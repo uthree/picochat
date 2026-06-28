@@ -1,10 +1,11 @@
+import math
+
 import lightning as L
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
-from torch.optim.optimizer import Optimizer
 
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
@@ -200,12 +201,25 @@ class TransformerLM(nn.Module):
 
 class GPT(L.LightningModule):
     def __init__(
-        self, transformer_lm: TransformerLM, pad_idx: int = 0, lr: float = 1e-4
+        self,
+        transformer_lm: TransformerLM,
+        pad_idx: int = 0,
+        lr: float = 3e-4,
+        weight_decay: float = 0.1,
+        betas: tuple[float, float] = (0.9, 0.95),
+        warmup_steps: int = 2000,
+        max_steps: int | None = None,
+        min_lr_ratio: float = 0.1,
     ):
         super().__init__()
         self.model = transformer_lm
         self.pad_idx = pad_idx
         self.lr = lr
+        self.weight_decay = weight_decay
+        self.betas = betas
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
+        self.min_lr_ratio = min_lr_ratio
 
     def _loss(self, x: Tensor) -> Tensor:
         logits, _cache = self.model(x, None)
@@ -230,6 +244,49 @@ class GPT(L.LightningModule):
         self._log("val_loss", loss, sync_dist=True)
         return loss
 
-    def configure_optimizers(self) -> Optimizer:
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        return optimizer
+    def _param_groups(self) -> list[dict]:
+        # weight decay は 2次元以上の重みにだけ掛ける。bias（1次元）と
+        # embedding は除外する（rms_norm は学習パラメータを持たないので対象外）。
+        embed_ids = {
+            id(p)
+            for m in self.model.modules()
+            if isinstance(m, nn.Embedding)
+            for p in m.parameters()
+        }
+        decay, no_decay = [], []
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            if p.ndim < 2 or id(p) in embed_ids:
+                no_decay.append(p)
+            else:
+                decay.append(p)
+        return [
+            {"params": decay, "weight_decay": self.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
+
+    def _lr_lambda(self, step: int) -> float:
+        # 線形 warmup -> cosine decay（min_lr_ratio まで下げる）。
+        if step < self.warmup_steps:
+            return (step + 1) / max(1, self.warmup_steps)
+        if self.max_steps is None or step >= self.max_steps:
+            return self.min_lr_ratio
+        progress = (step - self.warmup_steps) / max(
+            1, self.max_steps - self.warmup_steps
+        )
+        coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * coeff
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self._param_groups(), lr=self.lr, betas=self.betas
+        )
+        if self.max_steps is None:
+            # 学習ホライズンが不明なときはスケジューラ無し（optimizer のみ）。
+            return optimizer
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self._lr_lambda)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }

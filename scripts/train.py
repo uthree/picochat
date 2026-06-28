@@ -32,6 +32,8 @@ def main():
     p.add_argument("--n-attn-layers", type=int, default=None)
     # optim / trainer
     p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=0.1)
+    p.add_argument("--warmup-steps", type=int, default=2000)
     p.add_argument("--max-steps", type=int, default=10000)
     p.add_argument("--accumulate", type=int, default=1)
     p.add_argument("--grad-clip", type=float, default=1.0)
@@ -75,7 +77,14 @@ def main():
         n_groups=args.n_groups,
         n_attn_layers=args.n_attn_layers,
     )
-    gpt = GPT(lm, pad_idx=0, lr=args.lr)
+    gpt = GPT(
+        lm,
+        pad_idx=0,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
+        max_steps=args.max_steps,
+    )
 
     ckpt = ModelCheckpoint(
         dirpath=args.ckpt_dir,
