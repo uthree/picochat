@@ -1,0 +1,18 @@
+# Tokenizer recipe for the base / medium / large model presets (vocab 64k).
+# Same data mixture as pico.yml but a larger vocabulary, and more characters
+# read so the larger merge table is well estimated.
+#
+#   python scripts/train_tokenizer.py --config configs/tokenizer/base.yml
+
+output: weights/tokenizer.json
+vocab_size: 64000
+
+total_chars: 1000000000
+streaming: true
+
+# JP (wikipedia-ja + fineweb-ja) and EN (wikipedia-en + cosmopedia) ~50:50.
+data:
+  - {preset: wikipedia-ja, weight: 1}
+  - {preset: fineweb-ja, weight: 1}
+  - {preset: wikipedia-en, weight: 1}
+  - {preset: cosmopedia, weight: 1}

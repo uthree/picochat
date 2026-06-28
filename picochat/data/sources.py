@@ -83,21 +83,6 @@ class Mixture:
     weights: list[float]
 
 
-# Recipes for tokenizer training. Balance Japanese and English to roughly 50:50
-# by character count.
-RECIPES: dict[str, Mixture] = {
-    "ja-en": Mixture(
-        specs=[
-            PRESETS["wikipedia-ja"],
-            PRESETS["fineweb-ja"],
-            PRESETS["wikipedia-en"],
-            PRESETS["cosmopedia"],
-        ],
-        weights=[0.25, 0.25, 0.25, 0.25],  # JP 0.5 / EN 0.5
-    ),
-}
-
-
 def iter_texts(
     spec: DatasetSpec,
     streaming: bool = True,

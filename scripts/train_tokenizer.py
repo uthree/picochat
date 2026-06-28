@@ -1,7 +1,17 @@
+"""Train a BPE tokenizer from a YAML recipe.
+
+The tokenizer recipe is independent from the pretraining stage configs (it has
+its own vocab size and data mixture). See configs/tokenizer/*.yml.
+
+    python scripts/train_tokenizer.py --config configs/tokenizer/pico.yml
+"""
+
 import argparse
 from pathlib import Path
 
-from picochat.data.sources import RECIPES, iter_mixture, iter_texts, resolve_spec
+import yaml
+
+from picochat.data.sources import PRESETS, DatasetSpec, Mixture, iter_mixture
 from picochat.tokenizer import train_tokenizer
 
 NUM_RESERVED_SPECIAL_TOKENS = 16
@@ -17,73 +27,62 @@ SPECIAL_TOKENS = [
 ] + [f"<reserved_token_{n}>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vocab-size", type=int, default=64000)
-    parser.add_argument("-o", "--output", type=str, default="weights/tokenizer.json")
-    parser.add_argument(
-        "-r",
-        "--recipe",
-        type=str,
-        default=None,
-        help=f"name of a multi-source mixing recipe {list(RECIPES)}",
-    )
-    parser.add_argument(
-        "--total-chars",
-        type=int,
-        default=500_000_000,
-        help="total characters to read when using a recipe (byte-balanced across languages)",
-    )
-    parser.add_argument(
-        "-p",
-        "--preset",
-        type=str,
-        default=None,
-        help="preset name from picochat.data.sources",
-    )
-    parser.add_argument(
-        "-d",
-        "--dataset",
-        type=str,
-        default=None,
-        help='HF dataset in "path[:name[:split[:text_key]]]" form',
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="number of leading texts to train on (for sanity checks)",
-    )
-    parser.add_argument(
-        "--no-streaming",
-        action="store_true",
-        help="disable streaming (download everything before processing)",
-    )
-    args = parser.parse_args()
+def spec_from_entry(entry: dict) -> DatasetSpec:
+    """Resolve one `data:` entry into a DatasetSpec.
 
-    output = Path(args.output)
+    Either {preset: <name>} referencing picochat.data.sources, or an inline
+    {path, name, split, text_key}.
+    """
+    if "preset" in entry:
+        name = entry["preset"]
+        if name not in PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(PRESETS)}"
+            )
+        return PRESETS[name]
+    if "path" in entry:
+        return DatasetSpec(
+            path=entry["path"],
+            name=entry.get("name"),
+            split=entry.get("split", "train"),
+            text_key=entry.get("text_key", "text"),
+        )
+    raise SystemExit(f"data entry needs 'preset' or 'path': {entry}")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", type=str, required=True, help="tokenizer recipe (YAML)")
+    p.add_argument(
+        "-o", "--output", type=str, default=None, help="override config's output path"
+    )
+    args = p.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    vocab_size = cfg["vocab_size"]
+    total_chars = cfg.get("total_chars", 500_000_000)
+    streaming = cfg.get("streaming", True)
+    output = Path(args.output or cfg.get("output", "weights/tokenizer.json"))
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.recipe is not None:
-        if args.recipe not in RECIPES:
-            raise SystemExit(
-                f"unknown recipe '{args.recipe}'. choices: {list(RECIPES)}"
-            )
-        texts = iter_mixture(
-            RECIPES[args.recipe],
-            total_chars=args.total_chars,
-            streaming=not args.no_streaming,
-        )
-    else:
-        spec = resolve_spec(args.preset, args.dataset)
-        texts = iter_texts(spec, streaming=not args.no_streaming, limit=args.limit)
+    entries = cfg["data"]
+    specs = [spec_from_entry(e) for e in entries]
+    raw_weights = [float(e.get("weight", 1.0)) for e in entries]
+    total = sum(raw_weights)
+    # Normalize so weights are fractions of total_chars (byte balancing).
+    weights = [w / total for w in raw_weights]
+    mixture = Mixture(specs=specs, weights=weights)
+
+    texts = iter_mixture(mixture, total_chars=total_chars, streaming=streaming)
     train_tokenizer(
         texts,
-        vocab_size=args.vocab_size,
+        vocab_size=vocab_size,
         save_as=output,
         special_tokens=SPECIAL_TOKENS,
     )
-    print(f"saved tokenizer to {output} (vocab_size={args.vocab_size})")
+    print(f"saved tokenizer to {output} (vocab_size={vocab_size})")
 
 
 if __name__ == "__main__":
