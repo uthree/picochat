@@ -88,14 +88,14 @@ def test_swiglu_eval_is_deterministic():
 def test_attention_output_shape():
     attn = SelfAttention(32, 4)
     x = torch.randn(2, 6, 32)
-    y, cache = attn(x)
+    y = attn(x)
     assert y.shape == x.shape
 
 
 def test_attention_cache_shape():
     attn = SelfAttention(32, 4)
     x = torch.randn(2, 6, 32)
-    _, cache = attn(x)
+    _, cache = attn.decode(x)
     # cache stacks [key, value]; each has n_groups heads and seq-len 6
     assert cache.shape == (2, 2, attn.n_groups, 6, attn.d_head)
 
@@ -106,7 +106,7 @@ def test_attention_grouped_query_dims():
     assert attn.proj_q.out_features == 32  # 8 heads
     assert attn.proj_k.out_features == attn.d_head * 2  # 2 groups
     assert attn.proj_v.out_features == attn.d_head * 2
-    y, _ = attn(torch.randn(2, 4, 32))
+    y = attn(torch.randn(2, 4, 32))
     assert y.shape == (2, 4, 32)
 
 
@@ -124,33 +124,33 @@ def test_attention_causal_prefix_invariance():
     # causal attention: earlier outputs must not depend on later tokens
     attn = SelfAttention(32, 4).eval()
     x = torch.randn(1, 6, 32)
-    full, _ = attn(x)
-    prefix, _ = attn(x[:, :3])
+    full = attn(x)
+    prefix = attn(x[:, :3])
     assert torch.allclose(full[:, :3], prefix, atol=1e-5)
 
 
 def test_attention_cache_matches_full_forward():
     attn = SelfAttention(32, 4).eval()
     x = torch.randn(1, 5, 32)
-    full, _ = attn(x)
+    full = attn(x)
 
     # feed first 4 tokens, then the last one using the cache
-    _, cache = attn(x[:, :4])
-    step, _ = attn(x[:, 4:5], cache=cache)
+    _, cache = attn.decode(x[:, :4])
+    step, _ = attn.decode(x[:, 4:5], cache=cache)
     assert torch.allclose(full[:, 4:5], step, atol=1e-5)
 
 
 def test_attention_cache_grows():
     attn = SelfAttention(32, 4).eval()
-    _, cache = attn(torch.randn(1, 4, 32))
-    _, cache2 = attn(torch.randn(1, 1, 32), cache=cache)
+    _, cache = attn.decode(torch.randn(1, 4, 32))
+    _, cache2 = attn.decode(torch.randn(1, 1, 32), cache=cache)
     assert cache2.shape[-2] == 5
 
 
 def test_attention_backward():
     attn = SelfAttention(32, 4)
     x = torch.randn(2, 5, 32, requires_grad=True)
-    y, _ = attn(x)
+    y = attn(x)
     y.sum().backward()
     assert x.grad is not None
 
@@ -161,14 +161,14 @@ def test_attention_backward():
 def test_transformer_output_shape():
     model = Transformer(d_model=32, n_heads=4, n_layers=3)
     x = torch.randn(2, 7, 32)
-    out, cache = model(x, None)
+    out = model(x)
     assert out.shape == x.shape
 
 
 def test_transformer_cache_per_layer():
     n_layers = 3
     model = Transformer(d_model=32, n_heads=4, n_layers=n_layers)
-    out, cache = model(torch.randn(2, 7, 32), None)
+    out, cache = model.decode(torch.randn(2, 7, 32))
     assert len(cache) == n_layers
     assert all(c is not None for c in cache)
 
@@ -177,16 +177,16 @@ def test_transformer_incremental_matches_full():
     torch.manual_seed(0)
     model = Transformer(d_model=32, n_heads=4, n_layers=2).eval()
     x = torch.randn(1, 5, 32)
-    full, _ = model(x, None)
+    full = model(x)
 
-    out, cache = model(x[:, :4], None)
-    step, _ = model(x[:, 4:5], cache)
+    out, cache = model.decode(x[:, :4])
+    step, _ = model.decode(x[:, 4:5], cache)
     assert torch.allclose(full[:, 4:5], step, atol=1e-4)
 
 
 def test_transformer_grouped_query():
     model = Transformer(d_model=32, n_heads=8, n_layers=2, n_groups=2)
-    out, cache = model(torch.randn(2, 4, 32), None)
+    out, cache = model.decode(torch.randn(2, 4, 32))
     assert out.shape == (2, 4, 32)
     assert cache[0].shape[2] == 2  # n_groups heads cached
 
@@ -194,7 +194,7 @@ def test_transformer_grouped_query():
 def test_transformer_backward():
     model = Transformer(d_model=32, n_heads=4, n_layers=2)
     x = torch.randn(2, 5, 32, requires_grad=True)
-    out, _ = model(x, None)
+    out = model(x)
     out.sum().backward()
     assert x.grad is not None
 
@@ -206,19 +206,18 @@ def test_transformer_lm_logits_shape():
     vocab_size = 40
     lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2)
     tokens = torch.randint(0, vocab_size, (2, 5))
-    logits, cache = lm(tokens, None)
+    logits = lm(tokens)
     assert logits.shape == (2, 5, vocab_size)
-    assert len(cache) == 2
 
 
 def test_transformer_lm_incremental_matches_full():
     vocab_size = 40
     lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2).eval()
     tokens = torch.randint(0, vocab_size, (1, 5))
-    full, _ = lm(tokens, None)
+    full = lm(tokens)
 
-    _, cache = lm(tokens[:, :4], None)
-    step, _ = lm(tokens[:, 4:5], cache)
+    _, cache = lm.decode(tokens[:, :4])
+    step, _ = lm.decode(tokens[:, 4:5], cache)
     assert torch.allclose(full[:, 4:5], step, atol=1e-4)
 
 
@@ -370,7 +369,7 @@ def test_rope_allows_context_beyond_10000():
     # the old code capped positions at rope_base=10000; now it is configurable
     attn = SelfAttention(16, 2, max_seq_len=12000).eval()
     x = torch.randn(1, 11000, 16)
-    out, _ = attn(x)
+    out = attn(x)
     assert out.shape == (1, 11000, 16)
 
 
@@ -397,7 +396,7 @@ def test_preset_dims_are_consistent(size):
 
 def test_build_lm_pico_forward():
     lm = build_lm("pico", vocab_size=50, max_seq_len=64)
-    logits, _ = lm(torch.randint(0, 50, (2, 16)), None)
+    logits = lm(torch.randint(0, 50, (2, 16)))
     assert logits.shape == (2, 16, 50)
 
 

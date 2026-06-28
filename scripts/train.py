@@ -34,7 +34,6 @@ def main():
     p.add_argument("--n-heads", type=int, default=None)
     p.add_argument("--n-layers", type=int, default=None)
     p.add_argument("--n-groups", type=int, default=None)
-    p.add_argument("--n-attn-layers", type=int, default=None)
     # optim / trainer
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.1)
@@ -83,7 +82,6 @@ def main():
             "n_heads": args.n_heads,
             "n_layers": args.n_layers,
             "n_groups": args.n_groups,
-            "n_attn_layers": args.n_attn_layers,
         }.items()
         if v is not None
     }

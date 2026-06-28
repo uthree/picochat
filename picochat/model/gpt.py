@@ -60,49 +60,58 @@ class SelfAttention(nn.Module):
         self.n_groups = n_heads if n_groups is None else n_groups
         assert n_heads % self.n_groups == 0
         assert d_model % n_heads == 0
+
         self.proj_q = nn.Linear(d_model, self.d_head * n_heads, bias=False)
         self.proj_k = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
         self.proj_v = nn.Linear(d_model, self.d_head * self.n_groups, bias=False)
         self.proj_o = nn.Linear(self.d_head * n_heads, d_model, bias=False)
-        # Precompute the RoPE sin/cos tables up to max_seq_len. They are derived
-        # values, so keep them out of state_dict (persistent=False) so checkpoints
-        # stay small and a different max_seq_len does not clash on load.
+
         sin, cos = self._rope_tables(max_seq_len)
         self.register_buffer("sin", sin, persistent=False)
         self.register_buffer("cos", cos, persistent=False)
 
-    def forward(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
+    def _project(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        # Shared q/k/v projection (with QK-norm) for both forward and decode.
         x = rms_norm(x)
         query = rearrange(self.proj_q(x), "b l (h d) -> b h l d", d=self.d_head)
         key = rms_norm(rearrange(self.proj_k(x), "b l (g d) -> b g l d", d=self.d_head))
         value = rms_norm(
             rearrange(self.proj_v(x), "b l (g d) -> b g l d", d=self.d_head)
         )
+        return query, key, value
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Training path: full causal attention over the whole sequence, no cache.
+        query, key, value = self._project(x)
+        query, key = self._rope(query), self._rope(key)
+        attn = F.scaled_dot_product_attention(
+            query, key, value, is_causal=True, enable_gqa=True
+        )
+        return self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
+
+    def decode(
+        self, x: Tensor, cache: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        # Inference path: append the new keys/values to the cache and attend over
+        # the full prefix. Returns the updated cache (stacked [key, value]).
+        query, key, value = self._project(x)
         if cache is not None:
-            key, value = (
-                torch.cat([cache[0], key], dim=-2),
-                torch.cat([cache[1], value], dim=-2),
-            )
-        cache = torch.stack([key, value])
+            key = torch.cat([cache[0], key], dim=-2)
+            value = torch.cat([cache[1], value], dim=-2)
+        new_cache = torch.stack([key, value])
+        # query covers the last q_len positions; key covers the whole prefix.
         offset = key.shape[-2] - query.shape[-2]
         query, key = self._rope(query, offset=offset), self._rope(key)
-        if offset == 0:
-            attn = F.scaled_dot_product_attention(
-                query, key, value, is_causal=True, enable_gqa=True
-            )
-        else:
-            # cached decoding: query is shorter than key, so is_causal would
-            # align top-left and mask out the cache. Build a bottom-right
-            # aligned causal mask instead (query pos i attends to keys <= i+offset).
-            q_len, k_len = query.shape[-2], key.shape[-2]
-            mask = torch.ones(q_len, k_len, dtype=torch.bool, device=query.device).tril(
-                diagonal=offset
-            )
-            attn = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=mask, enable_gqa=True
-            )
-        y = self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
-        return y, cache
+        # Bottom-right aligned causal mask: query pos i attends to keys <= i+offset
+        # (tril with diagonal=offset; reduces to plain causal when offset == 0).
+        q_len, k_len = query.shape[-2], key.shape[-2]
+        mask = torch.ones(q_len, k_len, dtype=torch.bool, device=query.device).tril(
+            diagonal=offset
+        )
+        attn = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=mask, enable_gqa=True
+        )
+        return self.proj_o(rearrange(attn, "b h l d -> b l (h d)")), new_cache
 
     def _rope_tables(self, max_seq_len: int) -> tuple[Tensor, Tensor]:
         # Build sin/cos for absolute positions 0..max_seq_len-1 (offset is handled
@@ -120,11 +129,47 @@ class SelfAttention(nn.Module):
         assert offset + seq_len <= self.max_seq_len, (
             f"position {offset + seq_len} exceeds max_seq_len={self.max_seq_len}"
         )
+        # Apply RoPE in float32 to keep positional precision under bf16 autocast.
         with torch.amp.autocast(device_type="cuda", enabled=False):
             sin = self.sin[offset : offset + seq_len, :]
             cos = self.cos[offset : offset + seq_len, :]
             x = x * cos + rotate_half(x) * sin
         return x
+
+
+class TransformerLayer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        n_groups: int | None = None,
+        rope_base: int = 10000,
+        d_ffn: int | None = None,
+        max_seq_len: int = 4096,
+    ):
+        super().__init__()
+        self.attn = SelfAttention(
+            d_model,
+            n_heads,
+            n_groups=n_groups,
+            rope_base=rope_base,
+            max_seq_len=max_seq_len,
+        )
+        self.ffn = SwiGLU(d_model, d_hidden=d_ffn)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # attn/ffn apply pre-norm (rms_norm) internally, so add the raw residual.
+        x = self.attn(x) + x
+        x = self.ffn(x) + x
+        return x
+
+    def decode(
+        self, x: Tensor, cache: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        a, cache = self.attn.decode(x, cache)
+        x = a + x
+        x = self.ffn(x) + x
+        return x, cache
 
 
 class Transformer(nn.Module):
@@ -140,36 +185,33 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.n_layers = n_layers
-        self.attn = nn.ModuleList(
+        self.layers = nn.ModuleList(
             [
-                SelfAttention(
+                TransformerLayer(
                     d_model,
                     n_heads,
                     n_groups=n_groups,
                     rope_base=rope_base,
+                    d_ffn=d_ffn,
                     max_seq_len=max_seq_len,
                 )
                 for _ in range(n_layers)
             ]
         )
-        self.ffn = nn.ModuleList(
-            [SwiGLU(d_model, d_hidden=d_ffn) for _ in range(n_layers)]
-        )
 
-    def forward(
-        self, x: Tensor, cache: list[Tensor | None] | None
+    def forward(self, x: Tensor) -> Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return rms_norm(x)
+
+    def decode(
+        self, x: Tensor, cache: list[Tensor | None] | None = None
     ) -> tuple[Tensor, list[Tensor]]:
         if cache is None:
-            cache = [None] * self.n_layers  # type: ignore
-        for i in range(self.n_layers):
-            s = x
-            x, cache[i] = self.attn[i](x, cache[i])  # type: ignore
-            x = x + s
-            s = x
-            x = self.ffn[i](x)
-            x = x + s
-        x = rms_norm(x)
-        return x, cache  # type: ignore
+            cache = [None] * self.n_layers
+        for i, layer in enumerate(self.layers):
+            x, cache[i] = layer.decode(x, cache[i])
+        return rms_norm(x), cache  # type: ignore
 
 
 class TransformerLM(nn.Module):
@@ -182,7 +224,6 @@ class TransformerLM(nn.Module):
         n_groups: int | None = None,
         rope_base: int = 10000,
         d_ffn: int | None = None,
-        n_attn_layers: int | None = None,
         max_seq_len: int = 4096,
     ):
         super().__init__()
@@ -200,13 +241,17 @@ class TransformerLM(nn.Module):
             max_seq_len=max_seq_len,
         )
 
-    def forward(
-        self, x: Tensor, cache: list[Tensor | None] | None
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.embed(x)
+        x = self.transformer(x)
+        return self.lmhead(x)
+
+    def decode(
+        self, x: Tensor, cache: list[Tensor | None] | None = None
     ) -> tuple[Tensor, list[Tensor]]:
         x = self.embed(x)
-        x, cache = self.transformer(x, cache=cache)
-        x = self.lmhead(x)
-        return x, cache
+        x, cache = self.transformer.decode(x, cache)
+        return self.lmhead(x), cache
 
 
 # Scale ladder. Presets to switch between pico..3B with the same TransformerLM args.
@@ -259,7 +304,7 @@ class GPT(L.LightningModule):
         self.min_lr_ratio = min_lr_ratio
 
     def _loss(self, x: Tensor) -> Tensor:
-        logits, _cache = self.model(x, None)
+        logits = self.model(x)
         # next-token prediction: the output at position i predicts token i+1.
         logits = rearrange(logits[:, :-1], "b l v -> (b l) v")
         targets = rearrange(x[:, 1:], "b l -> (b l)")
