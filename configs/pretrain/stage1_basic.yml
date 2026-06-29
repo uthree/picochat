@@ -7,7 +7,7 @@
 #   python scripts/preprocess.py -p children-stories  -o data/children-stories.bin
 #   python scripts/preprocess.py -p gsm8k             -o data/gsm8k.bin
 #
-# Then: python scripts/train.py --config configs/stage1_basic.yml
+# Then: python scripts/pretrain.py --config configs/pretrain/stage1_basic.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage1

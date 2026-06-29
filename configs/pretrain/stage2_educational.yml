@@ -11,7 +11,7 @@
 #   python scripts/preprocess.py -p fineweb-edu          -o data/fineweb-edu.bin
 #   python scripts/preprocess.py -p fineweb-edu-ja       -o data/fineweb-edu-ja.bin
 #
-# Then: python scripts/train.py --config configs/stage2_educational.yml
+# Then: python scripts/pretrain.py --config configs/pretrain/stage2_educational.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage2
