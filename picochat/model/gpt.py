@@ -181,9 +181,14 @@ class Transformer(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
+        grad_checkpoint: bool = False,
     ):
         super().__init__()
         self.n_layers = n_layers
+        # Trade compute for memory during training: don't keep each layer's
+        # activations for the backward pass, recompute them instead. Lets us fit
+        # bigger models / longer sequences on a fixed GPU. No effect on decode().
+        self.grad_checkpoint = grad_checkpoint
         self.layers = nn.ModuleList(
             [
                 TransformerLayer(
@@ -200,7 +205,10 @@ class Transformer(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         for layer in self.layers:
-            x = layer(x)
+            if self.grad_checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
+            else:
+                x = layer(x)
         return rms_norm(x)
 
     def decode(
@@ -226,6 +234,7 @@ class TransformerLM(nn.Module):
         max_seq_len: int = 4096,
         tie_embeddings: bool = True,
         init_std: float = 0.02,
+        grad_checkpoint: bool = False,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -242,6 +251,7 @@ class TransformerLM(nn.Module):
             rope_base=rope_base,
             d_ffn=d_ffn,
             max_seq_len=max_seq_len,
+            grad_checkpoint=grad_checkpoint,
         )
         self._init_weights()
         if tie_embeddings:
@@ -355,6 +365,16 @@ def build_lm(
     return TransformerLM(max_seq_len=max_seq_len, **cfg)
 
 
+def can_compile() -> bool:
+    """Whether torch.compile is likely to help in this environment.
+
+    The inductor backend targets CUDA; on CPU/MPS it often falls back or errors,
+    so we only enable it on CUDA. torch.compile itself is lazy (compiles on the
+    first forward), so this just gates whether we wrap the model at all.
+    """
+    return hasattr(torch, "compile") and torch.cuda.is_available()
+
+
 class GPT(L.LightningModule):
     def __init__(
         self,
@@ -366,6 +386,7 @@ class GPT(L.LightningModule):
         warmup_steps: int = 2000,
         max_steps: int | None = None,
         min_lr_ratio: float = 0.1,
+        compile: bool | None = None,
     ):
         super().__init__()
         self.model = transformer_lm
@@ -376,9 +397,17 @@ class GPT(L.LightningModule):
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.min_lr_ratio = min_lr_ratio
+        # `compile=None` -> auto (compile iff the environment supports it). The
+        # compiled handle shares parameters with self.model; we stash it inside a
+        # list so nn.Module doesn't register it as a submodule (which would
+        # duplicate every parameter under a `_train_model._orig_mod.` prefix and
+        # break checkpoint loading). self.model stays uncompiled, so state_dict
+        # keys stay clean and decode() runs eager.
+        self.compile = can_compile() if compile is None else compile
+        self._train_model = [torch.compile(self.model) if self.compile else self.model]
 
     def _loss(self, x: Tensor) -> Tensor:
-        logits = self.model(x)
+        logits = self._train_model[0](x)
         # next-token prediction: the output at position i predicts token i+1.
         logits = rearrange(logits[:, :-1], "b l v -> (b l) v")
         targets = rearrange(x[:, 1:], "b l -> (b l)")

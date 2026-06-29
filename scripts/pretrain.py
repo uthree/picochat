@@ -26,7 +26,14 @@ from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
-MODEL_OVERRIDES = ("d_model", "n_heads", "n_kv_heads", "n_layers", "tie_embeddings")
+MODEL_OVERRIDES = (
+    "d_model",
+    "n_heads",
+    "n_kv_heads",
+    "n_layers",
+    "tie_embeddings",
+    "grad_checkpoint",
+)
 
 
 def make_dataset(bins, block_size: int, random: bool):
@@ -106,6 +113,8 @@ def main():
         weight_decay=optim_cfg.get("weight_decay", 0.1),
         warmup_steps=optim_cfg.get("warmup_steps", 2000),
         max_steps=max_steps,
+        # None -> auto (compile only where torch.compile is supported).
+        compile=trainer_cfg.get("compile", None),
     )
 
     # --- continual learning: warm-start weights from a previous stage ---

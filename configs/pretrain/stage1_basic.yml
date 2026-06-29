@@ -16,6 +16,7 @@ init_from: null # first stage trains from scratch
 model:
     size: pico
     max_seq_len: 4096
+    grad_checkpoint: false # set true to trade compute for memory (bigger models / longer seqs)
 
 data:
     block_size: 1024
@@ -38,3 +39,4 @@ trainer:
     precision: bf16-mixed
     num_workers: 4
     val_check_interval: 1000
+    # compile: null # null=auto (compile only where torch.compile is supported); true/false to force
