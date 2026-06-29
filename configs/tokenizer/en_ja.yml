@@ -4,9 +4,7 @@ vocab_size: 64000
 total_chars: 1000000000
 streaming: false
 
-# JP (wikipedia-ja + fineweb-ja) and EN (wikipedia-en + cosmopedia) ~50:50.
+# JP (wikipedia-ja) and EN (wikipedia-en) ~50:50.
 data:
-    - { preset: wikipedia-ja, weight: 1 }
-    - { preset: fineweb-ja, weight: 1 }
+    - { preset: wikipedia-ja, weight: 2 }
     - { preset: wikipedia-en, weight: 1 }
-    - { preset: cosmopedia, weight: 1 }
