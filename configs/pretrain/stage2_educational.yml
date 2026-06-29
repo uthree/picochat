@@ -31,8 +31,9 @@ data:
         - data/fineweb-edu.bin
         - data/fineweb-edu-ja.bin
     val_bin: # shared held-out set (see configs/preprocess/val.yml)
-        - data/val-en.bin
-        - data/val-ja.bin
+        - data/val-en-wikitext.bin
+        - data/val-en-wikipedia.bin
+        - data/val-ja-wikipedia.bin
 
 optim:
     lr: 2.0e-4 # slightly lower than stage 1 (continual learning)

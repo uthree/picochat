@@ -1,10 +1,11 @@
 # Shared held-out validation set, used by every pretrain stage so val_loss is
 # comparable across the curriculum (and to log generation samples).
 #
-# Kept small (a few hundred docs per language) so validation is quick. EN comes
-# from wikitext's own validation split (disjoint from any train bin); JA is a
-# small slice of wikipedia-ja (minor overlap with stage3 train, fine for a
-# monitoring signal).
+# Balanced EN/JA by token volume so val_loss reflects both languages (wikitext
+# alone is tiny next to a wikipedia-ja slice). EN: wikitext validation (clean,
+# disjoint from train) + a wikipedia-en slice for volume; JA: a wikipedia-ja
+# slice. The wikipedia slices overlap stage3 train slightly, fine for a
+# monitoring signal.
 #
 #   python scripts/preprocess.py --config configs/preprocess/val.yml
 
@@ -13,6 +14,9 @@ output_dir: data
 streaming: false
 
 datasets:
-  - {path: Salesforce/wikitext, name: wikitext-2-raw-v1, split: validation, output: val-en.bin, limit: 500}
-  # stream this slice: non-streaming would download all of JA wikipedia for 500 docs.
-  - {preset: wikipedia-ja, output: val-ja.bin, limit: 500, streaming: true}
+  # --- English ---
+  - {path: Salesforce/wikitext, name: wikitext-2-raw-v1, split: validation, output: val-en-wikitext.bin, limit: 500}
+  # stream these slices: non-streaming would download all of wikipedia for 500 docs.
+  - {preset: wikipedia-en, output: val-en-wikipedia.bin, limit: 500, streaming: true}
+  # --- Japanese ---
+  - {preset: wikipedia-ja, output: val-ja-wikipedia.bin, limit: 500, streaming: true}
