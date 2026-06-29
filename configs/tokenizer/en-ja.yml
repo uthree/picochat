@@ -1,0 +1,12 @@
+output: weights/tokenizer.json
+vocab_size: 64000
+
+total_chars: 1000000000
+streaming: true
+
+# JP (wikipedia-ja + fineweb-ja) and EN (wikipedia-en + cosmopedia) ~50:50.
+data:
+    - { preset: wikipedia-ja, weight: 1 }
+    - { preset: fineweb-ja, weight: 1 }
+    - { preset: wikipedia-en, weight: 1 }
+    - { preset: cosmopedia, weight: 1 }
