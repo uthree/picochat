@@ -2,7 +2,7 @@ output: weights/tokenizer.json
 vocab_size: 64000
 
 total_chars: 1000000000
-streaming: false
+streaming: true
 
 # JP (wikipedia-ja) and EN (wikipedia-en) ~50:50.
 data:
