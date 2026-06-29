@@ -6,5 +6,5 @@ streaming: true
 
 # JP (wikipedia-ja) and EN (wikipedia-en) ~50:50.
 data:
-    - { preset: wikipedia-ja, weight: 2 }
+    - { preset: wikipedia-ja, weight: 1 }
     - { preset: wikipedia-en, weight: 1 }
