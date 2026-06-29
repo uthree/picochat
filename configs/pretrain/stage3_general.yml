@@ -23,7 +23,6 @@ data:
         - data/wikipedia-ja.bin
         - data/fineweb-ja.bin
     val_bin: # shared held-out set (see configs/preprocess/val.yml)
-        - data/val-en-wikitext.bin
         - data/val-en-wikipedia.bin
         - data/val-ja-wikipedia.bin
 

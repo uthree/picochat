@@ -24,7 +24,6 @@ data:
         - data/children-stories.bin
         - data/gsm8k.bin
     val_bin: # shared held-out set (see configs/preprocess/val.yml)
-        - data/val-en-wikitext.bin
         - data/val-en-wikipedia.bin
         - data/val-ja-wikipedia.bin
 
