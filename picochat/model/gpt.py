@@ -31,7 +31,7 @@ class SwiGLU(nn.Module):
             d_hidden = d_model * 3
         self.proj_up = nn.Linear(d_model, d_hidden)
         self.proj_gate = nn.Linear(d_model, d_hidden)
-        self.proj_down = nn.Linear(d_hidden, d_model)
+        self.proj_down = nn.Linear(d_hidden, d_model, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
         x = rms_norm(x)
