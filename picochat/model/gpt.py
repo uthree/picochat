@@ -387,10 +387,18 @@ class GPT(L.LightningModule):
         max_steps: int | None = None,
         min_lr_ratio: float = 0.1,
         compile: bool | None = None,
+        tokenizer=None,
+        sample_batches: int = 4,
     ):
         super().__init__()
         self.model = transformer_lm
         self.pad_idx = pad_idx
+        # Optional tiktoken Encoding used to turn generated token ids back into
+        # readable text for the TensorBoard generation samples (see below).
+        self.tokenizer = tokenizer
+        # During validation, log a generated continuation for batches with
+        # batch_idx <= sample_batches (decode is slow, so only the first few).
+        self.sample_batches = sample_batches
         self.lr = lr
         self.weight_decay = weight_decay
         self.betas = betas
@@ -423,7 +431,48 @@ class GPT(L.LightningModule):
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
         self.log("valid_loss", loss)
+        if batch_idx <= self.sample_batches:
+            # Sanity-check what the model actually generates: prefill the first
+            # half of the sequence and let it autoregress the second half, then
+            # log prompt/generated/reference side by side to TensorBoard.
+            self._log_generation_sample(batch, batch_idx)
         return loss
+
+    @torch.no_grad()
+    def _generate(self, prompt: Tensor, max_new_tokens: int) -> Tensor:
+        """Greedy-decode `max_new_tokens` tokens after `prompt` (B, L) via KV cache."""
+        logits, cache = self.model.decode(prompt)
+        next_token = logits[:, -1:].argmax(dim=-1)
+        out = [next_token]
+        for _ in range(max_new_tokens - 1):
+            logits, cache = self.model.decode(next_token, cache)
+            next_token = logits[:, -1:].argmax(dim=-1)
+            out.append(next_token)
+        return torch.cat(out, dim=1)  # (B, max_new_tokens)
+
+    def _decode_text(self, ids: Tensor) -> str:
+        try:
+            return self.tokenizer.decode(ids.tolist())
+        except Exception:
+            return "<decode error>"
+
+    def _log_generation_sample(self, batch: Tensor, batch_idx: int) -> None:
+        # Need a tokenizer to render text and a TensorBoard writer to log it.
+        writer = getattr(self.logger, "experiment", None)
+        if self.tokenizer is None or writer is None or not hasattr(writer, "add_text"):
+            return
+        seq = batch[0]  # one example per logged batch is enough
+        half = seq.shape[0] // 2
+        if half == 0:
+            return
+        prompt, reference = seq[:half], seq[half:]
+        generated = self._generate(prompt[None], max_new_tokens=reference.shape[0])[0]
+        text = (
+            f"**prompt**\n\n{self._decode_text(prompt)}\n\n"
+            f"**generated**\n\n{self._decode_text(generated)}\n\n"
+            f"**reference**\n\n{self._decode_text(reference)}"
+        )
+        writer.add_text(f"val_sample/{batch_idx}", text, self.global_step)
 
     def _param_groups(self) -> list[dict]:
         # Apply weight decay only to weights with 2+ dims. Exclude biases (1-dim)

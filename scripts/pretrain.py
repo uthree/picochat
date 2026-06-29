@@ -67,7 +67,8 @@ def main():
     output_dir = cfg.get("output_dir", "weights")
     init_from = args.init_from or cfg.get("init_from")
 
-    vocab_size = load_tokenizer(tokenizer_path).n_vocab
+    tokenizer = load_tokenizer(tokenizer_path)
+    vocab_size = tokenizer.n_vocab
 
     # --- data ---
     block_size = data_cfg.get("block_size", 1024)
@@ -115,6 +116,8 @@ def main():
         max_steps=max_steps,
         # None -> auto (compile only where torch.compile is supported).
         compile=trainer_cfg.get("compile", None),
+        # Used to render generated-text samples to TensorBoard during validation.
+        tokenizer=tokenizer,
     )
 
     # --- continual learning: warm-start weights from a previous stage ---
