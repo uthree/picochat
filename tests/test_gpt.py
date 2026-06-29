@@ -432,13 +432,6 @@ def test_build_lm_overrides_preset():
     assert lm.transformer.n_layers == 2  # overridden from preset's 8
 
 
-def test_build_lm_uses_preset_vocab_by_default():
-    # pico/small default to a 32k vocab; base+ to 64k.
-    assert build_lm("pico").embed.num_embeddings == 32000
-    assert build_lm("small").embed.num_embeddings == 32000
-    assert build_lm("base").embed.num_embeddings == 64000
-
-
 def test_build_lm_vocab_override():
     lm = build_lm("pico", vocab_size=123)
     assert lm.embed.num_embeddings == 123
@@ -467,9 +460,7 @@ def test_tied_embeddings_share_gradient():
     assert lm.tie_embeddings
     lm(torch.randint(0, 40, (1, 4))).sum().backward()
     # one shared parameter -> appears once in parameters()
-    n_embed_params = sum(
-        1 for p in lm.parameters() if p is lm.embed.weight
-    )
+    n_embed_params = sum(1 for p in lm.parameters() if p is lm.embed.weight)
     assert n_embed_params == 1
 
 

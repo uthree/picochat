@@ -300,17 +300,17 @@ MODEL_PRESETS: dict[str, dict] = {
         n_layers=8,
         n_heads=8,
         n_kv_heads=2,
-        vocab_size=32000,
+        vocab_size=64000,
         tie_embeddings=True,
-    ),  # ~40M
+    ),  # ~56M
     "small": dict(
         d_model=768,
         n_layers=12,
         n_heads=12,
         n_kv_heads=4,
-        vocab_size=32000,
+        vocab_size=64000,
         tie_embeddings=True,
-    ),  # ~107M
+    ),  # ~130M
     "base": dict(
         d_model=1024,
         n_layers=24,

@@ -36,9 +36,7 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
     if "preset" in entry:
         name = entry["preset"]
         if name not in PRESETS:
-            raise SystemExit(
-                f"unknown preset '{name}'. choices: {', '.join(PRESETS)}"
-            )
+            raise SystemExit(f"unknown preset '{name}'. choices: {', '.join(PRESETS)}")
         return PRESETS[name]
     if "path" in entry:
         return DatasetSpec(
@@ -52,7 +50,13 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, required=True, help="tokenizer recipe (YAML)")
+    p.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="tokenizer recipe (YAML)",
+        default="configs/tokenizer/default.yml",
+    )
     p.add_argument(
         "-o", "--output", type=str, default=None, help="override config's output path"
     )
