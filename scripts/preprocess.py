@@ -81,7 +81,7 @@ def process(
     output: Path,
     enc,
     eos_id: int,
-    streaming: bool = True,
+    streaming: bool = False,
     limit: int | None = None,
     batch_size: int = BATCH_SIZE,
     num_threads: int | None = None,
@@ -123,7 +123,7 @@ def process(
 def run_config(cfg: dict, enc, eos_id: int) -> None:
     """Process every dataset listed in a preprocess recipe."""
     output_dir = Path(cfg.get("output_dir", ""))
-    streaming = cfg.get("streaming", True)
+    streaming = cfg.get("streaming", False)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
     num_threads = cfg.get("num_threads")
     entries = cfg["datasets"]
@@ -160,7 +160,9 @@ def main():
         "-s", "--split", type=str, default=None, help="override the spec's split"
     )
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--no-streaming", action="store_true")
+    # Default is non-streaming: download once to the HF cache, then iterate from
+    # local arrow (much faster). Pass --streaming for datasets too big for disk.
+    parser.add_argument("--streaming", action="store_true")
     parser.add_argument(
         "--batch-size", type=int, default=BATCH_SIZE, help="docs per encode batch"
     )
@@ -192,7 +194,7 @@ def main():
         Path(args.output),
         enc,
         eos_id,
-        streaming=not args.no_streaming,
+        streaming=args.streaming,
         limit=args.limit,
         batch_size=args.batch_size,
         num_threads=args.num_threads,

@@ -4,7 +4,7 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: data
-streaming: true
+streaming: true # wikipedia / fineweb-ja are huge; stream instead of filling the disk
 
 datasets:
   - {preset: wikipedia-en, output: wikipedia-en.bin}

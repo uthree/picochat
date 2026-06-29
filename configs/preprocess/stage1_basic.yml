@@ -5,7 +5,7 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: data
-streaming: true
+streaming: false # small datasets: download once, then iterate from local cache
 
 datasets:
   - {preset: tinystories, output: tinystories.bin}
