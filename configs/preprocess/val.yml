@@ -14,9 +14,25 @@ output_dir: data
 streaming: false
 
 datasets:
-  # --- English ---
-  - {path: Salesforce/wikitext, name: wikitext-2-raw-v1, split: validation, output: val-en-wikitext.bin, limit: 500}
-  # stream these slices: non-streaming would download all of wikipedia for 500 docs.
-  - {preset: wikipedia-en, output: val-en-wikipedia.bin, limit: 500, streaming: true}
-  # --- Japanese ---
-  - {preset: wikipedia-ja, output: val-ja-wikipedia.bin, limit: 500, streaming: true}
+    # --- English ---
+    - {
+          path: Salesforce/wikitext,
+          name: wikitext-2-raw-v1,
+          split: validation,
+          output: val-en-wikitext.bin,
+          limit: 500,
+      }
+    # stream these slices: non-streaming would download all of wikipedia for 500 docs.
+    - {
+          preset: wikipedia-en,
+          output: val-en-wikipedia.bin,
+          limit: 500,
+          streaming: false,
+      }
+    # --- Japanese ---
+    - {
+          preset: wikipedia-ja,
+          output: val-ja-wikipedia.bin,
+          limit: 500,
+          streaming: false,
+      }

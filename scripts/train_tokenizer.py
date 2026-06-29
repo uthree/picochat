@@ -80,6 +80,7 @@ def main():
     mixture = Mixture(specs=specs, weights=weights)
 
     texts = iter_mixture(mixture, total_chars=total_chars, streaming=streaming)
+    print("training tokenizer ...")
     train_tokenizer(
         texts,
         vocab_size=vocab_size,
