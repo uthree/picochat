@@ -6,5 +6,5 @@ streaming: true
 
 data:
     - { preset: tinystories, weight: 1 }
-    - { preset: wikipedia-en, weight: 1 }
-    - { preset: cosmopedia, weight: 1 }
+    - { preset: children-stories, weight: 1 }
+    - { preset: gsm8k, weight: 1 }
