@@ -133,13 +133,16 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
             raise SystemExit(f"dataset entry needs 'output': {entry}")
         output = output_dir / entry["output"]
         limit = entry.get("limit")
+        # Per-entry `streaming` overrides the file default, e.g. to stream a small
+        # slice of a huge dataset instead of downloading all of it.
+        entry_streaming = entry.get("streaming", streaming)
         print(f"[{i}/{len(entries)}] {spec.path} ({spec.split}) -> {output}", flush=True)
         process(
             spec,
             output,
             enc,
             eos_id,
-            streaming=streaming,
+            streaming=entry_streaming,
             limit=limit,
             batch_size=batch_size,
             num_threads=num_threads,

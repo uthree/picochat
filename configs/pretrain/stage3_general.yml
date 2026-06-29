@@ -22,7 +22,9 @@ data:
         - data/wikipedia-en.bin
         - data/wikipedia-ja.bin
         - data/fineweb-ja.bin
-    val_bin: null
+    val_bin: # shared held-out set (see configs/preprocess/val.yml)
+        - data/val-en.bin
+        - data/val-ja.bin
 
 optim:
     lr: 1.5e-4 # lower again for the final stage

@@ -430,7 +430,7 @@ class GPT(L.LightningModule):
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
-        self.log("valid_loss", loss)
+        self.log("val_loss", loss, prog_bar=True)
         if batch_idx <= self.sample_batches:
             # Sanity-check what the model actually generates: prefill the first
             # half of the sequence and let it autoregress the second half, then
