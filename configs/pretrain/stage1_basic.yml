@@ -2,10 +2,8 @@
 # Simplest, most basic text (kindergarten -> grade-school level) so the model
 # learns fundamentals first. Mostly English (easy Japanese text is scarce).
 #
-# Preprocess the bins first, e.g.:
-#   python scripts/preprocess.py -p tinystories       -o data/tinystories.bin
-#   python scripts/preprocess.py -p children-stories  -o data/children-stories.bin
-#   python scripts/preprocess.py -p gsm8k             -o data/gsm8k.bin
+# Preprocess the bins first:
+#   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
 #
 # Then: python scripts/pretrain.py --config configs/pretrain/stage1_basic.yml
 

@@ -1,0 +1,13 @@
+# Preprocess the datasets used by configs/pretrain/stage1_basic.yml.
+# Produces data/*.bin matching that stage's train_bin list.
+#
+#   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
+
+tokenizer: weights/tokenizer.json
+output_dir: data
+streaming: true
+
+datasets:
+  - {preset: tinystories, output: tinystories.bin}
+  - {preset: children-stories, output: children-stories.bin}
+  - {preset: gsm8k, output: gsm8k.bin}

@@ -1,0 +1,15 @@
+# Preprocess the datasets used by configs/pretrain/stage2_educational.yml.
+#
+#   python scripts/preprocess.py --config configs/preprocess/stage2_educational.yml
+
+tokenizer: weights/tokenizer.json
+output_dir: data
+streaming: true
+
+datasets:
+  - {preset: tiny-textbooks, output: tiny-textbooks.bin}
+  - {preset: tiny-orca-textbooks, output: tiny-orca-textbooks.bin}
+  - {preset: textbooks, output: textbooks.bin}
+  - {preset: cosmopedia, output: cosmopedia.bin}
+  - {preset: fineweb-edu, output: fineweb-edu.bin}
+  - {preset: fineweb-edu-ja, output: fineweb-edu-ja.bin}
