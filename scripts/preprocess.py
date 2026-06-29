@@ -15,8 +15,11 @@ Two ways to run:
 """
 
 import argparse
+import os
 import time
+from itertools import islice
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import yaml
@@ -27,6 +30,15 @@ from picochat.data.sources import PRESETS, DatasetSpec, iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
 EOS_TOKEN = "</s>"
+# Encoding throughput is dominated by tiktoken. Encoding one doc at a time has
+# heavy per-call overhead, so we feed it large batches: encode_ordinary_batch
+# tokenizes them in parallel across Rust threads (GIL released).
+BATCH_SIZE = 1024
+
+
+def _batched(it: Iterator[str], n: int) -> Iterator[list[str]]:
+    while batch := list(islice(it, n)):
+        yield batch
 
 
 def load_enc(tokenizer_path: str):
@@ -71,25 +83,35 @@ def process(
     eos_id: int,
     streaming: bool = True,
     limit: int | None = None,
+    batch_size: int = BATCH_SIZE,
+    num_threads: int | None = None,
 ) -> tuple[int, int]:
-    """Encode every document of `spec` into `output`. Returns (n_docs, n_tokens)."""
+    """Encode every document of `spec` into `output`. Returns (n_docs, n_tokens).
+
+    Documents are encoded in parallel batches (tiktoken releases the GIL), which
+    is far faster than one-at-a-time for short docs like TinyStories.
+    """
+    num_threads = num_threads or (os.cpu_count() or 8)
     output.parent.mkdir(parents=True, exist_ok=True)
     texts = iter_texts(spec, streaming=streaming, limit=limit)
     n_docs = n_tokens = 0
     start = time.time()
     with open(output, "wb") as f:
         bar = tqdm()
-        for text in texts:
-            ids = enc.encode_ordinary(text)
-            ids.append(eos_id)
-            np.asarray(ids, dtype=DTYPE).tofile(f)
-            n_docs += 1
-            n_tokens += len(ids)
+        for batch in _batched(texts, batch_size):
+            encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
+            flat: list[int] = []
+            for ids in encoded:
+                flat.extend(ids)
+                flat.append(eos_id)
+            np.asarray(flat, dtype=DTYPE).tofile(f)
+            n_docs += len(batch)
+            n_tokens += len(flat)
             rate = n_tokens / (time.time() - start)
             bar.set_description(
                 f"{output.name}: {n_docs:,} docs | {n_tokens:,} tokens | {rate:,.0f} tok/s"
             )
-            bar.update()
+            bar.update(len(batch))
         bar.close()
     print(
         f"done: {n_docs:,} docs, {n_tokens:,} tokens -> {output} "
@@ -102,6 +124,8 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
     """Process every dataset listed in a preprocess recipe."""
     output_dir = Path(cfg.get("output_dir", ""))
     streaming = cfg.get("streaming", True)
+    batch_size = cfg.get("batch_size", BATCH_SIZE)
+    num_threads = cfg.get("num_threads")
     entries = cfg["datasets"]
     for i, entry in enumerate(entries, 1):
         spec = spec_from_entry(entry)
@@ -110,7 +134,16 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
         output = output_dir / entry["output"]
         limit = entry.get("limit")
         print(f"[{i}/{len(entries)}] {spec.path} ({spec.split}) -> {output}", flush=True)
-        process(spec, output, enc, eos_id, streaming=streaming, limit=limit)
+        process(
+            spec,
+            output,
+            enc,
+            eos_id,
+            streaming=streaming,
+            limit=limit,
+            batch_size=batch_size,
+            num_threads=num_threads,
+        )
 
 
 def main():
@@ -128,6 +161,15 @@ def main():
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--no-streaming", action="store_true")
+    parser.add_argument(
+        "--batch-size", type=int, default=BATCH_SIZE, help="docs per encode batch"
+    )
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=None,
+        help="tiktoken encode threads (default: os.cpu_count())",
+    )
     args = parser.parse_args()
 
     enc, eos_id = load_enc(args.tokenizer)
@@ -152,6 +194,8 @@ def main():
         eos_id,
         streaming=not args.no_streaming,
         limit=args.limit,
+        batch_size=args.batch_size,
+        num_threads=args.num_threads,
     )
 
 
