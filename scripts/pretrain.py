@@ -26,7 +26,7 @@ from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
-MODEL_OVERRIDES = ("d_model", "n_kv_heads", "d_head", "n_layers", "tie_embeddings")
+MODEL_OVERRIDES = ("d_model", "n_heads", "n_kv_heads", "n_layers", "tie_embeddings")
 
 
 def make_dataset(bins, block_size: int, random: bool):
