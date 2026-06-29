@@ -56,6 +56,7 @@ def main():
     n_tokens = 0
     start = time.time()
     with open(output, "wb") as f:
+        bar = tqdm()
         for text in texts:
             ids = enc.encode_ordinary(text)
             ids.append(eos_id)
