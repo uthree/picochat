@@ -1,8 +1,8 @@
 # Preprocess the datasets used by configs/pretrain/stage1_basic.yml.
 # Each entry picks its own split (default train); a validation bin is just a
-# second entry pointing at a validation split. Entries whose split doesn't
-# exist are skipped, so only tinystories.val.bin is actually produced here
-# (children-stories has no validation split; gsm8k only has train/test).
+# second entry pointing at a validation split. Every dataset/split is checked
+# before processing, so only list splits that exist: here only tinystories has
+# a 'validation' split (children-stories is train-only; gsm8k has train/test).
 #
 #   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
 
@@ -14,6 +14,4 @@ datasets:
   - {preset: tinystories, output: tinystories.bin}
   - {preset: tinystories, output: tinystories.val.bin, split: validation, limit: 1000}
   - {preset: children-stories, output: children-stories.bin}
-  - {preset: children-stories, output: children-stories.val.bin, split: validation, limit: 1000}
   - {preset: gsm8k, output: gsm8k.bin}
-  - {preset: gsm8k, output: gsm8k.val.bin, split: validation, limit: 1000}

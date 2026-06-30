@@ -44,20 +44,37 @@ def _batched(it: Iterator[str], n: int) -> Iterator[list[str]]:
         yield batch
 
 
-def split_unavailable(spec: DatasetSpec) -> bool:
-    """True only if we can confirm spec.split is absent for this dataset.
+def validate_specs(specs: list[DatasetSpec]) -> list[str]:
+    """Return a problem message for every spec whose dataset or split is invalid.
 
-    Lets the caller skip an entry whose split doesn't exist (e.g. a validation
-    entry for a train-only dataset like wikipedia) instead of crashing. If the
-    splits can't be listed (gated/offline dataset), returns False so processing
-    is still attempted.
+    Run before any processing so a typo'd path/config or a missing split (e.g. a
+    validation entry for a train-only dataset like wikipedia) stops the script
+    up front instead of failing halfway through. Split listings are metadata-only
+    (no data download) and cached per (path, name).
     """
-    try:
-        available = get_dataset_split_names(spec.path, spec.name)
-    except Exception:
-        return False
-    base = spec.split.split("[")[0]  # ignore slicing like "train[:1%]"
-    return base not in available
+    problems: list[str] = []
+    splits_cache: dict[tuple[str, str | None], list[str] | None] = {}
+    for spec in specs:
+        key = (spec.path, spec.name)
+        if key not in splits_cache:
+            try:
+                splits_cache[key] = get_dataset_split_names(spec.path, spec.name)
+            except Exception as e:
+                splits_cache[key] = None
+                problems.append(
+                    f"{spec.path} (name={spec.name!r}): cannot load dataset "
+                    f"({type(e).__name__}: {e})"
+                )
+        available = splits_cache[key]
+        if available is None:
+            continue  # dataset-level failure already reported
+        base = spec.split.split("[")[0]  # ignore slicing like "train[:1%]"
+        if base not in available:
+            problems.append(
+                f"{spec.path} (name={spec.name!r}): split {spec.split!r} not found; "
+                f"available: {available}"
+            )
+    return problems
 
 
 def load_enc(tokenizer_path: str):
@@ -149,25 +166,28 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
     just ordinary entries pointing at a validation split, e.g.:
         - {preset: tinystories, output: tinystories.bin}
         - {preset: tinystories, output: tinystories.val.bin, split: validation}
-    Entries whose split doesn't exist (e.g. validation for a train-only dataset)
-    are skipped rather than erroring.
+    Every dataset/split is validated up front; an invalid one stops the script.
     """
     output_dir = Path(cfg.get("output_dir", ""))
     streaming = cfg.get("streaming", False)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
     num_threads = cfg.get("num_threads")
     entries = cfg["datasets"]
-    for i, entry in enumerate(entries, 1):
-        spec = spec_from_entry(entry)
+    for entry in entries:
         if "output" not in entry:
             raise SystemExit(f"dataset entry needs 'output': {entry}")
+    specs = [spec_from_entry(entry) for entry in entries]
+
+    print(f"validating {len(specs)} dataset(s)/split(s)...", flush=True)
+    problems = validate_specs(specs)
+    if problems:
+        raise SystemExit(
+            "invalid dataset/split in config (nothing processed):\n"
+            + "\n".join(f"  - {p}" for p in problems)
+        )
+
+    for i, (entry, spec) in enumerate(zip(entries, specs), 1):
         output = output_dir / entry["output"]
-        if split_unavailable(spec):
-            print(
-                f"[{i}/{len(entries)}] skip {spec.path}: no '{spec.split}' split",
-                flush=True,
-            )
-            continue
         limit = entry.get("limit")
         # Per-entry `streaming` overrides the file default, e.g. to stream a small
         # slice of a huge dataset instead of downloading all of it.
@@ -228,6 +248,9 @@ def main():
     spec = resolve_spec(args.preset, args.dataset)
     if args.split is not None:
         spec.split = args.split
+    problems = validate_specs([spec])
+    if problems:
+        raise SystemExit("invalid dataset/split:\n" + "\n".join(f"  - {p}" for p in problems))
     process(
         spec,
         Path(args.output),
