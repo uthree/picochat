@@ -17,6 +17,7 @@ Two ways to run:
 import argparse
 import os
 import time
+from dataclasses import replace
 from itertools import islice
 from pathlib import Path
 from typing import Iterator
@@ -71,8 +72,11 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
         )
     else:
         raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
+    # Per-entry `split` override. Use replace() to copy the spec rather than
+    # mutate it: PRESETS entries are shared, so mutating would leak the split
+    # into every other entry using the same preset.
     if "split" in entry:
-        spec.split = entry["split"]
+        spec = replace(spec, split=entry["split"])
     return spec
 
 
