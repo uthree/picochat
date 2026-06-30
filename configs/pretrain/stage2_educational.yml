@@ -30,9 +30,7 @@ data:
         - data/cosmopedia.bin
         - data/fineweb-edu.bin
         - data/fineweb-edu-ja.bin
-    val_bin: # shared held-out set (see configs/preprocess/val.yml)
-        - data/val-en-wikipedia.bin
-        - data/val-ja-wikipedia.bin
+    val_bin: null # no dataset has a validation split (see configs/preprocess/stage2_educational.yml)
 
 optim:
     lr: 2.0e-4 # slightly lower than stage 1 (continual learning)

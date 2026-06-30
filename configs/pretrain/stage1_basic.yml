@@ -2,9 +2,8 @@
 # Simplest, most basic text (kindergarten -> grade-school level) so the model
 # learns fundamentals first. Mostly English (easy Japanese text is scarce).
 #
-# Preprocess the train + (shared) validation bins first:
+# Preprocess the train + validation bins first (one command makes both):
 #   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
-#   python scripts/preprocess.py --config configs/preprocess/val.yml
 #
 # Then: python scripts/pretrain.py --config configs/pretrain/stage1_basic.yml
 
@@ -23,9 +22,8 @@ data:
         - data/tinystories.bin
         - data/children-stories.bin
         - data/gsm8k.bin
-    val_bin: # shared held-out set (see configs/preprocess/val.yml)
-        - data/val-en-wikipedia.bin
-        - data/val-ja-wikipedia.bin
+    val_bin: # per-dataset validation splits (see configs/preprocess/stage1_basic.yml)
+        - data/tinystories.val.bin
 
 optim:
     lr: 3.0e-4

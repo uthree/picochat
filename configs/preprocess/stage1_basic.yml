@@ -1,11 +1,17 @@
 # Preprocess the datasets used by configs/pretrain/stage1_basic.yml.
-# Produces data/*.bin matching that stage's train_bin list.
+# Produces data/*.bin matching that stage's train_bin list, plus per-dataset
+# validation bins (<name>.val.bin) from each dataset's validation split.
 #
 #   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: data
 streaming: false # small datasets: download once, then iterate from local cache
+
+# Make a validation bin from each dataset's validation split (datasets without
+# one are skipped). Here only tinystories has a 'validation' split.
+val_split: validation
+val_limit: 1000 # cap val docs per dataset so validation stays quick
 
 datasets:
   - {preset: tinystories, output: tinystories.bin}

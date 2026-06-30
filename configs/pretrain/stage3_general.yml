@@ -22,9 +22,7 @@ data:
         - data/wikipedia-en.bin
         - data/wikipedia-ja.bin
         - data/fineweb-ja.bin
-    val_bin: # shared held-out set (see configs/preprocess/val.yml)
-        - data/val-en-wikipedia.bin
-        - data/val-ja-wikipedia.bin
+    val_bin: null # no dataset has a validation split (see configs/preprocess/stage3_general.yml)
 
 optim:
     lr: 1.5e-4 # lower again for the final stage
