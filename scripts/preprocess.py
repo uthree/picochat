@@ -44,26 +44,20 @@ def _batched(it: Iterator[str], n: int) -> Iterator[list[str]]:
         yield batch
 
 
-def resolve_val_split(spec: DatasetSpec, val_split) -> str | None:
-    """Return the first of `val_split` that exists for the dataset, else None.
+def split_unavailable(spec: DatasetSpec) -> bool:
+    """True only if we can confirm spec.split is absent for this dataset.
 
-    `val_split` may be a single split name or a list of candidates (tried in
-    order). Datasets without any of them (e.g. wikipedia, which is train-only)
-    return None so the caller can skip making a validation bin.
+    Lets the caller skip an entry whose split doesn't exist (e.g. a validation
+    entry for a train-only dataset like wikipedia) instead of crashing. If the
+    splits can't be listed (gated/offline dataset), returns False so processing
+    is still attempted.
     """
-    if not val_split:
-        return None
-    candidates = [val_split] if isinstance(val_split, str) else list(val_split)
     try:
-        available = set(get_dataset_split_names(spec.path, spec.name))
+        available = get_dataset_split_names(spec.path, spec.name)
     except Exception:
-        return None
-    return next((c for c in candidates if c in available), None)
-
-
-def _val_path(output: Path) -> Path:
-    """data/tinystories.bin -> data/tinystories.val.bin"""
-    return output.with_name(f"{output.stem}.val{output.suffix}")
+        return False
+    base = spec.split.split("[")[0]  # ignore slicing like "train[:1%]"
+    return base not in available
 
 
 def load_enc(tokenizer_path: str):
@@ -151,22 +145,29 @@ def process(
 def run_config(cfg: dict, enc, eos_id: int) -> None:
     """Process every dataset listed in a preprocess recipe.
 
-    When `val_split` is set, each dataset also produces a validation bin
-    (`<output>.val.bin`) from that split. Datasets that lack it (e.g. wikipedia)
-    are skipped, so validation is per-stage rather than a shared corpus.
+    Each entry picks its own `split` (default train), so validation bins are
+    just ordinary entries pointing at a validation split, e.g.:
+        - {preset: tinystories, output: tinystories.bin}
+        - {preset: tinystories, output: tinystories.val.bin, split: validation}
+    Entries whose split doesn't exist (e.g. validation for a train-only dataset)
+    are skipped rather than erroring.
     """
     output_dir = Path(cfg.get("output_dir", ""))
     streaming = cfg.get("streaming", False)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
     num_threads = cfg.get("num_threads")
-    val_split = cfg.get("val_split")  # str | list | None; None disables val bins
-    val_limit = cfg.get("val_limit")
     entries = cfg["datasets"]
     for i, entry in enumerate(entries, 1):
         spec = spec_from_entry(entry)
         if "output" not in entry:
             raise SystemExit(f"dataset entry needs 'output': {entry}")
         output = output_dir / entry["output"]
+        if split_unavailable(spec):
+            print(
+                f"[{i}/{len(entries)}] skip {spec.path}: no '{spec.split}' split",
+                flush=True,
+            )
+            continue
         limit = entry.get("limit")
         # Per-entry `streaming` overrides the file default, e.g. to stream a small
         # slice of a huge dataset instead of downloading all of it.
@@ -182,23 +183,6 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
             batch_size=batch_size,
             num_threads=num_threads,
         )
-        # Validation bin from this dataset's own validation split (skip if none).
-        vsplit = resolve_val_split(spec, entry.get("val_split", val_split))
-        if entry.get("val_split", val_split) and not vsplit:
-            print(f"      val: no validation split for {spec.path}, skipping")
-        elif vsplit:
-            vout = _val_path(output)
-            print(f"      val: {spec.path} ({vsplit}) -> {vout}", flush=True)
-            process(
-                replace(spec, split=vsplit),
-                vout,
-                enc,
-                eos_id,
-                streaming=entry_streaming,
-                limit=entry.get("val_limit", val_limit),
-                batch_size=batch_size,
-                num_threads=num_threads,
-            )
 
 
 def main():

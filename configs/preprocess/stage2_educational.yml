@@ -6,12 +6,9 @@ tokenizer: weights/tokenizer.json
 output_dir: data
 streaming: true # fineweb-edu(-ja) are large; stream instead of filling the disk
 
-# None of these have a 'validation' split, so no val bins are produced (they are
-# skipped). fineweb-edu-ja has a 'test' split if you want to opt in via
-# `val_split: [validation, test]`.
-val_split: validation
-val_limit: 1000
-
+# None of these have a 'validation' split, so there are no validation entries.
+# fineweb-edu-ja has a 'test' split, e.g. add:
+#   - {preset: fineweb-edu-ja, output: fineweb-edu-ja.val.bin, split: test, limit: 1000}
 datasets:
   - {preset: tiny-textbooks, output: tiny-textbooks.bin}
   - {preset: tiny-orca-textbooks, output: tiny-orca-textbooks.bin}

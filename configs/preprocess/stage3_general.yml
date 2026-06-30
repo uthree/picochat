@@ -6,11 +6,9 @@ tokenizer: weights/tokenizer.json
 output_dir: data
 streaming: true # wikipedia / fineweb-ja are huge; stream instead of filling the disk
 
-# wikipedia is train-only, so it's skipped for validation. fineweb-ja has a
-# 'test' split if you want to opt in via `val_split: [validation, test]`.
-val_split: validation
-val_limit: 1000
-
+# wikipedia is train-only (no validation entries). fineweb-ja has a 'test'
+# split, e.g. add:
+#   - {preset: fineweb-ja, output: fineweb-ja.val.bin, split: test, limit: 1000}
 datasets:
   - {preset: wikipedia-en, output: wikipedia-en.bin}
   - {preset: wikipedia-ja, output: wikipedia-ja.bin}
