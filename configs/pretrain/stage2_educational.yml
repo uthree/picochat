@@ -18,7 +18,7 @@ output_dir: weights/stage2
 init_from: weights/stage1/last.ckpt
 
 model:
-    size: base
+    size: pico
     max_seq_len: 4096
 
 data:
