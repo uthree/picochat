@@ -1,6 +1,8 @@
 import lightning as L
 import pytest
 import torch
+import torch.nn.functional as F
+from einops import rearrange
 from torch.utils.data import DataLoader, Dataset
 
 from picochat.model.gpt import (
@@ -172,6 +174,91 @@ def test_attention_backward():
     y = attn(x)
     y.sum().backward()
     assert x.grad is not None
+
+
+# ---------------------------------------------------------------------------
+# Sliding window attention
+# ---------------------------------------------------------------------------
+def test_window_attention_output_shape():
+    attn = SelfAttention(32, 4, window_size=3)
+    x = torch.randn(2, 10, 32)
+    assert attn(x).shape == x.shape
+
+
+def test_window_attention_ignores_tokens_outside_window():
+    attn = SelfAttention(32, 4, window_size=3).eval()
+    x = torch.randn(1, 10, 32)
+    full = attn(x)
+
+    perturbed = x.clone()
+    perturbed[:, 0] += 100.0
+    out = attn(perturbed)
+
+    # position 9 is 9 steps away from position 0, well outside the window of 3
+    assert torch.allclose(full[:, 9], out[:, 9], atol=1e-5)
+    # position 1 is within the window, so it must be affected
+    assert not torch.allclose(full[:, 1], out[:, 1], atol=1e-5)
+
+
+def test_window_attention_still_causal():
+    # earlier outputs must not depend on later tokens, window or not
+    attn = SelfAttention(32, 4, window_size=3).eval()
+    x = torch.randn(1, 6, 32)
+    full = attn(x)
+    prefix = attn(x[:, :3])
+    assert torch.allclose(full[:, :3], prefix, atol=1e-5)
+
+
+def test_window_attention_cache_matches_full_forward():
+    attn = SelfAttention(32, 4, window_size=3).eval()
+    x = torch.randn(1, 10, 32)
+    full = attn(x)
+
+    _, cache = attn.decode(x[:, :8])
+    step, _ = attn.decode(x[:, 8:9], cache=cache)
+    assert torch.allclose(full[:, 8:9], step, atol=1e-4)
+
+
+def test_window_none_means_full_attention():
+    # window_size=None should be equivalent to unbounded (full) attention
+    torch.manual_seed(0)
+    attn = SelfAttention(32, 4, window_size=None).eval()
+    x = torch.randn(1, 10, 32)
+    full = attn(x)
+
+    perturbed = x.clone()
+    perturbed[:, 0] += 100.0
+    out = attn(perturbed)
+    assert not torch.allclose(full[:, 9], out[:, 9], atol=1e-5)
+
+
+def test_transformer_interleaves_global_and_local_layers():
+    # global_attn_ratio=2 -> every 2nd layer (1-indexed) is full attention,
+    # the rest are windowed.
+    model = Transformer(
+        d_model=32, n_heads=4, n_layers=4, window_size=3, global_attn_ratio=2
+    )
+    window_sizes = [layer.attn.window_size for layer in model.layers]
+    assert window_sizes == [None, 3, None, 3]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="flex_attention path is CUDA-only")
+def test_window_attention_flex_attention_matches_masked_sdpa_on_cuda():
+    # On CUDA, forward() routes windowed attention through flex_attention
+    # instead of a materialized SDPA mask; verify the two give the same result.
+    torch.manual_seed(0)
+    attn = SelfAttention(64, 8, window_size=3).cuda().eval()
+    x = torch.randn(2, 12, 64, device="cuda")
+
+    flex_out = attn(x)
+
+    query, key, value = attn._project(x)
+    query, key = attn._rope(query), attn._rope(key)
+    mask = attn._window_mask(query.shape[-2], key.shape[-2], offset=0, device=query.device)
+    ref = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, enable_gqa=True)
+    ref_out = attn.proj_o(rearrange(ref, "b h l d -> b l (h d)"))
+
+    assert torch.allclose(flex_out, ref_out, atol=1e-3)
 
 
 # ---------------------------------------------------------------------------

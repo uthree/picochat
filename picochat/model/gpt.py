@@ -6,11 +6,38 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
     with torch.amp.autocast(device_type="cuda", enabled=False):
         return x / (x.square().mean(-1, keepdim=True).sqrt() + eps)
+
+
+_block_mask_cache: dict[tuple, BlockMask] = {}
+
+
+@torch._dynamo.disable()
+def _sliding_window_block_mask(
+    window_size: int, q_len: int, k_len: int, device: torch.device
+) -> BlockMask:
+    # Building a BlockMask involves plain-Python/vmap machinery that dynamo
+    # can't trace through, and doing so from inside a checkpointed layer (a
+    # graph break inside a for-loop) makes torch.compile give up on the whole
+    # forward and fall back to eager. `torch._dynamo.disable` keeps this call
+    # opaque to the tracer so the surrounding flex_attention call still gets
+    # compiled into a fused kernel; caching means it only actually runs once
+    # per (window_size, q_len, k_len, device) instead of every forward call.
+    key = (window_size, q_len, k_len, str(device))
+    if key not in _block_mask_cache:
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            return (kv_idx <= q_idx) & (kv_idx > q_idx - window_size)
+
+        _block_mask_cache[key] = create_block_mask(
+            mask_mod, B=None, H=None, Q_LEN=q_len, KV_LEN=k_len, device=device
+        )
+    return _block_mask_cache[key]
 
 
 def rotate_half(x: Tensor) -> Tensor:
@@ -85,18 +112,57 @@ class SelfAttention(nn.Module):
         )
         return query, key, value
 
+    def _window_mask(
+        self, q_len: int, k_len: int, offset: int, device: torch.device
+    ) -> Tensor:
+        # Bottom-right aligned causal mask: query pos i (absolute i+offset) attends
+        # to keys <= i+offset (reduces to plain causal when offset == 0). When
+        # window_size is set, additionally drop keys older than window_size
+        # positions back, so each query only sees a local trailing slice.
+        q_idx = torch.arange(q_len, device=device).unsqueeze(1) + offset
+        k_idx = torch.arange(k_len, device=device).unsqueeze(0)
+        mask = k_idx <= q_idx
+        if self.window_size is not None:
+            mask &= k_idx > q_idx - self.window_size
+        return mask
+
     def forward(self, x: Tensor) -> Tensor:
         # Training path: full causal attention over the whole sequence, no cache.
         query, key, value = self._project(x)
         query, key = self._rope(query), self._rope(key)
-        attn = F.scaled_dot_product_attention(
-            query, key, value, is_causal=True, enable_gqa=True
-        )
+        if self.window_size is None:
+            # Fast path: let SDPA use its native causal kernel instead of a
+            # materialized mask.
+            attn = F.scaled_dot_product_attention(
+                query, key, value, is_causal=True, enable_gqa=True
+            )
+        elif query.is_cuda:
+            # flex_attention lowers to a fused, block-sparse Triton kernel (the
+            # same flash-attention family of algorithms as SDPA's fused
+            # backends) when this forward runs under torch.compile, so windowed
+            # layers skip whole blocks outside the window instead of
+            # materializing an L x L mask like a naive implementation would.
+            # (flex_attention has no CPU backward support, so this path is
+            # CUDA-only; see the else branch below.)
+            block_mask = _sliding_window_block_mask(
+                self.window_size, query.shape[-2], key.shape[-2], query.device
+            )
+            attn = flex_attention(query, key, value, block_mask=block_mask, enable_gqa=True)
+        else:
+            mask = self._window_mask(
+                query.shape[-2], key.shape[-2], offset=0, device=query.device
+            )
+            attn = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=mask, enable_gqa=True
+            )
         return self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
 
     def decode(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
         # Inference path: append the new keys/values to the cache and attend over
-        # the full prefix. Returns the updated cache (stacked [key, value]).
+        # the full prefix (the window mask below limits which of those the query
+        # actually attends to). Returns the updated cache (stacked [key, value]).
+        # Always runs eager (see GPT.__init__), so flex_attention would gain
+        # nothing here over a plain masked SDPA call; keep the simpler path.
         query, key, value = self._project(x)
         if cache is not None:
             key = torch.cat([cache[0], key], dim=-2)
@@ -105,11 +171,8 @@ class SelfAttention(nn.Module):
         # query covers the last q_len positions; key covers the whole prefix.
         offset = key.shape[-2] - query.shape[-2]
         query, key = self._rope(query, offset=offset), self._rope(key)
-        # Bottom-right aligned causal mask: query pos i attends to keys <= i+offset
-        # (tril with diagonal=offset; reduces to plain causal when offset == 0).
-        q_len, k_len = query.shape[-2], key.shape[-2]
-        mask = torch.ones(q_len, k_len, dtype=torch.bool, device=query.device).tril(
-            diagonal=offset
+        mask = self._window_mask(
+            query.shape[-2], key.shape[-2], offset, query.device
         )
         attn = F.scaled_dot_product_attention(
             query, key, value, attn_mask=mask, enable_gqa=True
