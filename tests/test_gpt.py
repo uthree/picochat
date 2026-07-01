@@ -298,10 +298,12 @@ def test_transformer_interleaves_global_and_local_layers():
         d_model=32, n_heads=4, n_layers=4, window_size=3, global_attn_ratio=2
     )
     window_sizes = [layer.attn.window_size for layer in model.layers]
-    assert window_sizes == [None, 3, None, 3]
+    assert window_sizes == [3, None, 3, None]
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="flex_attention path is CUDA-only")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="flex_attention path is CUDA-only"
+)
 def test_window_attention_flex_attention_matches_masked_sdpa_on_cuda():
     # On CUDA, forward() routes windowed attention through flex_attention
     # instead of a materialized SDPA mask; verify the two give the same result.
@@ -316,7 +318,9 @@ def test_window_attention_flex_attention_matches_masked_sdpa_on_cuda():
     mask = attn._window_mask(
         query.shape[-2], key.shape[-2], q_offset=0, k_offset=0, device=query.device
     )
-    ref = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, enable_gqa=True)
+    ref = F.scaled_dot_product_attention(
+        query, key, value, attn_mask=mask, enable_gqa=True
+    )
     ref_out = attn.proj_o(rearrange(ref, "b h l d -> b l (h d)"))
 
     assert torch.allclose(flex_out, ref_out, atol=1e-3)
