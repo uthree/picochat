@@ -511,7 +511,7 @@ class GPT(L.LightningModule):
         min_lr_ratio: float = 0.1,
         compile: bool | None = None,
         tokenizer=None,
-        sample_batches: int = 4,
+        sample_batches: int = 20,
     ):
         super().__init__()
         self.model = transformer_lm
