@@ -25,13 +25,19 @@ model:
 data:
     block_size: 1024
     train_bin:
+        - data/tinystories.bin
+        - data/children-stories.bin
+        - data/gsm8k.bin
         - data/tiny-textbooks.bin
         - data/tiny-orca-textbooks.bin
         - data/textbooks.bin
         - data/cosmopedia.bin
         - data/fineweb-edu.bin
         - data/fineweb-edu-ja.bin
-    val_bin: null # no dataset has a validation split (see configs/preprocess/stage2_educational.yml)
+    val_bin:
+        - data/tinystories.val.bin
+        - data/gsm8k.val.bin
+        - data/tiny-textbooks.val.bin
 
 optim:
     lr: 2.0e-4 # slightly lower than stage 1 (continual learning)

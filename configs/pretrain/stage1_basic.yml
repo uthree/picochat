@@ -24,7 +24,7 @@ data:
         - data/gsm8k.bin
     val_bin: # per-dataset validation splits (see configs/preprocess/stage1_basic.yml)
         - data/tinystories.val.bin
-
+        - data/gsm8k.val.bin
 optim:
     lr: 3.0e-4
     weight_decay: 0.1
