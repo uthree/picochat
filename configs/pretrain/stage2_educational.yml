@@ -22,7 +22,7 @@ model:
     max_seq_len: 4096
 
 data:
-    block_size: 1024
+    block_size: 512
     train_bin:
         - data/tiny-textbooks.bin
         - data/tiny-orca-textbooks.bin
