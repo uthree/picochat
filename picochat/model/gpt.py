@@ -113,14 +113,22 @@ class SelfAttention(nn.Module):
         return query, key, value
 
     def _window_mask(
-        self, q_len: int, k_len: int, offset: int, device: torch.device
+        self,
+        q_len: int,
+        k_len: int,
+        q_offset: int,
+        k_offset: int,
+        device: torch.device,
     ) -> Tensor:
-        # Bottom-right aligned causal mask: query pos i (absolute i+offset) attends
-        # to keys <= i+offset (reduces to plain causal when offset == 0). When
-        # window_size is set, additionally drop keys older than window_size
-        # positions back, so each query only sees a local trailing slice.
-        q_idx = torch.arange(q_len, device=device).unsqueeze(1) + offset
-        k_idx = torch.arange(k_len, device=device).unsqueeze(0)
+        # Bottom-right aligned causal mask: query at absolute position i+q_offset
+        # attends to keys at absolute position <= i+q_offset (reduces to plain
+        # causal when both offsets are 0). Keys need their own offset separately
+        # from queries because a truncated KV cache no longer starts at absolute
+        # position 0 (see SelfAttention.decode). When window_size is set,
+        # additionally drop keys older than window_size positions back, so each
+        # query only sees a local trailing slice.
+        q_idx = torch.arange(q_len, device=device).unsqueeze(1) + q_offset
+        k_idx = torch.arange(k_len, device=device).unsqueeze(0) + k_offset
         mask = k_idx <= q_idx
         if self.window_size is not None:
             mask &= k_idx > q_idx - self.window_size
@@ -150,34 +158,47 @@ class SelfAttention(nn.Module):
             attn = flex_attention(query, key, value, block_mask=block_mask, enable_gqa=True)
         else:
             mask = self._window_mask(
-                query.shape[-2], key.shape[-2], offset=0, device=query.device
+                query.shape[-2], key.shape[-2], q_offset=0, k_offset=0, device=query.device
             )
             attn = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=mask, enable_gqa=True
             )
         return self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
 
-    def decode(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
+    def decode(
+        self, x: Tensor, cache: Tensor | None = None, pos: int = 0
+    ) -> tuple[Tensor, Tensor]:
         # Inference path: append the new keys/values to the cache and attend over
         # the full prefix (the window mask below limits which of those the query
-        # actually attends to). Returns the updated cache (stacked [key, value]).
+        # actually attends to). `pos` is the absolute position of the first token
+        # of `x`; the caller (Transformer.decode) owns this bookkeeping, since the
+        # cache is truncated below and can no longer be used to infer it.
         # Always runs eager (see GPT.__init__), so flex_attention would gain
         # nothing here over a plain masked SDPA call; keep the simpler path.
         query, key, value = self._project(x)
+        old_len = 0 if cache is None else cache.shape[-2]
         if cache is not None:
             key = torch.cat([cache[0], key], dim=-2)
             value = torch.cat([cache[1], value], dim=-2)
-        new_cache = torch.stack([key, value])
-        # query covers the last q_len positions; key covers the whole prefix.
-        offset = key.shape[-2] - query.shape[-2]
-        query, key = self._rope(query, offset=offset), self._rope(key)
+        # Absolute position of the first (untruncated) key involved in this call.
+        key_offset = pos - old_len
+        q_len, k_len = query.shape[-2], key.shape[-2]
+        query_r, key_r = self._rope(query, offset=pos), self._rope(key, offset=key_offset)
         mask = self._window_mask(
-            query.shape[-2], key.shape[-2], offset, query.device
+            q_len, k_len, q_offset=pos, k_offset=key_offset, device=query.device
         )
         attn = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=mask, enable_gqa=True
+            query_r, key_r, value, attn_mask=mask, enable_gqa=True
         )
-        return self.proj_o(rearrange(attn, "b h l d -> b l (h d)")), new_cache
+        out = self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
+        # Truncate only what's carried into the *next* call's cache; the attention
+        # above already used the full, untruncated key/value, so a chunk longer
+        # than window_size (e.g. a long prefill) is handled correctly for free.
+        if self.window_size is not None:
+            key = key[..., -self.window_size :, :]
+            value = value[..., -self.window_size :, :]
+        new_cache = torch.stack([key, value])
+        return out, new_cache
 
     def _rope_tables(self, max_seq_len: int) -> tuple[Tensor, Tensor]:
         # Build sin/cos for absolute positions 0..max_seq_len-1 (offset is handled
@@ -231,8 +252,10 @@ class TransformerLayer(nn.Module):
         x = self.ffn(x) + x
         return x
 
-    def decode(self, x: Tensor, cache: Tensor | None = None) -> tuple[Tensor, Tensor]:
-        a, cache = self.attn.decode(x, cache)
+    def decode(
+        self, x: Tensor, cache: Tensor | None = None, pos: int = 0
+    ) -> tuple[Tensor, Tensor]:
+        a, cache = self.attn.decode(x, cache, pos)
         x = a + x
         x = self.ffn(x) + x
         return x, cache
@@ -280,13 +303,18 @@ class Transformer(nn.Module):
         return rms_norm(x)
 
     def decode(
-        self, x: Tensor, cache: list[Tensor | None] | None = None
-    ) -> tuple[Tensor, list[Tensor]]:
+        self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
+    ) -> tuple[Tensor, list[Tensor], int]:
+        # Owns the absolute-position bookkeeping in one place: every layer sees
+        # the same `pos` (they all process the same chunk at the same time), and
+        # only this method computes/advances it. Neither the cache nor the
+        # position is kept as model state -- both flow through args/returns only.
         if cache is None:
             cache = [None] * self.n_layers
+        q_len = x.shape[-2]
         for i, layer in enumerate(self.layers):
-            x, cache[i] = layer.decode(x, cache[i])
-        return rms_norm(x), cache  # type: ignore
+            x, cache[i] = layer.decode(x, cache[i], pos)
+        return rms_norm(x), cache, pos + q_len  # type: ignore
 
 
 class TransformerLM(nn.Module):
@@ -356,11 +384,11 @@ class TransformerLM(nn.Module):
         return self.lmhead(x)
 
     def decode(
-        self, x: Tensor, cache: list[Tensor | None] | None = None
-    ) -> tuple[Tensor, list[Tensor]]:
+        self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
+    ) -> tuple[Tensor, list[Tensor], int]:
         x = self.embed(x)
-        x, cache = self.transformer.decode(x, cache)
-        return self.lmhead(x), cache
+        x, cache, pos = self.transformer.decode(x, cache, pos)
+        return self.lmhead(x), cache, pos
 
 
 # Scale ladder. Presets to switch between pico..3B with the same TransformerLM args.
@@ -509,11 +537,13 @@ class GPT(L.LightningModule):
     @torch.no_grad()
     def _generate(self, prompt: Tensor, max_new_tokens: int) -> Tensor:
         """Greedy-decode `max_new_tokens` tokens after `prompt` (B, L) via KV cache."""
-        logits, cache = self.model.decode(prompt)
+        # `pos` tracks the absolute decode position as a plain local int -- not
+        # model state -- and is threaded through each call, same as `cache`.
+        logits, cache, pos = self.model.decode(prompt)
         next_token = logits[:, -1:].argmax(dim=-1)
         out = [next_token]
         for _ in range(max_new_tokens - 1):
-            logits, cache = self.model.decode(next_token, cache)
+            logits, cache, pos = self.model.decode(next_token, cache, pos)
             next_token = logits[:, -1:].argmax(dim=-1)
             out.append(next_token)
         return torch.cat(out, dim=1)  # (B, max_new_tokens)
