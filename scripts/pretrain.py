@@ -109,12 +109,20 @@ def main():
         tokenizer=tokenizer,
     )
 
-    # --- continual learning: warm-start weights from a previous stage ---
-    if init_from:
-        ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
-        state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-        gpt.load_state_dict(state)
-        print(f"warm-started weights from {init_from}", flush=True)
+    # --- resume: continue this exact stage (weights + optimizer + step) if it
+    # already has a checkpoint in output_dir. Takes priority over init_from,
+    # which only warm-starts weights for a *new* stage.
+    resume_ckpt = Path(output_dir) / "last.ckpt"
+    if resume_ckpt.exists():
+        print(f"resuming stage from {resume_ckpt}", flush=True)
+    else:
+        resume_ckpt = None
+        # --- continual learning: warm-start weights from a previous stage ---
+        if init_from:
+            ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
+            state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+            gpt.load_state_dict(state)
+            print(f"warm-started weights from {init_from}", flush=True)
 
     val_check_interval = trainer_cfg.get("val_check_interval", 500)
     ckpt_cb = ModelCheckpoint(
@@ -149,7 +157,7 @@ def main():
         )
         print(f"auto-tuned batch_size={found}", flush=True)
 
-    trainer.fit(gpt, datamodule=datamodule)
+    trainer.fit(gpt, datamodule=datamodule, ckpt_path=resume_ckpt)
 
 
 if __name__ == "__main__":
