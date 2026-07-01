@@ -6,7 +6,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
-from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
@@ -155,10 +159,16 @@ class SelfAttention(nn.Module):
             block_mask = _sliding_window_block_mask(
                 self.window_size, query.shape[-2], key.shape[-2], query.device
             )
-            attn = flex_attention(query, key, value, block_mask=block_mask, enable_gqa=True)
+            attn = flex_attention(
+                query, key, value, block_mask=block_mask, enable_gqa=True
+            )
         else:
             mask = self._window_mask(
-                query.shape[-2], key.shape[-2], q_offset=0, k_offset=0, device=query.device
+                query.shape[-2],
+                key.shape[-2],
+                q_offset=0,
+                k_offset=0,
+                device=query.device,
             )
             attn = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=mask, enable_gqa=True
@@ -183,7 +193,10 @@ class SelfAttention(nn.Module):
         # Absolute position of the first (untruncated) key involved in this call.
         key_offset = pos - old_len
         q_len, k_len = query.shape[-2], key.shape[-2]
-        query_r, key_r = self._rope(query, offset=pos), self._rope(key, offset=key_offset)
+        query_r, key_r = (
+            self._rope(query, offset=pos),
+            self._rope(key, offset=key_offset),
+        )
         mask = self._window_mask(
             q_len, k_len, q_offset=pos, k_offset=key_offset, device=query.device
         )
@@ -290,7 +303,7 @@ class Transformer(nn.Module):
                 rope_base=rope_base,
                 d_ffn=d_ffn,
                 max_seq_len=max_seq_len,
-                window_size=None if (i + 1) % global_attn_ratio else window_size,
+                window_size=None if (i + 1) % global_attn_ratio == 0 else window_size,
             )
             self.layers.append(layer)
 
@@ -331,6 +344,8 @@ class TransformerLM(nn.Module):
         tie_embeddings: bool = True,
         init_std: float = 0.02,
         grad_checkpoint: bool = True,
+        window_size: int = 64,
+        global_attn_ratio: int = 4,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -348,6 +363,8 @@ class TransformerLM(nn.Module):
             d_ffn=d_ffn,
             max_seq_len=max_seq_len,
             grad_checkpoint=grad_checkpoint,
+            window_size=window_size,
+            global_attn_ratio=global_attn_ratio,
         )
         self._init_weights()
         if tie_embeddings:
@@ -408,6 +425,8 @@ MODEL_PRESETS: dict[str, dict] = {
         n_kv_heads=2,
         vocab_size=64000,
         tie_embeddings=True,
+        window_size=64,
+        global_attn_ratio=4,
     ),  # ~56M
     "small": dict(
         d_model=768,
@@ -416,6 +435,8 @@ MODEL_PRESETS: dict[str, dict] = {
         n_kv_heads=4,
         vocab_size=64000,
         tie_embeddings=True,
+        window_size=64,
+        global_attn_ratio=6,
     ),  # ~130M
     "base": dict(
         d_model=1024,
@@ -424,6 +445,8 @@ MODEL_PRESETS: dict[str, dict] = {
         n_kv_heads=4,
         vocab_size=64000,
         tie_embeddings=False,
+        window_size=64,
+        global_attn_ratio=6,
     ),  # ~421M
     "medium": dict(
         d_model=2048,
@@ -432,6 +455,8 @@ MODEL_PRESETS: dict[str, dict] = {
         n_kv_heads=8,
         vocab_size=64000,
         tie_embeddings=False,
+        window_size=128,
+        global_attn_ratio=6,
     ),  # ~1.5B
     "large": dict(
         d_model=2560,
@@ -440,6 +465,8 @@ MODEL_PRESETS: dict[str, dict] = {
         n_kv_heads=5,
         vocab_size=64000,
         tie_embeddings=False,
+        window_size=128,
+        global_attn_ratio=6,
     ),  # ~2.7B
 }
 

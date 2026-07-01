@@ -15,6 +15,7 @@ init_from: weights/stage2/last.ckpt
 model:
     size: pico
     max_seq_len: 4096
+    grad_checkpoint: true
 
 data:
     block_size: 1024
@@ -32,7 +33,7 @@ optim:
 
 trainer:
     batch_size: 16
-    accumulate: 1
+    accumulate: 4
     grad_clip: 1.0
     precision: bf16-mixed
     num_workers: 4
