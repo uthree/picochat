@@ -12,9 +12,9 @@ output_dir: weights/stage1
 init_from: null # first stage trains from scratch
 
 model:
-    size: pico
+    size: base
     max_seq_len: 4096
-    grad_checkpoint: false # set true to trade compute for memory (bigger models / longer seqs)
+    grad_checkpoint: true # set true to trade compute for memory (bigger models / longer seqs)
 
 data:
     block_size: 1024

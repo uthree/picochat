@@ -50,6 +50,7 @@ class SelfAttention(nn.Module):
         n_kv_heads: int | None = None,
         rope_base: int = 10000,
         max_seq_len: int = 4096,
+        window_size: int | None = None,  # If None is given, full attention
     ):
         super().__init__()
         self.rope_base = rope_base
@@ -60,6 +61,7 @@ class SelfAttention(nn.Module):
         self.n_heads = n_heads
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.d_head = d_model // n_heads
+        self.window_size = window_size
         assert d_model % n_heads == 0  # heads tile d_model
         assert n_heads % self.n_kv_heads == 0  # GQA grouping
         assert self.d_head % 2 == 0  # RoPE rotates dimension pairs
@@ -147,6 +149,7 @@ class TransformerLayer(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
+        window_size: int | None = None,
     ):
         super().__init__()
         self.attn = SelfAttention(
@@ -155,6 +158,7 @@ class TransformerLayer(nn.Module):
             n_kv_heads=n_kv_heads,
             rope_base=rope_base,
             max_seq_len=max_seq_len,
+            window_size=window_size,
         )
         self.ffn = SwiGLU(d_model, d_hidden=d_ffn)
 
@@ -182,6 +186,8 @@ class Transformer(nn.Module):
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
         grad_checkpoint: bool = False,
+        window_size: int = 64,
+        global_attn_ratio: int = 4,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -189,19 +195,18 @@ class Transformer(nn.Module):
         # activations for the backward pass, recompute them instead. Lets us fit
         # bigger models / longer sequences on a fixed GPU. No effect on decode().
         self.grad_checkpoint = grad_checkpoint
-        self.layers = nn.ModuleList(
-            [
-                TransformerLayer(
-                    d_model,
-                    n_heads,
-                    n_kv_heads=n_kv_heads,
-                    rope_base=rope_base,
-                    d_ffn=d_ffn,
-                    max_seq_len=max_seq_len,
-                )
-                for _ in range(n_layers)
-            ]
-        )
+        self.layers = nn.ModuleList()
+        for i in range(n_layers):
+            layer = TransformerLayer(
+                d_model,
+                n_heads,
+                n_kv_heads=n_kv_heads,
+                rope_base=rope_base,
+                d_ffn=d_ffn,
+                max_seq_len=max_seq_len,
+                window_size=None if (i + 1) % global_attn_ratio else window_size,
+            )
+            self.layers.append(layer)
 
     def forward(self, x: Tensor) -> Tensor:
         for layer in self.layers:
@@ -234,7 +239,7 @@ class TransformerLM(nn.Module):
         max_seq_len: int = 4096,
         tie_embeddings: bool = True,
         init_std: float = 0.02,
-        grad_checkpoint: bool = False,
+        grad_checkpoint: bool = True,
     ):
         super().__init__()
         self.n_layers = n_layers
