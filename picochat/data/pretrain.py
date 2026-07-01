@@ -6,10 +6,11 @@ compute the next-token prediction loss (sequence length block_size+1 ->
 effective context block_size).
 """
 
+import lightning as L
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
 # Writer (scripts/preprocess.py) imports this so the two never diverge.
@@ -58,3 +59,50 @@ class PackedDataset(Dataset):
             start = idx * (self.block_size + 1)
         chunk = self.data[start : start + self.block_size + 1].astype(np.int64)
         return torch.from_numpy(chunk)
+
+
+class PretrainDataModule(L.LightningDataModule):
+    """Wraps train/val datasets with a plain `batch_size` attribute.
+
+    Lightning's Tuner rewrites `batch_size` in place and rebuilds the
+    dataloaders from it (see scripts/pretrain.py's auto batch-size search), so
+    the dataloaders must be built from this attribute rather than fixed at
+    construction time.
+    """
+
+    def __init__(
+        self,
+        train_ds: Dataset,
+        val_ds: Dataset | None,
+        batch_size: int,
+        num_workers: int = 4,
+    ):
+        super().__init__()
+        self.train_ds = train_ds
+        self.val_ds = val_ds
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        if val_ds is None:
+            # Shadow the class method: Lightning's is_overridden() check treats
+            # an instance attribute of None as "hook not provided".
+            self.val_dataloader = None  # type: ignore[assignment]
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
+            pin_memory=True,
+            drop_last=True,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
+            pin_memory=True,
+        )

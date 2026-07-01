@@ -19,9 +19,10 @@ import lightning as L
 import torch
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
-from torch.utils.data import ConcatDataset, DataLoader
+from lightning.pytorch.tuner import Tuner
+from torch.utils.data import ConcatDataset
 
-from picochat.data.pretrain import PackedDataset
+from picochat.data.pretrain import PackedDataset, PretrainDataModule
 from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
 
@@ -74,32 +75,20 @@ def main():
     block_size = data_cfg.get("block_size", 1024)
     max_seq_len = model_cfg.pop("max_seq_len", 4096)
     assert block_size < max_seq_len, "block_size+1 <= max_seq_len required"
-    batch_size = trainer_cfg.get("batch_size", 16)
+    # None -> auto: search for the largest power-of-2 batch size that fits the GPU.
+    batch_size = trainer_cfg.get("batch_size")
     num_workers = trainer_cfg.get("num_workers", 4)
 
     train_ds = make_dataset(data_cfg["train_bin"], block_size, random=True)
-    train_dl = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0,
-        pin_memory=True,
-        drop_last=True,
-    )
-
-    val_dl = None
+    val_ds = None
     monitor = None
     if data_cfg.get("val_bin"):
         val_ds = make_dataset(data_cfg["val_bin"], block_size, random=False)
-        val_dl = DataLoader(
-            val_ds,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            persistent_workers=num_workers > 0,
-            pin_memory=True,
-        )
         monitor = "val_loss"
+
+    datamodule = PretrainDataModule(
+        train_ds, val_ds, batch_size=batch_size or 2, num_workers=num_workers
+    )
 
     # --- model ---
     size = model_cfg.pop("size", "pico")
@@ -143,11 +132,24 @@ def main():
         precision=trainer_cfg.get("precision", "bf16-mixed"),
         gradient_clip_val=trainer_cfg.get("grad_clip", 1.0),
         accumulate_grad_batches=trainer_cfg.get("accumulate", 1),
-        val_check_interval=val_check_interval if val_dl is not None else 1.0,
+        val_check_interval=val_check_interval if val_ds is not None else 1.0,
         callbacks=[ckpt_cb],
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    trainer.fit(gpt, train_dl, val_dl)
+
+    if batch_size is None:
+        if val_ds is None:
+            # Lightning's BatchSizeFinder always probes the val dataloader
+            # during its search, which crashes if validation_step is defined
+            # but no val dataloader exists. Shadowing it to None here matches
+            # what happens anyway: validation is skipped for this stage.
+            gpt.validation_step = None
+        found = Tuner(trainer).scale_batch_size(
+            gpt, datamodule=datamodule, mode="power"
+        )
+        print(f"auto-tuned batch_size={found}", flush=True)
+
+    trainer.fit(gpt, datamodule=datamodule)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ optim:
     max_steps: 60000
 
 trainer:
-    batch_size: 16
+    batch_size: 16 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
     accumulate: 4
     grad_clip: 1.0
     precision: bf16-mixed
