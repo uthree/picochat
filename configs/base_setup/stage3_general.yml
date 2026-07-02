@@ -10,22 +10,6 @@ streaming: true # wikipedia / fineweb-ja are huge; stream instead of filling the
 # split, e.g. add:
 #   - {preset: fineweb-ja, output: fineweb-ja.val.bin, split: test, limit: 1000}
 datasets:
-    - { preset: tinystories, output: tinystories.bin }
-    - { preset: tinystories, output: tinystories.val.bin, split: validation }
-    - { preset: tinystories-ja, output: tinystories-ja.bin }
-    - {
-          preset: tinystories-ja,
-          output: tinystories-ja.val.bin,
-          split: validation,
-      }
-    - { preset: children-stories, output: children-stories.bin }
-    - { preset: gsm8k, output: gsm8k.bin }
-    - { preset: gsm8k, output: gsm8k.val.bin, split: test }
-    - { preset: tiny-textbooks, output: tiny-textbooks.bin }
-    - { preset: tiny-textbooks, output: tiny-textbooks.val.bin, split: test }
-    - { preset: tiny-orca-textbooks, output: tiny-orca-textbooks.bin }
-    - { preset: textbooks, output: textbooks.bin }
-    - { preset: cosmopedia, output: cosmopedia.bin }
     - { preset: fineweb-edu, output: fineweb-edu.bin }
     - { preset: fineweb-edu-ja, output: fineweb-edu-ja.bin }
     - { preset: wikipedia-en, output: wikipedia-en.bin }
