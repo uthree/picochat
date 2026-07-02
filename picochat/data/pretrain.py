@@ -61,6 +61,17 @@ class PackedDataset(Dataset):
         return torch.from_numpy(chunk)
 
 
+# Number of indices a chunked sampler draws per iteration. Bounds peak memory:
+# both samplers below are asked for num_samples == len(train_ds) == the whole
+# token count (billions for a large corpus). Producing all of them at once --
+# num_samples-sized tensors plus a num_samples-long Python list from .tolist()
+# -- costs tens of GB before the first batch is even yielded, which is what
+# exhausts host memory and gets the process OOM-killed. Drawing in fixed-size
+# chunks keeps peak memory O(_SAMPLE_CHUNK) regardless of corpus size; training
+# stops at max_steps long before an "epoch" of num_samples is consumed.
+_SAMPLE_CHUNK = 1 << 20
+
+
 class GroupWeightedIndexSampler(Sampler[int]):
     """Draws indices from a ConcatDataset's groups with replacement so each
     group's total sampling mass matches its configured weight, regardless of
@@ -87,24 +98,41 @@ class GroupWeightedIndexSampler(Sampler[int]):
     def __len__(self) -> int:
         return self.num_samples
 
-    # Number of indices drawn per batch inside __iter__. Bounds the sampler's
-    # peak memory: without this, drawing all num_samples at once materializes
-    # several num_samples-sized tensors plus a num_samples-long Python list
-    # (from .tolist()). num_samples == len(train_ds) == the whole token count
-    # (billions for a large concatenated corpus), so that eager materialization
-    # -- tens of GB before the first batch is even yielded -- is what exhausts
-    # host memory and gets the process OOM-killed. Generating in fixed-size
-    # chunks keeps peak memory O(_CHUNK) regardless of corpus size; training
-    # stops at max_steps long before an "epoch" of num_samples is consumed.
-    _CHUNK = 1 << 20
+    def __iter__(self):
+        remaining = self.num_samples
+        while remaining > 0:
+            n = min(_SAMPLE_CHUNK, remaining)
+            group_ids = torch.multinomial(self.group_weights, n, replacement=True)
+            local = (torch.rand(n, dtype=torch.double) * self.group_sizes[group_ids]).long()
+            idx = self.group_offsets[group_ids] + local
+            yield from idx.tolist()
+            remaining -= n
+
+
+class UniformIndexSampler(Sampler[int]):
+    """Draws indices uniformly at random with replacement, in fixed-size chunks.
+
+    Used for the unweighted train path in place of DataLoader(shuffle=True),
+    whose RandomSampler materializes a full `torch.randperm(len)` (then
+    `.tolist()`) up front. `len` is the whole token count for a large corpus,
+    so that eager permutation exhausts host memory exactly like the weighted
+    sampler did (see _SAMPLE_CHUNK / GroupWeightedIndexSampler). Sampling with
+    replacement is fine here: examples are random-offset windows into a token
+    stream, and training stops at max_steps well before num_samples is drawn.
+    """
+
+    def __init__(self, dataset_len: int, num_samples: int):
+        self.dataset_len = dataset_len
+        self.num_samples = num_samples
+
+    def __len__(self) -> int:
+        return self.num_samples
 
     def __iter__(self):
         remaining = self.num_samples
         while remaining > 0:
-            n = min(self._CHUNK, remaining)
-            group_ids = torch.multinomial(self.group_weights, n, replacement=True)
-            local = (torch.rand(n, dtype=torch.double) * self.group_sizes[group_ids]).long()
-            idx = self.group_offsets[group_ids] + local
+            n = min(_SAMPLE_CHUNK, remaining)
+            idx = torch.randint(self.dataset_len, (n,))
             yield from idx.tolist()
             remaining -= n
 
@@ -166,10 +194,15 @@ class PretrainDataModule(L.LightningDataModule):
                 pin_memory=True,
                 drop_last=True,
             )
+        # Not shuffle=True: DataLoader's RandomSampler would build a full
+        # torch.randperm(len(train_ds)) up front, which OOMs on a large corpus
+        # for the same reason the weighted path did. UniformIndexSampler draws
+        # the same uniform indices lazily in bounded-size chunks.
+        sampler = UniformIndexSampler(len(self.train_ds), num_samples=len(self.train_ds))
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
-            shuffle=True,
+            sampler=sampler,
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
             pin_memory=True,

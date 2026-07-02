@@ -49,6 +49,21 @@ def test_train_dataloader_respects_sample_weights():
     assert from_small / len(drawn) > 0.2
 
 
+def test_train_dataloader_unweighted_uses_chunked_uniform_sampler():
+    # Without weights the loader must not fall back to DataLoader(shuffle=True):
+    # its RandomSampler materializes a full randperm(len) up front, which OOMs
+    # on a large corpus. It should use the lazy, in-range UniformIndexSampler.
+    from picochat.data.pretrain import UniformIndexSampler
+
+    ds = _RandomTokenDataset(40, 6, n=32)
+    dm = PretrainDataModule(ds, None, batch_size=4, num_workers=0)
+    loader = dm.train_dataloader()
+    assert isinstance(loader.sampler, UniformIndexSampler)
+    drawn = list(iter(loader.sampler))
+    assert len(drawn) == len(ds)
+    assert all(0 <= i < len(ds) for i in drawn)
+
+
 def test_val_dataloader_uses_batch_size():
     train_ds = _RandomTokenDataset(40, 6, n=32)
     val_ds = _RandomTokenDataset(40, 6, n=32)
