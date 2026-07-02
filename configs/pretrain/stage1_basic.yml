@@ -23,6 +23,15 @@ data:
         - data/tinystories-ja.bin
         - data/children-stories.bin
         - data/gsm8k.bin
+    # Equal weight per dataset: without this, datasets are sampled in
+    # proportion to their token count, so small datasets (e.g. gsm8k) get
+    # seen far less often than large ones. Adjust the relative scale to
+    # rebalance.
+    train_weights:
+        - 1.0 # tinystories
+        - 1.0 # tinystories-ja
+        - 1.0 # children-stories
+        - 1.0 # gsm8k
     val_bin: # per-dataset validation splits (see configs/preprocess/stage1_basic.yml)
         - data/tinystories.val.bin
         - data/tinystories-ja.val.bin

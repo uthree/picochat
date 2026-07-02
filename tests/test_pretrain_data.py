@@ -26,6 +26,31 @@ def test_train_dataloader_uses_batch_size():
     assert batch.shape[0] == 4
 
 
+def test_train_dataloader_respects_sample_weights():
+    # Two "datasets" of very different sizes; weight them equally so the small
+    # one should show up roughly as often as the large one despite having far
+    # fewer examples.
+    small = _RandomTokenDataset(40, 6, n=4)
+    large = _RandomTokenDataset(40, 6, n=400)
+    import numpy as np
+    from torch.utils.data import ConcatDataset
+
+    ds = ConcatDataset([small, large])
+    weights = np.concatenate([np.full(4, 1.0 / 4), np.full(400, 1.0 / 400)])
+    dm = PretrainDataModule(ds, None, batch_size=64, num_workers=0, train_sample_weights=weights)
+
+    loader = dm.train_dataloader()
+    sampler = loader.sampler
+    drawn = list(iter(sampler))
+    from_small = sum(1 for i in drawn if i < 4)
+    from_large = sum(1 for i in drawn if i >= 4)
+    assert from_small > 0
+    assert from_large > 0
+    # Roughly equal mass given equal weights (loose bound: not proportional to
+    # dataset size, which would put ~99% of draws in `large`).
+    assert from_small / len(drawn) > 0.2
+
+
 def test_val_dataloader_uses_batch_size():
     train_ds = _RandomTokenDataset(40, 6, n=32)
     val_ds = _RandomTokenDataset(40, 6, n=32)

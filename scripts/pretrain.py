@@ -16,6 +16,7 @@ import argparse
 from pathlib import Path
 
 import lightning as L
+import numpy as np
 import torch
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -38,12 +39,36 @@ MODEL_OVERRIDES = (
 )
 
 
-def make_dataset(bins, block_size: int, random: bool):
-    """Build a (Concat)PackedDataset from a single path or a list of paths."""
+def make_dataset(bins, block_size: int, random: bool, weights=None):
+    """Build a (Concat)PackedDataset from a single path or a list of paths.
+
+    Returns (dataset, sample_weights). sample_weights is None unless `weights`
+    is given, in which case it's a per-example array (same length as the
+    concatenated dataset) sized so each source dataset's total sampling mass
+    equals its configured weight, regardless of its example count.
+    """
     if isinstance(bins, str):
         bins = [bins]
     parts = [PackedDataset(b, block_size=block_size, random=random) for b in bins]
-    return parts[0] if len(parts) == 1 else ConcatDataset(parts)
+    if len(parts) == 1:
+        if weights is not None:
+            raise ValueError("train_weights requires more than one train_bin entry")
+        return parts[0], None
+    dataset = ConcatDataset(parts)
+    if weights is None:
+        return dataset, None
+    if len(weights) != len(parts):
+        raise ValueError(
+            f"train_weights has {len(weights)} entries but train_bin has "
+            f"{len(parts)}"
+        )
+    sample_weights = np.concatenate(
+        [
+            np.full(len(part), w / len(part), dtype=np.float64)
+            for part, w in zip(parts, weights)
+        ]
+    )
+    return dataset, sample_weights
 
 
 def main():
@@ -80,15 +105,21 @@ def main():
     batch_size = trainer_cfg.get("batch_size")
     num_workers = trainer_cfg.get("num_workers", 4)
 
-    train_ds = make_dataset(data_cfg["train_bin"], block_size, random=True)
+    train_ds, train_sample_weights = make_dataset(
+        data_cfg["train_bin"], block_size, random=True, weights=data_cfg.get("train_weights")
+    )
     val_ds = None
     monitor = None
     if data_cfg.get("val_bin"):
-        val_ds = make_dataset(data_cfg["val_bin"], block_size, random=False)
+        val_ds, _ = make_dataset(data_cfg["val_bin"], block_size, random=False)
         monitor = "val_loss"
 
     datamodule = PretrainDataModule(
-        train_ds, val_ds, batch_size=batch_size or 2, num_workers=num_workers
+        train_ds,
+        val_ds,
+        batch_size=batch_size or 2,
+        num_workers=num_workers,
+        train_sample_weights=train_sample_weights,
     )
 
     # --- model ---

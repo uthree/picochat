@@ -10,7 +10,7 @@ import lightning as L
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
 # Writer (scripts/preprocess.py) imports this so the two never diverge.
@@ -76,18 +76,42 @@ class PretrainDataModule(L.LightningDataModule):
         val_ds: Dataset | None,
         batch_size: int,
         num_workers: int = 4,
+        train_sample_weights: np.ndarray | None = None,
     ):
+        """
+        Args:
+            train_sample_weights: per-example sampling weight, same length as
+                train_ds (e.g. built so each source dataset's total mass equals
+                its configured weight regardless of its example count). None ->
+                plain uniform shuffling.
+        """
         super().__init__()
         self.train_ds = train_ds
         self.val_ds = val_ds
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.train_sample_weights = train_sample_weights
         if val_ds is None:
             # Shadow the class method: Lightning's is_overridden() check treats
             # an instance attribute of None as "hook not provided".
             self.val_dataloader = None  # type: ignore[assignment]
 
     def train_dataloader(self) -> DataLoader:
+        if self.train_sample_weights is not None:
+            sampler = WeightedRandomSampler(
+                self.train_sample_weights,
+                num_samples=len(self.train_ds),
+                replacement=True,
+            )
+            return DataLoader(
+                self.train_ds,
+                batch_size=self.batch_size,
+                sampler=sampler,
+                num_workers=self.num_workers,
+                persistent_workers=self.num_workers > 0,
+                pin_memory=True,
+                drop_last=True,
+            )
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
