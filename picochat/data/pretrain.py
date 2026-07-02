@@ -10,7 +10,7 @@ import lightning as L
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
 # Writer (scripts/base_setup.py) imports this so the two never diverge.
@@ -61,28 +61,36 @@ class PackedDataset(Dataset):
         return torch.from_numpy(chunk)
 
 
-class WeightedIndexSampler(Sampler[int]):
-    """Draws indices with replacement in proportion to per-example weights.
+class GroupWeightedIndexSampler(Sampler[int]):
+    """Draws indices from a ConcatDataset's groups with replacement so each
+    group's total sampling mass matches its configured weight, regardless of
+    the group's size.
 
-    Equivalent in distribution to `torch.utils.data.WeightedRandomSampler`,
-    but that class draws via `torch.multinomial`, which refuses more than
-    2**24 (~16.7M) categories -- easily exceeded once several pretraining
-    corpora are concatenated. This instead does inverse-CDF sampling
-    (cumsum + searchsorted), which has no such limit.
+    `torch.utils.data.WeightedRandomSampler` would do this by materializing
+    one weight per example and drawing via `torch.multinomial`, which (a)
+    refuses more than 2**24 (~16.7M) categories -- easily exceeded once
+    several pretraining corpora are concatenated -- and (b) at the scale of
+    billions of examples, a fp32/fp64 cumulative-weight table loses enough
+    precision that many adjacent examples become unreachable. Sampling in two
+    stages -- pick a group via a tiny multinomial (one category per group),
+    then a uniform offset within it -- needs O(num_groups) memory and has
+    neither problem.
     """
 
-    def __init__(self, weights: np.ndarray, num_samples: int):
+    def __init__(self, group_sizes: list[int], group_weights: list[float], num_samples: int):
         self.num_samples = num_samples
-        self.cum_weights = torch.cumsum(torch.as_tensor(weights, dtype=torch.double), dim=0)
+        self.group_weights = torch.as_tensor(group_weights, dtype=torch.double)
+        sizes = torch.as_tensor(group_sizes, dtype=torch.long)
+        self.group_sizes = sizes
+        self.group_offsets = torch.cumsum(sizes, dim=0) - sizes
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __iter__(self):
-        total = self.cum_weights[-1]
-        draws = torch.rand(self.num_samples, dtype=torch.double) * total
-        idx = torch.searchsorted(self.cum_weights, draws, right=True)
-        idx.clamp_(max=self.cum_weights.numel() - 1)
+        group_ids = torch.multinomial(self.group_weights, self.num_samples, replacement=True)
+        local = (torch.rand(self.num_samples, dtype=torch.double) * self.group_sizes[group_ids]).long()
+        idx = self.group_offsets[group_ids] + local
         yield from idx.tolist()
 
 
@@ -101,30 +109,37 @@ class PretrainDataModule(L.LightningDataModule):
         val_ds: Dataset | None,
         batch_size: int,
         num_workers: int = 4,
-        train_sample_weights: np.ndarray | None = None,
+        train_group_weights: list[float] | None = None,
     ):
         """
         Args:
-            train_sample_weights: per-example sampling weight, same length as
-                train_ds (e.g. built so each source dataset's total mass equals
-                its configured weight regardless of its example count). None ->
-                plain uniform shuffling.
+            train_group_weights: one weight per group in `train_ds` (which
+                must be a ConcatDataset of those groups), sized so each
+                group's total sampling mass equals its configured weight
+                regardless of its example count. None -> plain uniform
+                shuffling.
         """
         super().__init__()
         self.train_ds = train_ds
         self.val_ds = val_ds
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.train_sample_weights = train_sample_weights
+        self.train_group_weights = train_group_weights
+        if train_group_weights is not None:
+            assert isinstance(train_ds, ConcatDataset), (
+                "train_group_weights requires train_ds to be a ConcatDataset"
+            )
         if val_ds is None:
             # Shadow the class method: Lightning's is_overridden() check treats
             # an instance attribute of None as "hook not provided".
             self.val_dataloader = None  # type: ignore[assignment]
 
     def train_dataloader(self) -> DataLoader:
-        if self.train_sample_weights is not None:
-            sampler = WeightedIndexSampler(
-                self.train_sample_weights,
+        if self.train_group_weights is not None:
+            group_sizes = [len(d) for d in self.train_ds.datasets]
+            sampler = GroupWeightedIndexSampler(
+                group_sizes,
+                self.train_group_weights,
                 num_samples=len(self.train_ds),
             )
             return DataLoader(

@@ -16,7 +16,6 @@ import argparse
 from pathlib import Path
 
 import lightning as L
-import numpy as np
 import torch
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -50,10 +49,11 @@ def resolve_bins(bins, data_dir: str) -> list[str]:
 def make_dataset(bins, block_size: int, random: bool, weights=None):
     """Build a (Concat)PackedDataset from a single path or a list of paths.
 
-    Returns (dataset, sample_weights). sample_weights is None unless `weights`
-    is given, in which case it's a per-example array (same length as the
-    concatenated dataset) sized so each source dataset's total sampling mass
-    equals its configured weight, regardless of its example count.
+    Returns (dataset, group_weights). group_weights is None unless `weights`
+    is given, in which case it's passed through unchanged: one weight per
+    source dataset, consumed by GroupWeightedIndexSampler so each source's
+    total sampling mass equals its configured weight regardless of its
+    example count.
     """
     if isinstance(bins, str):
         bins = [bins]
@@ -70,13 +70,7 @@ def make_dataset(bins, block_size: int, random: bool, weights=None):
             f"train_weights has {len(weights)} entries but train_bin has "
             f"{len(parts)}"
         )
-    sample_weights = np.concatenate(
-        [
-            np.full(len(part), w / len(part), dtype=np.float64)
-            for part, w in zip(parts, weights)
-        ]
-    )
-    return dataset, sample_weights
+    return dataset, list(weights)
 
 
 def main():
@@ -114,7 +108,7 @@ def main():
     num_workers = trainer_cfg.get("num_workers", 4)
 
     data_dir = data_cfg.get("data_dir", "data")
-    train_ds, train_sample_weights = make_dataset(
+    train_ds, train_group_weights = make_dataset(
         resolve_bins(data_cfg["train_bin"], data_dir),
         block_size,
         random=True,
@@ -131,7 +125,7 @@ def main():
         val_ds,
         batch_size=batch_size or 2,
         num_workers=num_workers,
-        train_sample_weights=train_sample_weights,
+        train_group_weights=train_group_weights,
     )
 
     # --- model ---
