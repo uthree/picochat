@@ -1,5 +1,7 @@
 # picochat
-A project inspired by nanochat.
+!["logo"]("assets/logo.png")  
+
+A project inspired by [nanochat](https://github.com/karpathy/nanochat).
 It involves training a sub-billion-parameter language model from scratch for $100.
 
 ## Requirements
