@@ -1,4 +1,4 @@
-# Preprocess the datasets used by configs/base/stage1_basic.yml.
+# Preprocess the datasets used by configs/base_train/stage1_basic.yml.
 # Each entry picks its own split (default train); a validation bin is just a
 # second entry pointing at a validation split. Every dataset/split is checked
 # before processing, so only list splits that exist: here only tinystories has

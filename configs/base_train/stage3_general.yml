@@ -6,7 +6,7 @@
 #   python scripts/base_setup.py -p wikipedia-ja  -o data/wikipedia-ja.bin
 #   python scripts/base_setup.py -p fineweb-ja    -o data/fineweb-ja.bin
 #
-# Then: python scripts/base_train.py --config configs/base/stage3_general.yml
+# Then: python scripts/base_train.py --config configs/base_train/stage3_general.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage3

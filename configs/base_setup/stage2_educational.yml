@@ -1,4 +1,4 @@
-# Preprocess the datasets used by configs/base/stage2_educational.yml.
+# Preprocess the datasets used by configs/base_train/stage2_educational.yml.
 #
 #   python scripts/base_setup.py --config configs/base_setup/stage2_educational.yml
 

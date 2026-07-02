@@ -11,7 +11,7 @@
 #   python scripts/base_setup.py -p fineweb-edu          -o data/fineweb-edu.bin
 #   python scripts/base_setup.py -p fineweb-edu-ja       -o data/fineweb-edu-ja.bin
 #
-# Then: python scripts/base_train.py --config configs/base/stage2_educational.yml
+# Then: python scripts/base_train.py --config configs/base_train/stage2_educational.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage2

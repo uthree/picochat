@@ -5,7 +5,7 @@
 # Preprocess the train + validation bins first (one command makes both):
 #   python scripts/base_setup.py --config configs/base_setup/stage1_basic.yml
 #
-# Then: python scripts/base_train.py --config configs/base/stage1_basic.yml
+# Then: python scripts/base_train.py --config configs/base_train/stage1_basic.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage1
