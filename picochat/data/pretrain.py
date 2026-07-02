@@ -10,7 +10,7 @@ import lightning as L
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
 # Writer (scripts/base_setup.py) imports this so the two never diverge.
@@ -61,6 +61,31 @@ class PackedDataset(Dataset):
         return torch.from_numpy(chunk)
 
 
+class WeightedIndexSampler(Sampler[int]):
+    """Draws indices with replacement in proportion to per-example weights.
+
+    Equivalent in distribution to `torch.utils.data.WeightedRandomSampler`,
+    but that class draws via `torch.multinomial`, which refuses more than
+    2**24 (~16.7M) categories -- easily exceeded once several pretraining
+    corpora are concatenated. This instead does inverse-CDF sampling
+    (cumsum + searchsorted), which has no such limit.
+    """
+
+    def __init__(self, weights: np.ndarray, num_samples: int):
+        self.num_samples = num_samples
+        self.cum_weights = torch.cumsum(torch.as_tensor(weights, dtype=torch.double), dim=0)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __iter__(self):
+        total = self.cum_weights[-1]
+        draws = torch.rand(self.num_samples, dtype=torch.double) * total
+        idx = torch.searchsorted(self.cum_weights, draws, right=True)
+        idx.clamp_(max=self.cum_weights.numel() - 1)
+        yield from idx.tolist()
+
+
 class PretrainDataModule(L.LightningDataModule):
     """Wraps train/val datasets with a plain `batch_size` attribute.
 
@@ -98,10 +123,9 @@ class PretrainDataModule(L.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         if self.train_sample_weights is not None:
-            sampler = WeightedRandomSampler(
+            sampler = WeightedIndexSampler(
                 self.train_sample_weights,
                 num_samples=len(self.train_ds),
-                replacement=True,
             )
             return DataLoader(
                 self.train_ds,
