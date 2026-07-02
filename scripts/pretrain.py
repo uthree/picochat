@@ -126,6 +126,10 @@ def main():
     size = model_cfg.pop("size", "pico")
     overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
     lm = build_lm(size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
+    # Recipe for rebuilding this exact architecture later (see GPT.model_config);
+    # saved into the checkpoint so scripts/eval_pretrained.py doesn't need it
+    # repeated on the command line.
+    model_config = dict(size=size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
 
     max_steps = optim_cfg.get("max_steps", 10000)
     gpt = GPT(
@@ -139,6 +143,7 @@ def main():
         compile=trainer_cfg.get("compile", None),
         # Used to render generated-text samples to TensorBoard during validation.
         tokenizer=tokenizer,
+        model_config=model_config,
     )
 
     # --- resume: continue this exact stage (weights + optimizer + step) if it

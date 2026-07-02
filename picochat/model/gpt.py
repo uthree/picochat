@@ -527,8 +527,16 @@ class GPT(L.LightningModule):
         compile: bool | None = None,
         tokenizer=None,
         sample_batches: int = 20,
+        model_config: dict | None = None,
     ):
         super().__init__()
+        # `model_config` is the plain-dict build_lm(**model_config) recipe used to
+        # construct `transformer_lm` (size/vocab_size/max_seq_len/overrides).
+        # Saving it (and nothing else -- transformer_lm/tokenizer aren't
+        # cleanly picklable/yaml-able) lets a checkpoint's own
+        # hyper_parameters rebuild the exact same architecture later, instead
+        # of relying on the caller to pass matching flags by hand.
+        self.save_hyperparameters("model_config")
         self.model = transformer_lm
         self.pad_idx = pad_idx
         # Optional tiktoken Encoding used to turn generated token ids back into
