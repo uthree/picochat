@@ -21,6 +21,10 @@ Train a BPE tokenizer to split text into tokens.
 ```bash
 # Currently, only mixed Japanese and English data is supported.
 uv run scripts/tok_train.py --config configs/tok/en_ja.yml
+
+# evaluate trained tokenizer. 
+# It is not a problem if it is around 4–6 bytes per token.
+uv run scripts/tok_eval.py --config configs/tok/en_ja.yml
 ```
 
 3. preprocess dataset.
