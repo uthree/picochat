@@ -38,6 +38,20 @@ MODEL_OVERRIDES = (
 )
 
 
+def resolve_num_devices(devices: str) -> int:
+    """Single-node device count implied by --devices, for scaling lr/max_steps.
+
+    Mirrors how Lightning itself would interpret the flag ('auto' -> all
+    visible GPUs, 'N' -> N devices, '0,1' -> that many device ids) without
+    needing a Trainer instance up front.
+    """
+    if devices == "auto":
+        return torch.cuda.device_count() if torch.cuda.is_available() else 1
+    if "," in devices:
+        return len(devices.split(","))
+    return int(devices)
+
+
 def resolve_bins(bins, data_dir: str) -> list[str]:
     """Join `data_dir` with each bin filename (mirrors base_setup.py's own
     output_dir/output split, so both configs name files the same way)."""
@@ -83,6 +97,8 @@ def main():
         help="checkpoint to warm-start from (overrides config's init_from)",
     )
     p.add_argument("--accelerator", type=str, default="auto")
+    p.add_argument("--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'")
+    p.add_argument("--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'")
     args = p.parse_args()
 
     with open(args.config) as f:
@@ -137,11 +153,27 @@ def main():
     # repeated on the command line.
     model_config = dict(size=size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
 
-    max_steps = optim_cfg.get("max_steps", 10000)
+    # Config values are per-GPU (batch_size is per-device, lr/max_steps are
+    # tuned for a single-device effective batch). Scale them by the device
+    # count so a multi-GPU run matches the single-GPU training dynamics the
+    # config was written for: lr scales up linearly with the larger effective
+    # batch (linear scaling rule), and max_steps scales down so the run still
+    # sees the same total number of tokens.
+    num_devices = resolve_num_devices(args.devices)
+    base_lr = optim_cfg.get("lr", 3e-4)
+    base_max_steps = optim_cfg.get("max_steps", 10000)
+    lr = base_lr * num_devices
+    max_steps = max(1, round(base_max_steps / num_devices))
+    if num_devices > 1:
+        print(
+            f"scaling for {num_devices} devices: lr {base_lr} -> {lr}, "
+            f"max_steps {base_max_steps} -> {max_steps}",
+            flush=True,
+        )
     gpt = GPT(
         lm,
         pad_idx=0,
-        lr=optim_cfg.get("lr", 3e-4),
+        lr=lr,
         weight_decay=optim_cfg.get("weight_decay", 0.1),
         warmup_steps=optim_cfg.get("warmup_steps", 2000),
         max_steps=max_steps,
@@ -179,6 +211,8 @@ def main():
 
     trainer = L.Trainer(
         accelerator=args.accelerator,
+        devices=args.devices,
+        strategy=args.strategy,
         max_steps=max_steps,
         precision=trainer_cfg.get("precision", "bf16-mixed"),
         gradient_clip_val=trainer_cfg.get("grad_clip", 1.0),
