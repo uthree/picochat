@@ -87,11 +87,26 @@ class GroupWeightedIndexSampler(Sampler[int]):
     def __len__(self) -> int:
         return self.num_samples
 
+    # Number of indices drawn per batch inside __iter__. Bounds the sampler's
+    # peak memory: without this, drawing all num_samples at once materializes
+    # several num_samples-sized tensors plus a num_samples-long Python list
+    # (from .tolist()). num_samples == len(train_ds) == the whole token count
+    # (billions for a large concatenated corpus), so that eager materialization
+    # -- tens of GB before the first batch is even yielded -- is what exhausts
+    # host memory and gets the process OOM-killed. Generating in fixed-size
+    # chunks keeps peak memory O(_CHUNK) regardless of corpus size; training
+    # stops at max_steps long before an "epoch" of num_samples is consumed.
+    _CHUNK = 1 << 20
+
     def __iter__(self):
-        group_ids = torch.multinomial(self.group_weights, self.num_samples, replacement=True)
-        local = (torch.rand(self.num_samples, dtype=torch.double) * self.group_sizes[group_ids]).long()
-        idx = self.group_offsets[group_ids] + local
-        yield from idx.tolist()
+        remaining = self.num_samples
+        while remaining > 0:
+            n = min(self._CHUNK, remaining)
+            group_ids = torch.multinomial(self.group_weights, n, replacement=True)
+            local = (torch.rand(n, dtype=torch.double) * self.group_sizes[group_ids]).long()
+            idx = self.group_offsets[group_ids] + local
+            yield from idx.tolist()
+            remaining -= n
 
 
 class PretrainDataModule(L.LightningDataModule):
