@@ -18,21 +18,22 @@ model:
     grad_checkpoint: true
 
 data:
+    data_dir: data # joined with each train_bin/val_bin filename below
     block_size: 1024
     train_bin:
-        - data/tinystories.bin
-        - data/tinystories-ja.bin
-        - data/children-stories.bin
-        - data/gsm8k.bin
-        - data/tiny-textbooks.bin
-        - data/tiny-orca-textbooks.bin
-        - data/textbooks.bin
-        - data/cosmopedia.bin
-        - data/fineweb-edu.bin
-        - data/fineweb-edu-ja.bin
-        - data/wikipedia-en.bin
-        - data/wikipedia-ja.bin
-        - data/fineweb-ja.bin
+        - tinystories.bin
+        - tinystories-ja.bin
+        - children-stories.bin
+        - gsm8k.bin
+        - tiny-textbooks.bin
+        - tiny-orca-textbooks.bin
+        - textbooks.bin
+        - cosmopedia.bin
+        - fineweb-edu.bin
+        - fineweb-edu-ja.bin
+        - wikipedia-en.bin
+        - wikipedia-ja.bin
+        - fineweb-ja.bin
     # Equal weight per dataset: without this, datasets are sampled in
     # proportion to their token count, so small datasets (e.g. gsm8k) get
     # seen far less often than large ones (e.g. fineweb-ja). Adjust the
@@ -52,10 +53,10 @@ data:
         - 1.0 # wikipedia-ja
         - 1.0 # fineweb-ja
     val_bin:
-        - data/tinystories.val.bin
-        - data/tinystories-ja.val.bin
-        - data/gsm8k.val.bin
-        - data/tiny-textbooks.val.bin
+        - tinystories.val.bin
+        - tinystories-ja.val.bin
+        - gsm8k.val.bin
+        - tiny-textbooks.val.bin
 
 optim:
     lr: 1.5e-4 # lower again for the final stage

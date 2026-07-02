@@ -39,6 +39,14 @@ MODEL_OVERRIDES = (
 )
 
 
+def resolve_bins(bins, data_dir: str) -> list[str]:
+    """Join `data_dir` with each bin filename (mirrors base_setup.py's own
+    output_dir/output split, so both configs name files the same way)."""
+    if isinstance(bins, str):
+        bins = [bins]
+    return [str(Path(data_dir) / b) for b in bins]
+
+
 def make_dataset(bins, block_size: int, random: bool, weights=None):
     """Build a (Concat)PackedDataset from a single path or a list of paths.
 
@@ -105,13 +113,17 @@ def main():
     batch_size = trainer_cfg.get("batch_size")
     num_workers = trainer_cfg.get("num_workers", 4)
 
+    data_dir = data_cfg.get("data_dir", "data")
     train_ds, train_sample_weights = make_dataset(
-        data_cfg["train_bin"], block_size, random=True, weights=data_cfg.get("train_weights")
+        resolve_bins(data_cfg["train_bin"], data_dir),
+        block_size,
+        random=True,
+        weights=data_cfg.get("train_weights"),
     )
     val_ds = None
     monitor = None
     if data_cfg.get("val_bin"):
-        val_ds, _ = make_dataset(data_cfg["val_bin"], block_size, random=False)
+        val_ds, _ = make_dataset(resolve_bins(data_cfg["val_bin"], data_dir), block_size, random=False)
         monitor = "val_loss"
 
     datamodule = PretrainDataModule(
