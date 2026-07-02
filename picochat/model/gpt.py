@@ -438,10 +438,10 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=64,
         global_attn_ratio=4,
         n_loops=3,
-    ),  # ~50M
+    ),  
     "small": dict(
         d_model=768,
-        n_layers=12,
+        n_layers=6,
         n_heads=12,
         n_kv_heads=4,
         vocab_size=64000,
@@ -449,10 +449,10 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=64,
         global_attn_ratio=6,
         n_loops=3,
-    ),  # ~130M
+    ),
     "base": dict(
         d_model=1024,
-        n_layers=24,
+        n_layers=8,
         n_heads=16,
         n_kv_heads=4,
         vocab_size=64000,
@@ -460,10 +460,10 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=64,
         global_attn_ratio=6,
         n_loops=3,
-    ),  # ~421M
+    ),
     "medium": dict(
         d_model=2048,
-        n_layers=24,
+        n_layers=12,
         n_heads=16,
         n_kv_heads=4,
         vocab_size=64000,
@@ -471,10 +471,10 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=128,
         global_attn_ratio=6,
         n_loops=4,
-    ),  # ~1.5B
+    ),
     "large": dict(
         d_model=2560,
-        n_layers=32,
+        n_layers=16,
         n_heads=20,
         n_kv_heads=5,
         vocab_size=64000,
@@ -482,7 +482,7 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=128,
         global_attn_ratio=6,
         n_loops=4,
-    ),  # ~3B
+    ),
 }
 
 
