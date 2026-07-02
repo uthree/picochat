@@ -33,8 +33,6 @@ data:
         - data/tiny-orca-textbooks.bin
         - data/textbooks.bin
         - data/cosmopedia.bin
-        - data/fineweb-edu.bin
-        - data/fineweb-edu-ja.bin
     val_bin:
         - data/tinystories.val.bin
         - data/tinystories-ja.val.bin

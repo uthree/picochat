@@ -26,5 +26,3 @@ datasets:
     - { preset: tiny-orca-textbooks, output: tiny-orca-textbooks.bin }
     - { preset: textbooks, output: textbooks.bin }
     - { preset: cosmopedia, output: cosmopedia.bin }
-    - { preset: fineweb-edu, output: fineweb-edu.bin }
-    - { preset: fineweb-edu-ja, output: fineweb-edu-ja.bin }
