@@ -331,8 +331,8 @@ class Transformer(nn.Module):
         q_len = x.shape[-2]
         for i in range(self.n_loops):
             for j, layer in enumerate(self.layers):
-                x, cache[j + i * self.n_loops] = layer.decode(
-                    x, cache[j + i * self.n_loops], pos
+                x, cache[j + i * self.n_layers] = layer.decode(
+                    x, cache[j + i * self.n_layers], pos
                 )
         x = rms_norm(x)
         return x, cache, pos + q_len  # type: ignore

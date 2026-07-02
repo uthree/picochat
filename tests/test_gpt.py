@@ -379,6 +379,25 @@ def test_transformer_backward():
 
 
 # ---------------------------------------------------------------------------
+# Looped Transformer
+# ---------------------------------------------------------------------------
+def test_looped_transformer_output_shape():
+    model = Transformer(d_model=32, n_heads=4, n_layers=3, n_loops=2)
+    x = torch.randn(2, 7, 32)
+    out = model(x)
+    assert out.shape == x.shape
+
+
+def test_looped_transformer_cache_per_layer():
+    n_layers = 3
+    n_loops = 2
+    model = Transformer(d_model=32, n_heads=4, n_layers=n_layers, n_loops=n_loops)
+    out, cache, pos = model.decode(torch.randn(2, 7, 32))
+    assert len(cache) == n_layers * n_loops
+    assert all(c is not None for c in cache)
+
+
+# ---------------------------------------------------------------------------
 # TransformerLM
 # ---------------------------------------------------------------------------
 def test_transformer_lm_logits_shape():
