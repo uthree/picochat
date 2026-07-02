@@ -9,3 +9,5 @@ We applied several improvements to a decoder-only Transformer, such as GPT-2.
 - QK Normalization
 - SwiGLU
 - Flash Attention
+- Sliding Widnow Attention
+- Looped Transformer
