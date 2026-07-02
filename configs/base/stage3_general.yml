@@ -59,7 +59,7 @@ data:
 
 optim:
     lr: 1.5e-4 # lower again for the final stage
-    weight_decay: 0.1
+    weight_decay: 0.01
     warmup_steps: 1000
     max_steps: 60000
 

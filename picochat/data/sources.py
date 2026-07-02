@@ -63,7 +63,26 @@ PRESETS: dict[str, DatasetSpec] = {
     # --- General knowledge / broad web (hardest, most diverse) ---
     "wikipedia-en": DatasetSpec("wikimedia/wikipedia", "20231101.en"),
     "wikipedia-ja": DatasetSpec("wikimedia/wikipedia", "20231101.ja"),
+    "wikipedia-de": DatasetSpec("wikimedia/wikipedia", "20231101.de"),
+    "wikipedia-es": DatasetSpec("wikimedia/wikipedia", "20231101.es"),
+    "wikipedia-fr": DatasetSpec("wikimedia/wikipedia", "20231101.fr"),
+    "wikipedia-it": DatasetSpec("wikimedia/wikipedia", "20231101.it"),
+    "wikipedia-ko": DatasetSpec("wikimedia/wikipedia", "20231101.ko"),
+    "wikipedia-zh": DatasetSpec("wikimedia/wikipedia", "20231101.zh"),
+    "wikipedia-ar": DatasetSpec("wikimedia/wikipedia", "20231101.ar"),
+    "wikipedia-ru": DatasetSpec("wikimedia/wikipedia", "20231101.ru"),
+    "wikipedia-el": DatasetSpec("wikimedia/wikipedia", "20231101.el"),
+    "wikipedia-la": DatasetSpec("wikimedia/wikipedia", "20231101.la"),
+    "wikipedia-ms": DatasetSpec("wikimedia/wikipedia", "20231101.ms"),
     "fineweb-ja": DatasetSpec("HuggingFaceFW/fineweb-2", "jpn_Jpan"),
+    # --- Programming
+    "tiny-codes": DatasetSpec("nampdn-ai/tiny-codes", text_key="response"),
+    "github-code": DatasetSpec("codeparrot/github-code", text_key="code"),
+    # --- Literature and Novels
+    # 青空文庫 (aozora bunko)
+    "aozorabunko-clean": DatasetSpec("globis-university/aozorabunko-clean"),
+    # 小説家になろう (shosetuka ni narou)
+    "RyokoAI_Syosetu711K": DatasetSpec("botp/RyokoAI_Syosetu711K"),
 }
 
 

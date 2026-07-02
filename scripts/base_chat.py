@@ -25,7 +25,9 @@ from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
 
 
-def load_model(checkpoint: str, tokenizer_path: str, device: torch.device) -> tuple[GPT, Encoding]:
+def load_model(
+    checkpoint: str, tokenizer_path: str, device: torch.device
+) -> tuple[GPT, Encoding]:
     tokenizer = load_tokenizer(tokenizer_path)
 
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -49,7 +51,9 @@ def load_model(checkpoint: str, tokenizer_path: str, device: torch.device) -> tu
     return gpt, tokenizer
 
 
-def _sample(logits: torch.Tensor, temperature: float, top_k: int | None) -> torch.Tensor:
+def _sample(
+    logits: torch.Tensor, temperature: float, top_k: int | None
+) -> torch.Tensor:
     """logits: (B, V) -> next token ids (B, 1)."""
     if temperature <= 0:
         return logits.argmax(dim=-1, keepdim=True)
@@ -93,7 +97,9 @@ def main():
     p.add_argument("--checkpoint", type=str, required=True, help="path to a .ckpt file")
     p.add_argument("--tokenizer", type=str, default="weights/tokenizer.json")
     p.add_argument("--max-new-tokens", type=int, default=256)
-    p.add_argument("--temperature", type=float, default=0.8, help="0 -> greedy decoding")
+    p.add_argument(
+        "--temperature", type=float, default=0.8, help="0 -> greedy decoding"
+    )
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--device", type=str, default=None)
     args = p.parse_args()
@@ -109,6 +115,10 @@ def main():
 
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
     gpt, tokenizer = load_model(args.checkpoint, args.tokenizer, device)
+    print("", flush=True)
+    with open("assets/logo_ascii.txt") as f:  # show ascii art logo
+        print(f.read())
+    print("", flush=True)
     print("ready. Ctrl-C or Ctrl-D to exit.", flush=True)
 
     while True:

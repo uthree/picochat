@@ -19,6 +19,7 @@ datasets:
           output: tinystories-ja.val.bin,
           split: validation,
       }
+    - { preset: tiny-codes, output: tiny-codes.bin }
     - { preset: children-stories, output: children-stories.bin }
     - { preset: gsm8k, output: gsm8k.bin }
     - { preset: gsm8k, output: gsm8k.val.bin, split: test }
