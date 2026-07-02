@@ -438,7 +438,7 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=64,
         global_attn_ratio=4,
         n_loops=3,
-    ),  # ~30M
+    ),  # ~50M
     "small": dict(
         d_model=768,
         n_layers=12,
