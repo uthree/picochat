@@ -17,13 +17,15 @@ model:
     grad_checkpoint: true # set true to trade compute for memory (bigger models / longer seqs)
 
 data:
-    block_size: 1024
+    block_size: 512
     train_bin:
         - data/tinystories.bin
+        - data/tinystories-ja.bin
         - data/children-stories.bin
         - data/gsm8k.bin
     val_bin: # per-dataset validation splits (see configs/preprocess/stage1_basic.yml)
         - data/tinystories.val.bin
+        - data/tinystories-ja.val.bin
         - data/gsm8k.val.bin
 optim:
     lr: 3.0e-4

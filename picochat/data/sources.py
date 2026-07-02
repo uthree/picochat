@@ -36,10 +36,9 @@ PRESETS: dict[str, DatasetSpec] = {
     # --- Easy / early curriculum: simple vocabulary, basic content ---
     # Synthetic children's stories with a tiny vocabulary (kindergarten level).
     "tinystories": DatasetSpec("roneneldan/TinyStories"),  # ~2GB
+    "tinystories-ja": DatasetSpec("kai271/TinyStories-Japanese"),  # ~8MB
     # Children's stories, a bit richer than TinyStories but still simple.
-    "children-stories": DatasetSpec(
-        "ajibawa-2023/Children-Stories-Collection"
-    ),
+    "children-stories": DatasetSpec("ajibawa-2023/Children-Stories-Collection"),
     # Grade-school math word problems (question + worked answer).
     "gsm8k": DatasetSpec(
         "openai/gsm8k",
@@ -60,9 +59,7 @@ PRESETS: dict[str, DatasetSpec] = {
     # Web pages filtered for educational value, scored toward grade/middle-school
     # knowledge (English / Japanese). Closest open analogue to Phi's filtering.
     "fineweb-edu": DatasetSpec("HuggingFaceFW/fineweb-edu", "sample-10BT"),
-    "fineweb-edu-ja": DatasetSpec(
-        "hotchpotch/fineweb-2-edu-japanese", "sample_10BT"
-    ),
+    "fineweb-edu-ja": DatasetSpec("hotchpotch/fineweb-2-edu-japanese", "sample_10BT"),
     # --- General knowledge / broad web (hardest, most diverse) ---
     "wikipedia-en": DatasetSpec("wikimedia/wikipedia", "20231101.en"),
     "wikipedia-ja": DatasetSpec("wikimedia/wikipedia", "20231101.ja"),
@@ -116,9 +113,7 @@ def iter_mixture(
     """Read each source of the Mixture up to its weighted character budget and
     concatenate them."""
     for spec, w in zip(mix.specs, mix.weights):
-        yield from iter_texts(
-            spec, streaming=streaming, max_chars=int(total_chars * w)
-        )
+        yield from iter_texts(spec, streaming=streaming, max_chars=int(total_chars * w))
 
 
 def resolve_spec(preset: str | None, dataset: str | None) -> DatasetSpec:

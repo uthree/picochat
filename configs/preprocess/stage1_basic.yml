@@ -13,6 +13,12 @@ streaming: false # small datasets: download once, then iterate from local cache
 datasets:
     - { preset: tinystories, output: tinystories.bin }
     - { preset: tinystories, output: tinystories.val.bin, split: validation }
+    - { preset: tinystories-ja, output: tinystories-ja.bin }
+    - {
+          preset: tinystories-ja,
+          output: tinystories-ja.val.bin,
+          split: validation,
+      }
     - { preset: children-stories, output: children-stories.bin }
     - { preset: gsm8k, output: gsm8k.bin }
     - { preset: gsm8k, output: gsm8k.val.bin, split: test }

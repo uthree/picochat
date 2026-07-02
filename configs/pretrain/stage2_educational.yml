@@ -26,6 +26,7 @@ data:
     block_size: 1024
     train_bin:
         - data/tinystories.bin
+        - data/tinystories-ja.bin
         - data/children-stories.bin
         - data/gsm8k.bin
         - data/tiny-textbooks.bin
@@ -36,6 +37,7 @@ data:
         - data/fineweb-edu-ja.bin
     val_bin:
         - data/tinystories.val.bin
+        - data/tinystories-ja.val.bin
         - data/gsm8k.val.bin
         - data/tiny-textbooks.val.bin
 

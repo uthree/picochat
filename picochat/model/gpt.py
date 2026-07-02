@@ -287,9 +287,11 @@ class Transformer(nn.Module):
         grad_checkpoint: bool = False,
         window_size: int = 64,
         global_attn_ratio: int = 4,
+        n_loops: int = 1,
     ):
         super().__init__()
         self.n_layers = n_layers
+        self.n_loops = n_loops
         # Trade compute for memory during training: don't keep each layer's
         # activations for the backward pass, recompute them instead. Lets us fit
         # bigger models / longer sequences on a fixed GPU. No effect on decode().
@@ -308,12 +310,14 @@ class Transformer(nn.Module):
             self.layers.append(layer)
 
     def forward(self, x: Tensor) -> Tensor:
-        for layer in self.layers:
-            if self.grad_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
-            else:
-                x = layer(x)
-        return rms_norm(x)
+        for i in range(self.n_loops):
+            for layer in self.layers:
+                if self.grad_checkpoint and self.training:
+                    x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
+                else:
+                    x = layer(x)
+        x = rms_norm(x)
+        return x
 
     def decode(
         self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
@@ -323,11 +327,15 @@ class Transformer(nn.Module):
         # only this method computes/advances it. Neither the cache nor the
         # position is kept as model state -- both flow through args/returns only.
         if cache is None:
-            cache = [None] * self.n_layers
+            cache = [None] * self.n_layers * self.n_loops
         q_len = x.shape[-2]
-        for i, layer in enumerate(self.layers):
-            x, cache[i] = layer.decode(x, cache[i], pos)
-        return rms_norm(x), cache, pos + q_len  # type: ignore
+        for i in range(self.n_loops):
+            for j, layer in enumerate(self.layers):
+                x, cache[j + i * self.n_loops] = layer.decode(
+                    x, cache[j + i * self.n_loops], pos
+                )
+        x = rms_norm(x)
+        return x, cache, pos + q_len  # type: ignore
 
 
 class TransformerLM(nn.Module):
@@ -346,6 +354,7 @@ class TransformerLM(nn.Module):
         grad_checkpoint: bool = True,
         window_size: int = 64,
         global_attn_ratio: int = 4,
+        n_loops: int = 1,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -365,6 +374,7 @@ class TransformerLM(nn.Module):
             grad_checkpoint=grad_checkpoint,
             window_size=window_size,
             global_attn_ratio=global_attn_ratio,
+            n_loops=n_loops,
         )
         self._init_weights()
         if tie_embeddings:
@@ -420,14 +430,15 @@ class TransformerLM(nn.Module):
 MODEL_PRESETS: dict[str, dict] = {
     "pico": dict(
         d_model=512,
-        n_layers=8,
+        n_layers=4,
         n_heads=8,
         n_kv_heads=2,
         vocab_size=64000,
         tie_embeddings=True,
         window_size=64,
         global_attn_ratio=4,
-    ),  # ~56M
+        n_loops=3,
+    ),  # ~30M
     "small": dict(
         d_model=768,
         n_layers=12,
@@ -437,6 +448,7 @@ MODEL_PRESETS: dict[str, dict] = {
         tie_embeddings=True,
         window_size=64,
         global_attn_ratio=6,
+        n_loops=3,
     ),  # ~130M
     "base": dict(
         d_model=1024,
@@ -447,16 +459,18 @@ MODEL_PRESETS: dict[str, dict] = {
         tie_embeddings=False,
         window_size=64,
         global_attn_ratio=6,
+        n_loops=3,
     ),  # ~421M
     "medium": dict(
         d_model=2048,
         n_layers=24,
         n_heads=16,
-        n_kv_heads=8,
+        n_kv_heads=4,
         vocab_size=64000,
         tie_embeddings=False,
         window_size=128,
         global_attn_ratio=6,
+        n_loops=4,
     ),  # ~1.5B
     "large": dict(
         d_model=2560,
@@ -467,7 +481,8 @@ MODEL_PRESETS: dict[str, dict] = {
         tie_embeddings=False,
         window_size=128,
         global_attn_ratio=6,
-    ),  # ~2.7B
+        n_loops=4,
+    ),  # ~3B
 }
 
 
