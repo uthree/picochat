@@ -8,10 +8,10 @@ time. Tokens are stored as uint32 (DTYPE), which fits vocab up to ~4.29B.
 Two ways to run:
 
   # one dataset, ad-hoc
-  python scripts/preprocess.py -p tinystories -o data/tinystories.bin
+  python scripts/base_setup.py -p tinystories -o data/tinystories.bin
 
-  # many datasets from a recipe (configs/preprocess/*.yml)
-  python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
+  # many datasets from a recipe (configs/base_setup/*.yml)
+  python scripts/base_setup.py --config configs/base_setup/stage1_basic.yml
 """
 
 import argparse

@@ -114,7 +114,7 @@ def test_scale_batch_size_finds_power_of_two_with_val():
 def test_scale_batch_size_works_without_val_dataset():
     # Regression test: Lightning's BatchSizeFinder unconditionally probes the
     # val dataloader while restoring state, which crashes if validation_step is
-    # defined but no val dataloader exists at all. scripts/pretrain.py works
+    # defined but no val dataloader exists at all. scripts/base_train.py works
     # around this by shadowing validation_step to None in this scenario.
     train_ds = _RandomTokenDataset(40, 6, n=256)
     dm = PretrainDataModule(train_ds, None, batch_size=2, num_workers=0)

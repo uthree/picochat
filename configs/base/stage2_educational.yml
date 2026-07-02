@@ -4,14 +4,14 @@
 # contributing here via fineweb-edu-ja.
 #
 # Preprocess the bins first, e.g.:
-#   python scripts/preprocess.py -p tiny-textbooks       -o data/tiny-textbooks.bin
-#   python scripts/preprocess.py -p tiny-orca-textbooks  -o data/tiny-orca-textbooks.bin
-#   python scripts/preprocess.py -p textbooks            -o data/textbooks.bin
-#   python scripts/preprocess.py -p cosmopedia           -o data/cosmopedia.bin
-#   python scripts/preprocess.py -p fineweb-edu          -o data/fineweb-edu.bin
-#   python scripts/preprocess.py -p fineweb-edu-ja       -o data/fineweb-edu-ja.bin
+#   python scripts/base_setup.py -p tiny-textbooks       -o data/tiny-textbooks.bin
+#   python scripts/base_setup.py -p tiny-orca-textbooks  -o data/tiny-orca-textbooks.bin
+#   python scripts/base_setup.py -p textbooks            -o data/textbooks.bin
+#   python scripts/base_setup.py -p cosmopedia           -o data/cosmopedia.bin
+#   python scripts/base_setup.py -p fineweb-edu          -o data/fineweb-edu.bin
+#   python scripts/base_setup.py -p fineweb-edu-ja       -o data/fineweb-edu-ja.bin
 #
-# Then: python scripts/pretrain.py --config configs/pretrain/stage2_educational.yml
+# Then: python scripts/base_train.py --config configs/base/stage2_educational.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage2

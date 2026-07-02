@@ -1,4 +1,4 @@
-"""Dataset that reads the flat token binary produced by scripts/preprocess.py.
+"""Dataset that reads the flat token binary produced by scripts/base_setup.py.
 
 The file is a continuous token stream concatenated without padding. Slicing a
 block_size+1 window and returning it lets GPT._loss shift by one internally to
@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
-# Writer (scripts/preprocess.py) imports this so the two never diverge.
+# Writer (scripts/base_setup.py) imports this so the two never diverge.
 DTYPE = np.uint32
 
 
@@ -21,7 +21,7 @@ class PackedDataset(Dataset):
     def __init__(self, path: str, block_size: int = 1024, random: bool = True):
         """
         Args:
-            path: the .bin file produced by preprocess.py
+            path: the .bin file produced by base_setup.py
             block_size: effective context length. Each sample is block_size+1 tokens.
             random: True for random offsets, False for non-overlapping contiguous
                 blocks.
@@ -65,7 +65,7 @@ class PretrainDataModule(L.LightningDataModule):
     """Wraps train/val datasets with a plain `batch_size` attribute.
 
     Lightning's Tuner rewrites `batch_size` in place and rebuilds the
-    dataloaders from it (see scripts/pretrain.py's auto batch-size search), so
+    dataloaders from it (see scripts/base_train.py's auto batch-size search), so
     the dataloaders must be built from this attribute rather than fixed at
     construction time.
     """

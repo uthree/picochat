@@ -1,10 +1,10 @@
-# Preprocess the datasets used by configs/pretrain/stage1_basic.yml.
+# Preprocess the datasets used by configs/base/stage1_basic.yml.
 # Each entry picks its own split (default train); a validation bin is just a
 # second entry pointing at a validation split. Every dataset/split is checked
 # before processing, so only list splits that exist: here only tinystories has
 # a 'validation' split (children-stories is train-only; gsm8k has train/test).
 #
-#   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
+#   python scripts/base_setup.py --config configs/base_setup/stage1_basic.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: data

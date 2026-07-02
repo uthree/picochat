@@ -3,9 +3,9 @@
 # learns fundamentals first. Mostly English (easy Japanese text is scarce).
 #
 # Preprocess the train + validation bins first (one command makes both):
-#   python scripts/preprocess.py --config configs/preprocess/stage1_basic.yml
+#   python scripts/base_setup.py --config configs/base_setup/stage1_basic.yml
 #
-# Then: python scripts/pretrain.py --config configs/pretrain/stage1_basic.yml
+# Then: python scripts/base_train.py --config configs/base/stage1_basic.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage1
@@ -34,7 +34,7 @@ data:
         - 1.0 # children-stories
         - 1.0 # gsm8k
         - 1.0 # tiny-code
-    val_bin: # per-dataset validation splits (see configs/preprocess/stage1_basic.yml)
+    val_bin: # per-dataset validation splits (see configs/base_setup/stage1_basic.yml)
         - data/tinystories.val.bin
         - data/tinystories-ja.val.bin
         - data/gsm8k.val.bin

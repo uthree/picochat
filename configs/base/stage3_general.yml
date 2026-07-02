@@ -2,11 +2,11 @@
 # Warm-starts from stage 2's checkpoint.
 #
 # Preprocess the bins first, e.g.:
-#   python scripts/preprocess.py -p wikipedia-en  -o data/wikipedia-en.bin
-#   python scripts/preprocess.py -p wikipedia-ja  -o data/wikipedia-ja.bin
-#   python scripts/preprocess.py -p fineweb-ja    -o data/fineweb-ja.bin
+#   python scripts/base_setup.py -p wikipedia-en  -o data/wikipedia-en.bin
+#   python scripts/base_setup.py -p wikipedia-ja  -o data/wikipedia-ja.bin
+#   python scripts/base_setup.py -p fineweb-ja    -o data/fineweb-ja.bin
 #
-# Then: python scripts/pretrain.py --config configs/pretrain/stage3_general.yml
+# Then: python scripts/base_train.py --config configs/base/stage3_general.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage3

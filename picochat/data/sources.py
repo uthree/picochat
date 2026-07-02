@@ -1,7 +1,7 @@
 """Turn HuggingFace text datasets into a common iterator of strings.
 
-Both tokenizer training (scripts/train_tokenizer.py) and preprocessing
-(scripts/preprocess.py) need to stream text from a dataset one item at a time,
+Both tokenizer training (scripts/tok_train.py) and preprocessing
+(scripts/base_setup.py) need to stream text from a dataset one item at a time,
 so that logic is centralized here.
 
 With streaming=True even huge datasets download shards lazily, so combining it

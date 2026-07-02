@@ -6,7 +6,7 @@ curriculum, train one stage, then point the next stage's config at the produced
 checkpoint via `init_from` to warm-start (continual learning) with a fresh
 optimizer and LR schedule.
 
-    python scripts/pretrain.py --config configs/pretrain/stage1_basic.yml
+    python scripts/base_train.py --config configs/base/stage1_basic.yml
 
 The model architecture must stay the same across stages that chain via
 `init_from` (only the data / schedule change).
@@ -127,7 +127,7 @@ def main():
     overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
     lm = build_lm(size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
     # Recipe for rebuilding this exact architecture later (see GPT.model_config);
-    # saved into the checkpoint so scripts/eval_pretrained.py doesn't need it
+    # saved into the checkpoint so scripts/base_chat.py doesn't need it
     # repeated on the command line.
     model_config = dict(size=size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
 

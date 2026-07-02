@@ -1,6 +1,6 @@
-# Preprocess the datasets used by configs/pretrain/stage2_educational.yml.
+# Preprocess the datasets used by configs/base/stage2_educational.yml.
 #
-#   python scripts/preprocess.py --config configs/preprocess/stage2_educational.yml
+#   python scripts/base_setup.py --config configs/base_setup/stage2_educational.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: data

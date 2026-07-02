@@ -1,6 +1,6 @@
-# Preprocess the datasets used by configs/pretrain/stage3_general.yml.
+# Preprocess the datasets used by configs/base/stage3_general.yml.
 #
-#   python scripts/preprocess.py --config configs/preprocess/stage3_general.yml
+#   python scripts/base_setup.py --config configs/base_setup/stage3_general.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: data

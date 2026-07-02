@@ -5,9 +5,9 @@ from stdin, encodes it, appends "<s>", and autoregresses (streaming to
 stdout) until "</s>" is generated -- then goes back to waiting for the next
 input.
 
-    python scripts/eval_pretrained.py --checkpoint weights/stage3/last.ckpt
+    python scripts/base_chat.py --checkpoint weights/stage3/last.ckpt
 
-Requires a checkpoint produced by the current scripts/pretrain.py, which
+Requires a checkpoint produced by the current scripts/base_train.py, which
 embeds a `model_config` hyperparameter (see GPT.__init__) recording the
 exact build_lm() recipe used to construct the model -- the architecture is
 rebuilt from the checkpoint itself. Checkpoints predating that (no

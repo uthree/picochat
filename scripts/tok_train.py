@@ -1,9 +1,9 @@
 """Train a BPE tokenizer from a YAML recipe.
 
 The tokenizer recipe is independent from the pretraining stage configs (it has
-its own vocab size and data mixture). See configs/tokenizer/*.yml.
+its own vocab size and data mixture). See configs/tok/*.yml.
 
-    python scripts/train_tokenizer.py --config configs/tokenizer/pico.yml
+    python scripts/tok_train.py --config configs/tok/en_ja.yml
 """
 
 import argparse
@@ -55,7 +55,7 @@ def main():
         type=str,
         required=True,
         help="tokenizer recipe (YAML)",
-        default="configs/tokenizer/default.yml",
+        default="configs/tok/en_ja.yml",
     )
     p.add_argument(
         "-o", "--output", type=str, default=None, help="override config's output path"
