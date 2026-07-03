@@ -49,3 +49,4 @@ We applied several improvements to a decoder-only Transformer, such as GPT-2.
 - SwiGLU
 - Flash Attention
 - Sliding Widnow Attention
+- Mixture of Experts

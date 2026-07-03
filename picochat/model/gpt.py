@@ -81,12 +81,19 @@ class MixtureOfExperts(nn.Module):
         p_dropout: float = 0.1,
         n_experts: int = 8,
         n_active: int = 2,
+        capacity_factor: float = 1.25,
+        bias_update_rate: float = 1e-3,
     ):
         super().__init__()
         assert n_active <= n_experts
         self.p_dropout = p_dropout
         self.n_experts = n_experts
         self.n_active = n_active
+        # capacity_factor: slack over the perfectly-even per-expert token count
+        # (see forward). bias_update_rate: how fast expert_bias below chases
+        # load balance.
+        self.capacity_factor = capacity_factor
+        self.bias_update_rate = bias_update_rate
         if d_hidden is None:
             d_hidden = d_model * 3
         self.weight_router = nn.Parameter(torch.empty(n_experts, d_model))
@@ -95,37 +102,84 @@ class MixtureOfExperts(nn.Module):
         self.weight_down = nn.Parameter(torch.empty(n_experts, d_model, d_hidden))
         for w in (self.weight_router, self.weight_up, self.weight_gate, self.weight_down):
             nn.init.normal_(w, mean=0.0, std=0.02)
+        # DeepSeek-V3 style aux-loss-free load balancing: a per-expert bias
+        # that only steers *which* experts get picked (added before top-k,
+        # dropped again before computing combine weights below), nudged every
+        # training step toward under-loaded experts. Not a Parameter -- no
+        # gradient, no loss term, just a running buffer updated in-place at
+        # the end of forward.
+        self.register_buffer("expert_bias", torch.zeros(n_experts))
 
     def forward(self, x: Tensor) -> Tensor:
         b, l, d = x.shape
-        tokens = rms_norm(x).reshape(-1, d)  # (n_tokens, d_model)
+        n_tokens = b * l
+        tokens = rms_norm(x).reshape(n_tokens, d)
 
-        # Route every token to its top-n_active experts (Mixtral-style: softmax
-        # only over the selected logits, not the full n_experts distribution).
+        # Route every token to its top-n_active experts. The bias only affects
+        # *which* experts are selected; the combine weight is still softmax
+        # over the real (unbiased) logits, so it stays a differentiable
+        # function of weight_router alone.
         logits = tokens @ self.weight_router.T  # (n_tokens, n_experts)
-        top_weight, top_expert = logits.topk(self.n_active, dim=-1)
-        top_weight = F.softmax(top_weight, dim=-1)  # (n_tokens, n_active)
+        top_idx = (logits + self.expert_bias).topk(self.n_active, dim=-1).indices
+        top_logits = logits.gather(-1, top_idx)
+        top_weight = F.softmax(top_logits, dim=-1)  # (n_tokens, n_active)
 
-        # One-hot over experts so that, per expert, we can pull out exactly the
-        # (slot, token) pairs routed to it. This is what lets each expert below
-        # matmul only over its assigned tokens -- unassigned tokens (and, when
-        # an expert gets zero tokens this step, the whole expert) never enter
-        # its matmul, instead of computing every expert densely and masking.
-        expert_mask = F.one_hot(top_expert, self.n_experts).permute(2, 1, 0)
+        # Fixed per-expert capacity keeps every tensor below a static shape --
+        # unlike a data-dependent gather/nonzero, this stays traceable under
+        # torch.compile and shards cleanly across devices for future
+        # expert-parallel training. Tokens beyond an expert's capacity are
+        # dropped for that expert (Switch Transformer / GShard style); within
+        # a token, slot 0 (its top choice) claims capacity before slot 1, etc.
+        capacity = max(
+            self.n_active,
+            math.ceil(n_tokens * self.n_active * self.capacity_factor / self.n_experts),
+        )
+        n_slots = self.n_experts * capacity
+        # Row n_slots is a trash bin: every dropped token's slot is redirected
+        # there instead of a real expert, so index_add/index_select below can
+        # use a fixed-size index (no dynamic-length gather) while still
+        # discarding the overflow.
+        buffer = tokens.new_zeros(n_slots + 1, d)
+        filled = torch.zeros(self.n_experts, dtype=torch.long, device=x.device)
+        dests, keeps = [], []
+        for slot in range(self.n_active):
+            expert_idx = top_idx[:, slot]  # (n_tokens,)
+            one_hot = F.one_hot(expert_idx, self.n_experts)  # int64, exact counts
+            position = one_hot.cumsum(dim=0) - 1 + filled
+            token_position = position.gather(-1, expert_idx.unsqueeze(-1)).squeeze(-1)
+            keep = token_position < capacity
+            dest = torch.where(
+                keep, expert_idx * capacity + token_position, torch.full_like(expert_idx, n_slots)
+            )
+            buffer = buffer.index_add(
+                0, dest, tokens * keep.unsqueeze(-1).to(tokens.dtype)
+            )
+            filled = filled + one_hot.sum(dim=0)
+            dests.append(dest)
+            keeps.append(keep)
 
-        out = torch.zeros_like(tokens)
-        for expert_id in range(self.n_experts):
-            slot_idx, token_idx = expert_mask[expert_id].nonzero(as_tuple=True)
-            if token_idx.numel() == 0:
-                continue  # nothing routed here this step -- skip the expert entirely
-            expert_in = tokens[token_idx]
-            up = expert_in @ self.weight_up[expert_id].T
-            gate = expert_in @ self.weight_gate[expert_id].T
-            h = F.dropout(up * F.silu(gate), self.p_dropout, training=self.training)
-            expert_out = h @ self.weight_down[expert_id].T
-            expert_out = F.dropout(expert_out, self.p_dropout, training=self.training)
-            coeff = top_weight[token_idx, slot_idx].unsqueeze(-1)
-            out.index_add_(0, token_idx, expert_out * coeff)
+        if self.training:
+            with torch.no_grad():
+                load = filled.float()
+                self.expert_bias += self.bias_update_rate * torch.sign(
+                    load.mean() - load
+                )
+
+        expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d)
+        up = torch.bmm(expert_in, self.weight_up.transpose(1, 2))
+        gate = torch.bmm(expert_in, self.weight_gate.transpose(1, 2))
+        h = F.dropout(up * F.silu(gate), self.p_dropout, training=self.training)
+        expert_out = torch.bmm(h, self.weight_down.transpose(1, 2))
+        expert_out = F.dropout(expert_out, self.p_dropout, training=self.training)
+        expert_out = torch.cat(
+            [expert_out.reshape(n_slots, d), expert_out.new_zeros(1, d)], dim=0
+        )
+
+        out = tokens.new_zeros(n_tokens, d)
+        for slot in range(self.n_active):
+            picked = expert_out.index_select(0, dests[slot])
+            coeff = (top_weight[:, slot] * keeps[slot]).unsqueeze(-1).to(tokens.dtype)
+            out = out + picked * coeff
 
         return out.reshape(b, l, d)
 
