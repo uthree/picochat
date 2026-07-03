@@ -75,11 +75,9 @@ def generate(
     temperature: float,
     top_k: int | None,
 ) -> Iterator[int]:
-    """Yield generated token ids, starting decode from "<s>" and stopping at "</s>"."""
-    bos = tokenizer._special_tokens["<s>"]
     eos = tokenizer._special_tokens["</s>"]
 
-    x = torch.tensor([prompt_ids + [bos]], dtype=torch.long, device=device)
+    x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     logits, cache, pos = gpt.model.decode(x)
     next_token = _sample(logits[:, -1], temperature, top_k)
 
