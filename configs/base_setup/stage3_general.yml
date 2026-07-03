@@ -13,5 +13,4 @@ datasets:
     - { preset: fineweb-edu, output: fineweb-edu.bin }
     - { preset: fineweb-edu-ja, output: fineweb-edu-ja.bin }
     - { preset: wikipedia-en, output: wikipedia-en.bin }
-    - { preset: wikipedia-ja, output: wikipedia-ja.bin }
     - { preset: fineweb-ja, output: fineweb-ja.bin }

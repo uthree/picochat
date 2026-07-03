@@ -34,6 +34,7 @@ data:
         - tiny-orca-textbooks.bin
         - textbooks.bin
         - cosmopedia.bin
+        - wikipedia-ja.bin
     # Equal weight per dataset: without this, datasets are sampled in
     # proportion to their token count, so small datasets get seen far less
     # often than large ones. Adjust the relative scale to rebalance.
@@ -46,6 +47,7 @@ data:
         - 1.0 # tiny-orca-textbooks
         - 1.0 # textbooks
         - 1.0 # cosmopedia
+        - 1.0 # wikipedia
     val_bin:
         - tinystories.val.bin
         - tinystories-ja.val.bin

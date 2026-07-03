@@ -15,3 +15,4 @@ datasets:
     - { preset: tiny-orca-textbooks, output: tiny-orca-textbooks.bin }
     - { preset: textbooks, output: textbooks.bin }
     - { preset: cosmopedia, output: cosmopedia.bin }
+    - { preset: wikipedia-ja, output: wikipedia-ja.bin }
