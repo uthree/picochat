@@ -100,7 +100,12 @@ class MixtureOfExperts(nn.Module):
         self.weight_up = nn.Parameter(torch.empty(n_experts, d_hidden, d_model))
         self.weight_gate = nn.Parameter(torch.empty(n_experts, d_hidden, d_model))
         self.weight_down = nn.Parameter(torch.empty(n_experts, d_model, d_hidden))
-        for w in (self.weight_router, self.weight_up, self.weight_gate, self.weight_down):
+        for w in (
+            self.weight_router,
+            self.weight_up,
+            self.weight_gate,
+            self.weight_down,
+        ):
             nn.init.normal_(w, mean=0.0, std=0.02)
         # DeepSeek-V3 style aux-loss-free load balancing: a per-expert bias
         # that only steers *which* experts get picked (added before top-k,
@@ -149,7 +154,9 @@ class MixtureOfExperts(nn.Module):
             token_position = position.gather(-1, expert_idx.unsqueeze(-1)).squeeze(-1)
             keep = token_position < capacity
             dest = torch.where(
-                keep, expert_idx * capacity + token_position, torch.full_like(expert_idx, n_slots)
+                keep,
+                expert_idx * capacity + token_position,
+                torch.full_like(expert_idx, n_slots),
             )
             buffer = buffer.index_add(
                 0, dest, tokens * keep.unsqueeze(-1).to(tokens.dtype)
@@ -358,6 +365,9 @@ class TransformerLayer(nn.Module):
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
         window_size: int | None = None,
+        n_experts: int | None = None,
+        n_active: int = 2,
+        d_expert: int = 1024,
     ):
         super().__init__()
         self.attn = SelfAttention(
@@ -369,11 +379,18 @@ class TransformerLayer(nn.Module):
             window_size=window_size,
         )
         self.ffn = SwiGLU(d_model, d_hidden=d_ffn)
+        if n_experts is not None:
+            self.moe = MixtureOfExperts(
+                d_model, d_hidden=d_ffn, n_experts=d_expert, n_active=n_active
+            )
 
     def forward(self, x: Tensor) -> Tensor:
         # attn/ffn apply pre-norm (rms_norm) internally, so add the raw residual.
         x = self.attn(x) + x
-        x = self.ffn(x) + x
+        if hasattr(self, "moe"):
+            x = self.ffn(x) + self.moe(x) + x
+        else:
+            x = self.ffn(x) + x
         return x
 
     def decode(
@@ -398,6 +415,9 @@ class Transformer(nn.Module):
         grad_checkpoint: bool = False,
         window_size: int = 64,
         global_attn_ratio: int = 4,
+        n_experts: int | None = None,
+        d_expert: int = 1024,
+        n_active: int = 2,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -415,6 +435,9 @@ class Transformer(nn.Module):
                 d_ffn=d_ffn,
                 max_seq_len=max_seq_len,
                 window_size=None if (i + 1) % global_attn_ratio == 0 else window_size,
+                n_experts=n_experts,
+                d_expert=d_expert,
+                n_active=n_active,
             )
             self.layers.append(layer)
 
@@ -459,6 +482,9 @@ class TransformerLM(nn.Module):
         grad_checkpoint: bool = True,
         window_size: int = 64,
         global_attn_ratio: int = 4,
+        n_experts: int | None = None,
+        n_active: int = 2,
+        d_expert: int = 1024,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -478,6 +504,9 @@ class TransformerLM(nn.Module):
             grad_checkpoint=grad_checkpoint,
             window_size=window_size,
             global_attn_ratio=global_attn_ratio,
+            n_experts=n_experts,
+            n_active=n_active,
+            d_expert=d_expert,
         )
         self._init_weights()
         if tie_embeddings:
