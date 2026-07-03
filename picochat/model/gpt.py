@@ -73,6 +73,63 @@ class SwiGLU(nn.Module):
         return x
 
 
+class MixtureOfExperts(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        d_hidden: int | None = None,
+        p_dropout: float = 0.1,
+        n_experts: int = 8,
+        n_active: int = 2,
+    ):
+        super().__init__()
+        assert n_active <= n_experts
+        self.p_dropout = p_dropout
+        self.n_experts = n_experts
+        self.n_active = n_active
+        if d_hidden is None:
+            d_hidden = d_model * 3
+        self.weight_router = nn.Parameter(torch.empty(n_experts, d_model))
+        self.weight_up = nn.Parameter(torch.empty(n_experts, d_hidden, d_model))
+        self.weight_gate = nn.Parameter(torch.empty(n_experts, d_hidden, d_model))
+        self.weight_down = nn.Parameter(torch.empty(n_experts, d_model, d_hidden))
+        for w in (self.weight_router, self.weight_up, self.weight_gate, self.weight_down):
+            nn.init.normal_(w, mean=0.0, std=0.02)
+
+    def forward(self, x: Tensor) -> Tensor:
+        b, l, d = x.shape
+        tokens = rms_norm(x).reshape(-1, d)  # (n_tokens, d_model)
+
+        # Route every token to its top-n_active experts (Mixtral-style: softmax
+        # only over the selected logits, not the full n_experts distribution).
+        logits = tokens @ self.weight_router.T  # (n_tokens, n_experts)
+        top_weight, top_expert = logits.topk(self.n_active, dim=-1)
+        top_weight = F.softmax(top_weight, dim=-1)  # (n_tokens, n_active)
+
+        # One-hot over experts so that, per expert, we can pull out exactly the
+        # (slot, token) pairs routed to it. This is what lets each expert below
+        # matmul only over its assigned tokens -- unassigned tokens (and, when
+        # an expert gets zero tokens this step, the whole expert) never enter
+        # its matmul, instead of computing every expert densely and masking.
+        expert_mask = F.one_hot(top_expert, self.n_experts).permute(2, 1, 0)
+
+        out = torch.zeros_like(tokens)
+        for expert_id in range(self.n_experts):
+            slot_idx, token_idx = expert_mask[expert_id].nonzero(as_tuple=True)
+            if token_idx.numel() == 0:
+                continue  # nothing routed here this step -- skip the expert entirely
+            expert_in = tokens[token_idx]
+            up = expert_in @ self.weight_up[expert_id].T
+            gate = expert_in @ self.weight_gate[expert_id].T
+            h = F.dropout(up * F.silu(gate), self.p_dropout, training=self.training)
+            expert_out = h @ self.weight_down[expert_id].T
+            expert_out = F.dropout(expert_out, self.p_dropout, training=self.training)
+            coeff = top_weight[token_idx, slot_idx].unsqueeze(-1)
+            out.index_add_(0, token_idx, expert_out * coeff)
+
+        return out.reshape(b, l, d)
+
+
 class SelfAttention(nn.Module):
     def __init__(
         self,
