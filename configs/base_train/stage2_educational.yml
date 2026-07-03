@@ -56,7 +56,7 @@ data:
 
 optim:
     lr: 2.0e-4 # slightly lower than stage 1 (continual learning)
-    weight_decay: 0.05
+    weight_decay: 0.1
     warmup_steps: 1000
     max_steps: 40000
 
