@@ -4,7 +4,7 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: data
-streaming: true # fineweb-edu(-ja) are large; stream instead of filling the disk
+streaming: true
 
 # None of these have a 'validation' split, so there are no validation entries.
 # fineweb-edu-ja has a 'test' split, e.g. add:

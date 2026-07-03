@@ -4,7 +4,7 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: data
-streaming: true # wikipedia / fineweb-ja are huge; stream instead of filling the disk
+streaming: true # wikipedia / fineweb-ja / wineweb-edu are huge; stream instead of filling the disk
 
 # wikipedia is train-only (no validation entries). fineweb-ja has a 'test'
 # split, e.g. add:
