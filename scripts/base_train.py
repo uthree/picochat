@@ -60,6 +60,14 @@ def resolve_bins(bins, data_dir: str) -> list[str]:
     return [str(Path(data_dir) / b) for b in bins]
 
 
+def resolve_datasets(datasets, data_dir: str) -> tuple[list[str], list[float]]:
+    """Split `data.datasets` (list of {path, weight}) into parallel bin paths
+    and weights, joining `data_dir` with each path."""
+    paths = [str(Path(data_dir) / d["path"]) for d in datasets]
+    weights = [d.get("weight", 1.0) for d in datasets]
+    return paths, weights
+
+
 def make_dataset(bins, block_size: int, random: bool, weights=None):
     """Build a (Concat)PackedDataset from a single path or a list of paths.
 
@@ -124,11 +132,12 @@ def main():
     num_workers = trainer_cfg.get("num_workers", 4)
 
     data_dir = data_cfg.get("data_dir", "data")
+    train_bins, train_weights = resolve_datasets(data_cfg["datasets"], data_dir)
     train_ds, train_group_weights = make_dataset(
-        resolve_bins(data_cfg["train_bin"], data_dir),
+        train_bins,
         block_size,
         random=True,
-        weights=data_cfg.get("train_weights"),
+        weights=train_weights if len(train_bins) > 1 else None,
     )
     val_ds = None
     monitor = None

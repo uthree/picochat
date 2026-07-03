@@ -17,24 +17,18 @@ model:
     grad_checkpoint: true # set true to trade compute for memory (bigger models / longer seqs)
 
 data:
-    data_dir: data # joined with each train_bin/val_bin filename below
+    data_dir: data # joined with each dataset path/val_bin filename below
     block_size: 1024
-    train_bin:
-        - tinystories.bin
-        - tinystories-ja.bin
-        - children-stories.bin
-        - gsm8k.bin
-        - tiny-codes.bin
-    # Equal weight per dataset: without this, datasets are sampled in
-    # proportion to their token count, so small datasets (e.g. gsm8k) get
+    # Equal weight per dataset by default: without this, datasets are sampled
+    # in proportion to their token count, so small datasets (e.g. gsm8k) get
     # seen far less often than large ones. Adjust the relative scale to
     # rebalance.
-    train_weights:
-        - 1.0 # tinystories
-        - 1.0 # tinystories-ja
-        - 1.0 # children-stories
-        - 1.0 # gsm8k
-        - 1.0 # tiny-code
+    datasets:
+        - { path: tinystories.bin, weight: 1.0 }
+        - { path: tinystories-ja.bin, weight: 1.0 }
+        - { path: children-stories.bin, weight: 1.0 }
+        - { path: gsm8k.bin, weight: 1.0 }
+        - { path: tiny-codes.bin, weight: 1.0 }
     val_bin: # per-dataset validation splits (see configs/base_setup/stage1_basic.yml)
         - tinystories.val.bin
         - tinystories-ja.val.bin

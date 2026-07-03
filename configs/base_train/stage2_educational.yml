@@ -23,31 +23,21 @@ model:
     grad_checkpoint: true
 
 data:
-    data_dir: data # joined with each train_bin/val_bin filename below
+    data_dir: data # joined with each dataset path/val_bin filename below
     block_size: 1024
-    train_bin:
-        - tinystories.bin
-        - tinystories-ja.bin
-        - children-stories.bin
-        - gsm8k.bin
-        - tiny-textbooks.bin
-        - tiny-orca-textbooks.bin
-        - textbooks.bin
-        - cosmopedia.bin
-        - wikipedia-ja.bin
-    # Equal weight per dataset: without this, datasets are sampled in
-    # proportion to their token count, so small datasets get seen far less
+    # Equal weight per dataset by default: without this, datasets are sampled
+    # in proportion to their token count, so small datasets get seen far less
     # often than large ones. Adjust the relative scale to rebalance.
-    train_weights:
-        - 1.0 # tinystories
-        - 1.0 # tinystories-ja
-        - 1.0 # children-stories
-        - 1.0 # gsm8k
-        - 1.0 # tiny-textbooks
-        - 1.0 # tiny-orca-textbooks
-        - 1.0 # textbooks
-        - 1.0 # cosmopedia
-        - 1.0 # wikipedia
+    datasets:
+        - { path: tinystories.bin, weight: 1.0 }
+        - { path: tinystories-ja.bin, weight: 1.0 }
+        - { path: children-stories.bin, weight: 1.0 }
+        - { path: gsm8k.bin, weight: 1.0 }
+        - { path: tiny-textbooks.bin, weight: 1.0 }
+        - { path: tiny-orca-textbooks.bin, weight: 1.0 }
+        - { path: textbooks.bin, weight: 1.0 }
+        - { path: cosmopedia.bin, weight: 1.0 }
+        - { path: wikipedia-ja.bin, weight: 1.0 }
     val_bin:
         - tinystories.val.bin
         - tinystories-ja.val.bin
