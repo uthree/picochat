@@ -125,7 +125,10 @@ class MixtureOfExperts(nn.Module):
             "_pending_bias_delta", torch.zeros(n_experts), persistent=False
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, no_drop: bool = False) -> Tensor:
+        # no_drop=True (used only by decode) never drops a token; the training /
+        # validation forward keeps the bounded, fixed-capacity path. See the
+        # capacity computation below.
         b, l, d = x.shape
         n_tokens = b * l
         tokens = rms_norm(x).reshape(n_tokens, d)
@@ -145,20 +148,23 @@ class MixtureOfExperts(nn.Module):
         # expert-parallel training. Tokens beyond an expert's capacity are
         # dropped for that expert (Switch Transformer / GShard style); within
         # a token, slot 0 (its top choice) claims capacity before slot 1, etc.
-        if self.training:
+        if no_drop:
+            # Decode/generation: never drop a token. n_tokens is the worst case
+            # (all tokens to one expert), so nothing overflows -- the layer
+            # becomes purely per-token, so chunked decode matches a full no-drop
+            # forward exactly and no generated token is silently dropped. Only
+            # reached from decode(), where n_tokens is small, so the larger,
+            # mostly-empty buffer is cheap. The training/validation forward keeps
+            # the bounded path below: bounding it here too would blow the buffer
+            # up n_experts/(n_active*capacity_factor)x on full-batch validation.
+            capacity = n_tokens
+        else:
             capacity = max(
                 self.n_active,
                 math.ceil(
                     n_tokens * self.n_active * self.capacity_factor / self.n_experts
                 ),
             )
-        else:
-            # Inference: never drop. n_tokens is the worst case (all tokens to one
-            # expert), so nothing overflows -- the layer becomes purely per-token,
-            # which makes chunked decode match a full forward exactly (and avoids
-            # silently dropping tokens while generating). Costs a larger, mostly
-            # empty buffer, acceptable for a single no-grad forward.
-            capacity = n_tokens
         n_slots = self.n_experts * capacity
         # Row n_slots is a trash bin: every dropped token's slot is redirected
         # there instead of a real expert, so index_add/index_select below can
@@ -438,9 +444,9 @@ class TransformerLayer(nn.Module):
         x = a + x
         # Mirror forward(): MoE layers must apply their experts at inference too,
         # otherwise generation silently runs a different (FFN-only) network than
-        # training. decode always runs in eval, so MoE drops nothing here.
+        # training. no_drop=True: never drop a token while generating.
         if hasattr(self, "moe"):
-            x = self.ffn(x) + self.moe(x) + x
+            x = self.ffn(x) + self.moe(x, no_drop=True) + x
         else:
             x = self.ffn(x) + x
         return x, cache

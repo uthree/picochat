@@ -1242,11 +1242,12 @@ def test_estimate_num_params_ignores_n_recursions():
 # ---------------------------------------------------------------------------
 def test_moe_decode_matches_full_forward():
     # regression: TransformerLayer.decode used to skip the MoE entirely, so a
-    # sparse model generated from an FFN-only network. It must now apply the
-    # experts, and (with no dropping in eval) match a full forward exactly.
+    # sparse model generated from an FFN-only network. decode must now apply the
+    # experts. n_experts=2/n_active=2 makes the bounded capacity >= n_tokens, so
+    # the (dropping) full forward drops nothing here and matches decode exactly.
     torch.manual_seed(0)
     m = Transformer(
-        d_model=32, n_heads=4, n_layers=3, n_experts=4, d_expert=16,
+        d_model=32, n_heads=4, n_layers=3, n_experts=2, d_expert=16, n_active=2,
         n_prelude_layers=1, n_coda_layers=1, n_recursions=2, global_attn_ratio=1,
     ).eval()
     x = torch.randn(1, 6, 32)
@@ -1260,26 +1261,33 @@ def test_moe_decode_matches_full_forward():
     assert torch.allclose(torch.cat(outs, dim=1), full, atol=1e-4)
 
 
-def test_moe_eval_is_per_token_no_drop():
-    # in eval the MoE must not drop tokens: a token's output is then independent
-    # of the other tokens sharing the forward (pure per-token routing).
+def test_moe_no_drop_flag_is_per_token():
+    # no_drop=True (the decode path) processes every token independently: a
+    # token's output does not depend on the others sharing the forward.
     torch.manual_seed(0)
-    m = _looped(n_experts=4, d_expert=16).eval()
-    moe = m.layers[0].moe
+    moe = _looped(n_experts=4, d_expert=16).eval().layers[0].moe
     x = torch.randn(1, 7, 32)
-    full = moe(x)
-    single = moe(x[:, 3:4])  # same token, alone
+    full = moe(x, no_drop=True)
+    single = moe(x[:, 3:4], no_drop=True)  # same token, alone
     assert torch.allclose(full[:, 3:4], single, atol=1e-5)
 
 
-def test_moe_still_uses_capacity_in_training():
-    # training keeps the fixed-capacity path (static shapes for compile); the
-    # eval no-drop change must not leak into training.
+def test_moe_forward_drops_but_no_drop_keeps_every_token():
+    # the default forward (training AND validation) keeps the bounded, dropping
+    # path -- crucially it must NOT balloon to an n_tokens-sized capacity on a
+    # full-batch validation forward. no_drop=True (decode) keeps every token.
+    from picochat.model.gpt import MixtureOfExperts
+
     torch.manual_seed(0)
-    m = _looped(n_experts=4, d_expert=16).train()
-    moe = m.layers[0].moe
-    x = torch.randn(1, 7, 32)
-    # a token's output in training can depend on capacity/dropping, i.e. it is
-    # not guaranteed to equal the token processed alone -- but the forward must
-    # at least run and return the right shape.
-    assert moe(x).shape == x.shape
+    moe = MixtureOfExperts(
+        d_model=8, d_hidden=16, n_experts=4, n_active=1, capacity_factor=1.0
+    ).eval()
+    with torch.no_grad():
+        moe.expert_bias[0] = 1e9  # force every token onto expert 0 -> overflow
+    x = torch.randn(1, 20, 8)
+
+    bounded = moe(x)  # capacity = ceil(20/4) = 5 -> 15 tokens dropped (zero out)
+    kept = moe(x, no_drop=True)  # capacity = 20 -> nothing dropped
+    n_dropped = int((bounded.abs().sum(-1) == 0).sum())
+    assert n_dropped > 0  # bounded path drops (train/val behavior)
+    assert int((kept.abs().sum(-1) == 0).sum()) == 0  # decode keeps every token
