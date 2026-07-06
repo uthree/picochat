@@ -32,9 +32,9 @@ MODEL_OVERRIDES = (
     "n_heads",
     "n_kv_heads",
     "n_layers",
-    "tie_embeddings",
     "grad_checkpoint",
     "window_size",
+    "n_lmheads",
 )
 
 

@@ -386,18 +386,115 @@ def test_transformer_lm_logits_shape():
     lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2)
     tokens = torch.randint(0, vocab_size, (2, 5))
     logits = lm(tokens)
-    assert logits.shape == (2, 5, vocab_size)
+    # forward returns one logits tensor per lm head (a single head by default)
+    assert len(logits) == 1
+    assert logits[0].shape == (2, 5, vocab_size)
 
 
 def test_transformer_lm_incremental_matches_full():
     vocab_size = 40
     lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2).eval()
     tokens = torch.randint(0, vocab_size, (1, 5))
-    full = lm(tokens)
+    full = lm(tokens)[0]
 
     _, cache, pos = lm.decode(tokens[:, :4])
     step, _, _ = lm.decode(tokens[:, 4:5], cache, pos)
     assert torch.allclose(full[:, 4:5], step, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Multiple token prediction (n_lmheads > 1)
+# ---------------------------------------------------------------------------
+def test_mtp_forward_returns_one_logits_per_head():
+    vocab_size = 40
+    lm = TransformerLM(
+        vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2, n_lmheads=3
+    )
+    tokens = torch.randint(0, vocab_size, (2, 6))
+    logits = lm(tokens)
+    assert len(logits) == 3
+    assert all(head.shape == (2, 6, vocab_size) for head in logits)
+
+
+def test_mtp_heads_are_independent_params():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=2)
+    assert lm.lmheads[0].weight is not lm.lmheads[1].weight
+
+
+def test_mtp_decode_uses_next_token_head():
+    # decode must emit a single logits tensor (from head 0), matching head 0 of
+    # a full forward, so autoregressive generation ignores the extra heads.
+    vocab_size = 40
+    lm = TransformerLM(
+        vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2, n_lmheads=3
+    ).eval()
+    tokens = torch.randint(0, vocab_size, (1, 5))
+    full = lm(tokens)[0]
+    step, _, _ = lm.decode(tokens)
+    assert torch.allclose(full, step, atol=1e-4)
+
+
+def test_mtp_head_losses_shift_targets():
+    # head k's output at position i is scored against token i+1+k: feed an
+    # oracle that emits one-hot logits for exactly that token and the loss of
+    # every head must be ~0 (any off-by-one in the shifts would blow it up).
+    vocab_size = 10
+    n_lmheads = 3
+    lm = TransformerLM(
+        vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=1, n_lmheads=n_lmheads
+    )
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    x = torch.randint(1, vocab_size, (2, 7))
+
+    def oracle(tokens):
+        outs = []
+        for k in range(n_lmheads):
+            shift = k + 1
+            logits = torch.zeros(*tokens.shape, vocab_size)
+            # positions with a target k+1 steps ahead get one-hot logits for
+            # it; trailing positions keep zeros (the loss must slice them off)
+            logits[:, : tokens.shape[1] - shift] = (
+                F.one_hot(tokens[:, shift:], vocab_size).float() * 200.0
+            )
+            outs.append(logits)
+        return outs
+
+    gpt._train_model[0] = oracle
+    losses = gpt._head_losses(x)
+    assert losses.shape == (n_lmheads,)
+    assert torch.allclose(losses, torch.zeros(n_lmheads), atol=1e-3)
+
+
+def test_mtp_loss_backward_reaches_all_heads():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=3)
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    batch = torch.randint(1, 40, (2, 8))
+    losses = gpt._head_losses(batch)
+    assert losses.shape == (3,)
+    assert torch.isfinite(losses).all()
+    losses.mean().backward()
+    for head in lm.lmheads:
+        assert head.weight.grad is not None
+        assert head.weight.grad.abs().sum() > 0
+
+
+def test_mtp_training_step_scalar_loss():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=2)
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    batch = torch.randint(1, 40, (2, 8))
+    loss = gpt.training_step(batch, 0)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
+def test_mtp_generate_works():
+    lm = TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=2, max_seq_len=64
+    )
+    gpt = GPT(lm, pad_idx=0, compile=False).eval()
+    prompt = torch.randint(1, 40, (1, 8))
+    generated = gpt._generate(prompt, max_new_tokens=6)
+    assert generated.shape == (1, 6)
 
 
 # ---------------------------------------------------------------------------
@@ -482,18 +579,6 @@ def test_gpt_loss_backward_reaches_embedding(gpt_module):
     batch = torch.randint(1, 40, (2, 6))
     gpt_module.training_step(batch, 0).backward()
     assert gpt_module.model.embed.weight.grad is not None
-
-
-def test_embeddings_untied_when_disabled():
-    lm = TransformerLM(
-        vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=False
-    )
-    assert lm.lmhead.weight is not lm.embed.weight
-
-
-def test_embeddings_tied_by_default():
-    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
-    assert lm.lmhead.weight is lm.embed.weight
 
 
 def test_gpt_pad_targets_are_ignored(gpt_module):
@@ -606,7 +691,8 @@ def test_preset_dims_are_consistent(size):
 def test_build_lm_pico_forward():
     lm = build_lm("pico", vocab_size=50, max_seq_len=64)
     logits = lm(torch.randint(0, 50, (2, 16)))
-    assert logits.shape == (2, 16, 50)
+    assert len(logits) == 4
+    assert logits[0].shape == (2, 16, 50)
 
 
 def test_build_lm_overrides_preset():
@@ -617,33 +703,12 @@ def test_build_lm_overrides_preset():
 def test_build_lm_vocab_override():
     lm = build_lm("pico", vocab_size=123)
     assert lm.embed.num_embeddings == 123
-    assert lm.lmhead.out_features == 123
+    assert all(head.out_features == 123 for head in lm.lmheads)
 
 
-def test_preset_tie_defaults():
-    # small scales tie (lmhead shares the embedding matrix); large scales untie.
-    pico = build_lm("pico")
-    assert pico.lmhead.weight is pico.embed.weight
-    small = build_lm("small")
-    assert small.lmhead.weight is small.embed.weight
-    base = build_lm("base")
-    assert base.lmhead.weight is not base.embed.weight
-
-
-def test_tie_embeddings_override():
-    untied = build_lm("pico", tie_embeddings=False)
-    assert untied.lmhead.weight is not untied.embed.weight
-    tied = build_lm("base", tie_embeddings=True)
-    assert tied.lmhead.weight is tied.embed.weight
-
-
-def test_tied_embeddings_share_gradient():
-    lm = build_lm("pico", vocab_size=40, n_layers=1, d_model=16, n_heads=2)
-    assert lm.tie_embeddings
-    lm(torch.randint(0, 40, (1, 4))).sum().backward()
-    # one shared parameter -> appears once in parameters()
-    n_embed_params = sum(1 for p in lm.parameters() if p is lm.embed.weight)
-    assert n_embed_params == 1
+def test_build_lm_n_lmheads_override():
+    lm = build_lm("pico", vocab_size=50, n_lmheads=2)
+    assert len(lm.lmheads) == 2
 
 
 def test_init_gives_near_uniform_loss():

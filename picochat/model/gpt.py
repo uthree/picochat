@@ -479,7 +479,6 @@ class TransformerLM(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
-        tie_embeddings: bool = True,
         init_std: float = 0.02,
         grad_checkpoint: bool = True,
         window_size: int = 64,
@@ -487,14 +486,16 @@ class TransformerLM(nn.Module):
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
+        n_lmheads: int = 1,
     ):
         super().__init__()
         self.n_layers = n_layers
-        self.tie_embeddings = tie_embeddings
         self.init_std = init_std
 
         self.embed = nn.Embedding(vocab_size, d_model)
-        self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
+        self.lmheads = nn.ModuleList(
+            [nn.Linear(d_model, vocab_size, bias=False) for _ in range(n_lmheads)]
+        )
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -511,14 +512,6 @@ class TransformerLM(nn.Module):
             d_expert=d_expert,
         )
         self._init_weights()
-        if tie_embeddings:
-            # Share one matrix for input/output. At small scale + large vocab this
-            # is the better operating point (param-efficient, and rare-token rows
-            # get gradient from input occurrences too, not just when they are the
-            # target). Untie at larger scale to give the output its own capacity.
-            # Tie after init so the output reuses the embedding's small init std;
-            # the default nn.Embedding init (std 1) would blow up the tied logits.
-            self.lmhead.weight = self.embed.weight
 
     def _init_weights(self) -> None:
         # GPT-2 style: init every weight with normal(0, init_std) and zero biases,
@@ -539,88 +532,83 @@ class TransformerLM(nn.Module):
             elif isinstance(m, SwiGLU):
                 nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor) -> list[Tensor]:
         x = self.embed(x)
         x = self.transformer(x)
-        return self.lmhead(x)
+        return [h_t(x) for h_t in self.lmheads]
 
     def decode(
         self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
     ) -> tuple[Tensor, list[Tensor], int]:
         x = self.embed(x)
         x, cache, pos = self.transformer.decode(x, cache, pos)
-        return self.lmhead(x), cache, pos
+        # Autoregressive decoding only consumes the next-token head; the extra
+        # MTP heads are a training-time signal (and a future hook for
+        # self-speculative decoding).
+        return self.lmheads[0](x), cache, pos
 
 
-# Scale ladder. Presets to switch between pico..3B with the same TransformerLM args.
-# Specify n_heads (query heads); the per-head dim is derived as d_model//n_heads
-# (proj_q stays square). GQA is set by n_kv_heads. Constraints: d_model % n_heads
-# == 0, n_heads % n_kv_heads == 0, d_model//n_heads even. The derived d_head is
-# 64 (pico/small/base) or 128 (medium/large).
-# vocab_size and tie_embeddings are scale-dependent: small models use a smaller
-# vocab (64k is oversized there -> many undertrained rows) and tie embeddings;
-# larger models use the full 64k vocab and untie to give the output its own
-# capacity. Param counts below include the (tied or untied) embeddings.
+# Scale ladder.
 MODEL_PRESETS: dict[str, dict] = {
     "pico": dict(
         d_model=512,
         n_layers=8,
         n_heads=8,
         n_kv_heads=2,
-        vocab_size=128000,
-        tie_embeddings=True,
-        window_size=64,
+        vocab_size=64000,
+        window_size=128,
         global_attn_ratio=4,
         n_experts=8,
         d_expert=1024,
+        n_lmheads=4,
     ),
     "small": dict(
         d_model=768,
         n_layers=12,
         n_heads=12,
         n_kv_heads=4,
-        vocab_size=128000,
-        tie_embeddings=True,
+        vocab_size=64000,
         window_size=128,
-        global_attn_ratio=6,
-        n_experts=12,
+        global_attn_ratio=4,
+        n_experts=16,
         d_expert=1024,
+        n_lmheads=4,
     ),
     "base": dict(
         d_model=1024,
         n_layers=12,
         n_heads=16,
         n_kv_heads=4,
-        vocab_size=128000,
-        tie_embeddings=False,
+        vocab_size=64000,
         window_size=128,
         global_attn_ratio=6,
-        n_experts=16,
+        n_experts=32,
         d_expert=1024,
+        n_lmheads=4,
     ),
     "medium": dict(
         d_model=2048,
         n_layers=24,
         n_heads=16,
         n_kv_heads=4,
-        vocab_size=128000,
-        tie_embeddings=False,
+        vocab_size=64000,
         window_size=256,
         global_attn_ratio=6,
-        n_experts=24,
+        n_experts=64,
         d_expert=1024,
+        n_lmheads=4,
     ),
     "large": dict(
         d_model=2560,
         n_layers=32,
         n_heads=20,
         n_kv_heads=5,
-        vocab_size=128000,
-        tie_embeddings=False,
+        vocab_size=64000,
         window_size=256,
         global_attn_ratio=6,
-        n_experts=32,
+        n_experts=128,
         d_expert=1024,
+        n_lmheads=4,
     ),
 }
 
@@ -699,23 +687,42 @@ class GPT(L.LightningModule):
         self.compile = can_compile() if compile is None else compile
         self._train_model = [torch.compile(self.model) if self.compile else self.model]
 
+    def _head_losses(self, x: Tensor) -> Tensor:
+        # Multiple token prediction: head k's output at position i predicts
+        # token i+1+k, so each head shifts the targets one step further (head 0
+        # is ordinary next-token prediction). Returns one loss per head.
+        head_logits = self._train_model[0](x)
+        losses = []
+        for k, logits in enumerate(head_logits):
+            shift = k + 1
+            logits = rearrange(logits[:, :-shift], "b l v -> (b l) v")
+            targets = rearrange(x[:, shift:], "b l -> (b l)")
+            losses.append(F.cross_entropy(logits, targets, ignore_index=self.pad_idx))
+        return torch.stack(losses)
+
     def _loss(self, x: Tensor) -> Tensor:
-        logits = self._train_model[0](x)
-        # next-token prediction: the output at position i predicts token i+1.
-        logits = rearrange(logits[:, :-1], "b l v -> (b l) v")
-        targets = rearrange(x[:, 1:], "b l -> (b l)")
-        loss = F.cross_entropy(logits, targets, ignore_index=self.pad_idx)
-        return loss
+        return self._head_losses(x).mean()
+
+    def _log_head_losses(self, prefix: str, head_losses: Tensor) -> None:
+        # Per-head breakdown (head 0 is the loss comparable to a single-head
+        # run); skip when there's nothing to break down.
+        if head_losses.numel() > 1:
+            for k, head_loss in enumerate(head_losses):
+                self.log(f"{prefix}_head{k}", head_loss)
 
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        loss = self._loss(batch)
+        head_losses = self._head_losses(batch)
+        loss = head_losses.mean()
         self.log("train_loss", loss)
+        self._log_head_losses("train_loss", head_losses)
         self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
         return loss
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        loss = self._loss(batch)
+        head_losses = self._head_losses(batch)
+        loss = head_losses.mean()
         self.log("val_loss", loss, prog_bar=True)
+        self._log_head_losses("val_loss", head_losses)
         if batch_idx <= self.sample_batches:
             # Sanity-check what the model actually generates: prefill the first
             # half of the sequence and let it autoregress the second half, then
