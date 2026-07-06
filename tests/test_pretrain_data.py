@@ -140,3 +140,118 @@ def test_scale_batch_size_works_without_val_dataset():
     assert found is not None
     assert found & (found - 1) == 0
     trainer.fit(gpt, datamodule=dm)
+
+
+# ---------------------------------------------------------------------------
+# ShardWriter / sharded PackedDataset
+# ---------------------------------------------------------------------------
+import numpy as np  # noqa: E402
+
+from picochat.data.pretrain import DTYPE, PackedDataset, ShardWriter  # noqa: E402
+
+
+def _read_all(shard_dir):
+    files = sorted(shard_dir.glob("*.bin"))
+    return files, np.concatenate([np.fromfile(f, dtype=DTYPE) for f in files])
+
+
+def test_shard_writer_splits_at_shard_tokens(tmp_path):
+    w = ShardWriter(tmp_path / "ds", shard_tokens=10)
+    w.write(np.arange(25, dtype=DTYPE))
+    w.close()
+    files, got = _read_all(tmp_path / "ds")
+    assert [f.name for f in files] == ["00000.bin", "00001.bin", "00002.bin"]
+    itemsize = np.dtype(DTYPE).itemsize
+    assert [f.stat().st_size // itemsize for f in files] == [10, 10, 5]
+    # concatenating the shards reproduces the original stream exactly
+    assert (got == np.arange(25, dtype=DTYPE)).all()
+
+
+def test_shard_writer_write_chunks_smaller_than_shard(tmp_path):
+    # several write() calls, none aligned with the shard boundary
+    w = ShardWriter(tmp_path / "ds", shard_tokens=8)
+    stream = np.arange(20, dtype=DTYPE)
+    for chunk in np.split(stream, [3, 9, 15]):
+        w.write(chunk)
+    w.close()
+    files, got = _read_all(tmp_path / "ds")
+    itemsize = np.dtype(DTYPE).itemsize
+    assert [f.stat().st_size // itemsize for f in files] == [8, 8, 4]
+    assert (got == stream).all()
+
+
+def test_shard_writer_removes_stale_shards(tmp_path):
+    # a rerun producing fewer shards must not leave old shards behind, or the
+    # reader would silently mix stale data into the corpus
+    d = tmp_path / "ds"
+    w = ShardWriter(d, shard_tokens=4)
+    w.write(np.arange(12, dtype=DTYPE))  # 3 shards
+    w.close()
+    w = ShardWriter(d, shard_tokens=4)
+    w.write(np.arange(4, dtype=DTYPE))  # 1 shard
+    w.close()
+    assert [f.name for f in sorted(d.glob("*.bin"))] == ["00000.bin"]
+
+
+def test_packed_dataset_reads_shard_directory_contiguous(tmp_path):
+    w = ShardWriter(tmp_path / "ds", shard_tokens=10)
+    w.write(np.arange(30, dtype=DTYPE))
+    w.close()
+    ds = PackedDataset(str(tmp_path / "ds"), block_size=4, random=False)
+    # 10 tokens per shard -> two non-overlapping 5-token blocks per shard
+    assert len(ds) == 6
+    assert ds[0].tolist() == [0, 1, 2, 3, 4]
+    assert ds[2].tolist() == [10, 11, 12, 13, 14]  # first block of shard 1
+    assert ds[5].tolist() == [25, 26, 27, 28, 29]  # last block of shard 2
+
+
+def test_packed_dataset_random_windows_stay_within_shard(tmp_path):
+    w = ShardWriter(tmp_path / "ds", shard_tokens=10)
+    w.write(np.arange(30, dtype=DTYPE))
+    w.close()
+    ds = PackedDataset(str(tmp_path / "ds"), block_size=4, random=True)
+    # 10 - 4 = 6 random windows per shard
+    assert len(ds) == 18
+    for i in range(len(ds)):
+        chunk = ds[i]
+        # tokens are arange, so a valid window is 5 consecutive values...
+        assert (chunk[1:] - chunk[:-1] == 1).all()
+        # ...that never cross a shard boundary (each shard is one decade)
+        assert (chunk // 10 == chunk[0] // 10).all()
+
+
+def test_packed_dataset_skips_shard_shorter_than_one_sample(tmp_path):
+    # 13 tokens with shard_tokens=10 -> final shard has 3 tokens < block+1
+    w = ShardWriter(tmp_path / "ds", shard_tokens=10)
+    w.write(np.arange(13, dtype=DTYPE))
+    w.close()
+    ds = PackedDataset(str(tmp_path / "ds"), block_size=4, random=True)
+    assert ds.n_tokens == 13
+    assert len(ds) == 6  # only shard 0 contributes samples
+    for i in range(len(ds)):
+        assert ds[i].max() < 10
+
+
+def test_packed_dataset_single_file_still_works(tmp_path):
+    f = tmp_path / "corpus.bin"
+    np.arange(20, dtype=DTYPE).tofile(f)
+    ds = PackedDataset(str(f), block_size=4, random=False)
+    assert len(ds) == 4
+    assert ds[0].tolist() == [0, 1, 2, 3, 4]
+
+
+def test_packed_dataset_legacy_bin_fallback(tmp_path):
+    # config says `corpus` but only the pre-sharding `corpus.bin` exists
+    np.arange(20, dtype=DTYPE).tofile(tmp_path / "corpus.bin")
+    ds = PackedDataset(str(tmp_path / "corpus"), block_size=4)
+    assert ds.n_tokens == 20
+
+
+def test_packed_dataset_missing_path_raises(tmp_path):
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        PackedDataset(str(tmp_path / "nope"), block_size=4)
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(FileNotFoundError):
+        PackedDataset(str(tmp_path / "empty"), block_size=4)

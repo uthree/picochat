@@ -1,14 +1,17 @@
-"""Tokenize HF datasets and convert them into packed, flat token binaries.
+"""Tokenize HF datasets and convert them into packed, sharded token binaries.
 
 Each document is encoded, an <eos> is appended, and everything is concatenated
-into a single continuous token stream written to a .bin file. No padding is
-added; the training side (PackedDataset) slices a block_size+1 window at read
-time. Tokens are stored as uint32 (DTYPE), which fits vocab up to ~4.29B.
+into a single continuous token stream split across fixed-size shard files
+(00000.bin, 00001.bin, ...) under one output directory per dataset, so no
+single file grows with the corpus. Only one encode batch is ever held in
+memory. No padding is added; the training side (PackedDataset) slices a
+block_size+1 window at read time. Tokens are stored as uint32 (DTYPE), which
+fits vocab up to ~4.29B.
 
 Two ways to run:
 
-  # one dataset, ad-hoc
-  python scripts/base_setup.py -p tinystories -o data/tinystories.bin
+  # one dataset, ad-hoc (output is a shard directory)
+  python scripts/base_setup.py -p tinystories -o data/tinystories
 
   # many datasets from a recipe (configs/base_setup/*.yml)
   python scripts/base_setup.py --config configs/base_setup/stage1_basic.yml
@@ -28,7 +31,11 @@ from tqdm import tqdm
 
 from datasets import get_dataset_split_names
 
-from picochat.data.pretrain import DTYPE  # uint32; shared with the reader
+from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
+    DEFAULT_SHARD_TOKENS,
+    DTYPE,
+    ShardWriter,
+)
 from picochat.data.sources import PRESETS, DatasetSpec, iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
@@ -127,37 +134,46 @@ def process(
     limit: int | None = None,
     batch_size: int = BATCH_SIZE,
     num_threads: int | None = None,
+    shard_tokens: int = DEFAULT_SHARD_TOKENS,
 ) -> tuple[int, int]:
-    """Encode every document of `spec` into `output`. Returns (n_docs, n_tokens).
+    """Encode every document of `spec` into shard files under the `output`
+    directory. Returns (n_docs, n_tokens).
 
     Documents are encoded in parallel batches (tiktoken releases the GIL), which
-    is far faster than one-at-a-time for short docs like TinyStories.
+    is far faster than one-at-a-time for short docs like TinyStories. Each batch
+    is flushed to the ShardWriter as soon as it's encoded, so peak memory stays
+    O(batch) no matter how large the corpus is.
     """
     num_threads = num_threads or (os.cpu_count() or 8)
-    output.parent.mkdir(parents=True, exist_ok=True)
     texts = iter_texts(spec, streaming=streaming, limit=limit)
     n_docs = n_tokens = 0
     start = time.time()
-    with open(output, "wb") as f:
-        bar = tqdm()
+    writer = ShardWriter(output, shard_tokens)
+    eos = np.asarray([eos_id], dtype=DTYPE)
+    bar = tqdm()
+    try:
         for batch in _batched(texts, batch_size):
             encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
-            flat: list[int] = []
+            parts: list[np.ndarray] = []
             for ids in encoded:
-                flat.extend(ids)
-                flat.append(eos_id)
-            np.asarray(flat, dtype=DTYPE).tofile(f)
+                parts.append(np.asarray(ids, dtype=DTYPE))
+                parts.append(eos)
+            tokens = np.concatenate(parts)
+            writer.write(tokens)
             n_docs += len(batch)
-            n_tokens += len(flat)
+            n_tokens += int(tokens.size)
             rate = n_tokens / (time.time() - start)
             bar.set_description(
                 f"{output.name}: {n_docs:,} docs | {n_tokens:,} tokens | {rate:,.0f} tok/s"
             )
             bar.update(len(batch))
+    finally:
         bar.close()
+        writer.close()
+    size_mb = sum(f.stat().st_size for f in output.glob("*.bin")) / 1e6
     print(
-        f"done: {n_docs:,} docs, {n_tokens:,} tokens -> {output} "
-        f"({output.stat().st_size / 1e6:.1f} MB)"
+        f"done: {n_docs:,} docs, {n_tokens:,} tokens -> {output}/ "
+        f"({writer.n_shards} shard(s), {size_mb:.1f} MB)"
     )
     return n_docs, n_tokens
 
@@ -175,6 +191,7 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
     streaming = cfg.get("streaming", False)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
     num_threads = cfg.get("num_threads")
+    shard_tokens = cfg.get("shard_tokens", DEFAULT_SHARD_TOKENS)
     entries = cfg["datasets"]
     for entry in entries:
         if "output" not in entry:
@@ -205,6 +222,7 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
             limit=limit,
             batch_size=batch_size,
             num_threads=num_threads,
+            shard_tokens=entry.get("shard_tokens", shard_tokens),
         )
 
 
@@ -214,7 +232,15 @@ def main():
         "-c", "--config", type=str, default=None, help="preprocess recipe (YAML)"
     )
     # Single-dataset (ad-hoc) mode; ignored when --config is given.
-    parser.add_argument("-o", "--output", type=str, default=None, help="output .bin path")
+    parser.add_argument(
+        "-o", "--output", type=str, default=None, help="output shard directory"
+    )
+    parser.add_argument(
+        "--shard-tokens",
+        type=int,
+        default=DEFAULT_SHARD_TOKENS,
+        help="max tokens per shard file (default: 2**28 = 1 GiB of uint32)",
+    )
     parser.add_argument("-p", "--preset", type=str, default=None)
     parser.add_argument("-d", "--dataset", type=str, default=None)
     parser.add_argument(
@@ -264,6 +290,7 @@ def main():
         limit=args.limit,
         batch_size=args.batch_size,
         num_threads=args.num_threads,
+        shard_tokens=args.shard_tokens,
     )
 
 

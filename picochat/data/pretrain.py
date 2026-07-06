@@ -1,10 +1,14 @@
-"""Dataset that reads the flat token binary produced by scripts/base_setup.py.
+"""Sharded token binaries: the writer used by scripts/base_setup.py and the
+dataset that reads them back.
 
-The file is a continuous token stream concatenated without padding. Slicing a
-block_size+1 window and returning it lets GPT._loss shift by one internally to
-compute the next-token prediction loss (sequence length block_size+1 ->
-effective context block_size).
+A corpus is a continuous token stream concatenated without padding, split
+across fixed-size shard files (00000.bin, 00001.bin, ...) in one directory so
+no single file grows with the corpus. Slicing a block_size+1 window and
+returning it lets GPT._loss shift by one internally to compute the next-token
+prediction loss (sequence length block_size+1 -> effective context block_size).
 """
+
+from pathlib import Path
 
 import lightning as L
 import numpy as np
@@ -13,52 +17,112 @@ from torch import Tensor
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
-# Writer (scripts/base_setup.py) imports this so the two never diverge.
+# Writer and reader share this so the two never diverge.
 DTYPE = np.uint32
+
+# Default shard size: 2**28 uint32 tokens = 1 GiB per shard file.
+DEFAULT_SHARD_TOKENS = 256 * 2**20
+
+
+class ShardWriter:
+    """Splits a continuous token stream across fixed-size shard files.
+
+    Writes 00000.bin, 00001.bin, ... under `out_dir`, each holding at most
+    `shard_tokens` tokens. Any *.bin already in `out_dir` is deleted first --
+    the sharded equivalent of truncating a single output file with mode "wb";
+    shards left over from a previous, longer run would otherwise still be
+    picked up as valid data by PackedDataset.
+    """
+
+    def __init__(self, out_dir: str | Path, shard_tokens: int = DEFAULT_SHARD_TOKENS):
+        assert shard_tokens > 0
+        self.out_dir = Path(out_dir)
+        self.shard_tokens = shard_tokens
+        self.n_shards = 0
+        self._in_shard = 0
+        self._file = None
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        for stale in self.out_dir.glob("*.bin"):
+            stale.unlink()
+
+    def write(self, tokens: np.ndarray) -> None:
+        tokens = np.asarray(tokens, dtype=DTYPE)
+        while tokens.size:
+            if self._file is None:  # shards are created lazily: none are empty
+                self._file = open(self.out_dir / f"{self.n_shards:05d}.bin", "wb")
+                self.n_shards += 1
+                self._in_shard = 0
+            room = self.shard_tokens - self._in_shard
+            head, tokens = tokens[:room], tokens[room:]
+            head.tofile(self._file)
+            self._in_shard += head.size
+            if self._in_shard >= self.shard_tokens:
+                self.close()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
 
 class PackedDataset(Dataset):
     def __init__(self, path: str, block_size: int = 1024, random: bool = True):
         """
         Args:
-            path: the .bin file produced by base_setup.py
+            path: token binary produced by base_setup.py -- a directory of
+                *.bin shards. A single .bin file (or a bare `foo` resolving to
+                a legacy `foo.bin`) is also accepted for pre-sharding corpora.
             block_size: effective context length. Each sample is block_size+1 tokens.
             random: True for random offsets, False for non-overlapping contiguous
                 blocks.
         """
-        self.path = path
         self.block_size = block_size
         self.random = random
-        # Determine the length up front. The memmap itself is opened after the
-        # worker fork (see below).
-        n = np.memmap(path, dtype=DTYPE, mode="r").shape[0]
-        self.n_tokens = int(n)
-        self._data: np.memmap | None = None
-        assert self.n_tokens > block_size, (
-            f"corpus ({self.n_tokens} tokens) is shorter than "
-            f"block_size+1 ({block_size + 1})"
+        p = Path(path)
+        if p.is_dir():
+            shard_paths = sorted(p.glob("*.bin"))
+            if not shard_paths:
+                raise FileNotFoundError(f"no .bin shards in directory {path}")
+        elif p.is_file():
+            shard_paths = [p]
+        elif Path(str(p) + ".bin").is_file():  # legacy single-file layout
+            shard_paths = [Path(str(p) + ".bin")]
+        else:
+            raise FileNotFoundError(f"no token binary at {path}")
+        self.paths = [str(q) for q in shard_paths]
+        itemsize = np.dtype(DTYPE).itemsize
+        shard_tokens = [q.stat().st_size // itemsize for q in shard_paths]
+        self.n_tokens = int(sum(shard_tokens))
+        # Samples never cross a shard boundary: shards are separate files, and
+        # at ~GiB size the block_size-1 windows lost per boundary are
+        # negligible. A shard shorter than one sample contributes nothing.
+        if random:
+            counts = [max(0, n - block_size) for n in shard_tokens]
+        else:
+            counts = [n // (block_size + 1) for n in shard_tokens]
+        self._cum_counts = np.cumsum(counts)
+        # Memmaps are opened lazily per DataLoader worker process: one opened
+        # in __init__ would share its file descriptor across the worker fork.
+        self._mmaps: list[np.memmap | None] = [None] * len(self.paths)
+        assert len(self) > 0, (
+            f"corpus at {path} ({self.n_tokens} tokens) has no shard with a "
+            f"full block_size+1 ({block_size + 1}) sample"
         )
 
-    @property
-    def data(self) -> np.memmap:
-        # Reopen per DataLoader worker process: holding the memmap from __init__
-        # can break because the file descriptor would be shared across the fork.
-        if self._data is None:
-            self._data = np.memmap(self.path, dtype=DTYPE, mode="r")
-        return self._data
+    def _shard(self, i: int) -> np.memmap:
+        if self._mmaps[i] is None:
+            self._mmaps[i] = np.memmap(self.paths[i], dtype=DTYPE, mode="r")
+        return self._mmaps[i]
 
     def __len__(self) -> int:
-        if self.random:
-            return self.n_tokens - self.block_size
-        return self.n_tokens // (self.block_size + 1)
+        return int(self._cum_counts[-1])
 
     def __getitem__(self, idx: int) -> Tensor:
-        if self.random:
-            start = idx
-        else:
-            start = idx * (self.block_size + 1)
-        chunk = self.data[start : start + self.block_size + 1].astype(np.int64)
-        return torch.from_numpy(chunk)
+        shard = int(np.searchsorted(self._cum_counts, idx, side="right"))
+        local = int(idx - (self._cum_counts[shard - 1] if shard else 0))
+        start = local if self.random else local * (self.block_size + 1)
+        chunk = self._shard(shard)[start : start + self.block_size + 1]
+        return torch.from_numpy(chunk.astype(np.int64))
 
 
 # Number of indices a chunked sampler draws per iteration. Bounds peak memory:

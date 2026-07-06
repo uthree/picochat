@@ -3,9 +3,9 @@ output_dir: data
 streaming: false # small datasets: download once, then iterate from local cache
 
 datasets:
-    - { preset: tiny-codes, output: tiny-codes.bin }
-    - { preset: tiny-textbooks, output: tiny-textbooks.bin }
-    - { preset: tiny-textbooks, output: tiny-textbooks.val.bin, split: test }
-    - { preset: textbooks, output: textbooks.bin }
-    - { preset: cosmopedia, output: cosmopedia.bin }
-    - { preset: wikipedia-en, output: wikipedia-en.bin }
+    - { preset: tiny-codes, output: tiny-codes }
+    - { preset: tiny-textbooks, output: tiny-textbooks }
+    - { preset: tiny-textbooks, output: tiny-textbooks.val, split: test }
+    - { preset: textbooks, output: textbooks }
+    - { preset: cosmopedia, output: cosmopedia }
+    - { preset: wikipedia-en, output: wikipedia-en }
