@@ -115,9 +115,15 @@ class MixtureOfExperts(nn.Module):
         # that only steers *which* experts get picked (added before top-k,
         # dropped again before computing combine weights below), nudged every
         # training step toward under-loaded experts. Not a Parameter -- no
-        # gradient, no loss term, just a running buffer updated in-place at
-        # the end of forward.
+        # gradient, no loss term, just a running buffer.
         self.register_buffer("expert_bias", torch.zeros(n_experts))
+        # The load-balancing update is *staged* here in forward and applied once
+        # by Transformer.forward, outside any gradient-checkpoint boundary --
+        # see forward() / apply_bias_update(). Non-persistent: derived per-step,
+        # not part of the checkpointed state.
+        self.register_buffer(
+            "_pending_bias_delta", torch.zeros(n_experts), persistent=False
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         b, l, d = x.shape
@@ -170,10 +176,18 @@ class MixtureOfExperts(nn.Module):
             keeps.append(keep)
 
         if self.training:
+            # Stage the bias delta instead of applying it here. Under gradient
+            # checkpointing this forward is run twice (once for real, once
+            # recomputed in backward), so an in-place `expert_bias +=` would
+            # double the update -- and worse, the recompute would then route
+            # against an already-shifted bias, diverging from the forward it is
+            # meant to reproduce. Staging into a buffer is idempotent (same value
+            # each run); Transformer.forward applies it exactly once, outside the
+            # checkpoint. expert_bias itself stays constant across the pair.
             with torch.no_grad():
                 load = filled.float()
-                self.expert_bias += self.bias_update_rate * torch.sign(
-                    load.mean() - load
+                self._pending_bias_delta.copy_(
+                    self.bias_update_rate * torch.sign(load.mean() - load)
                 )
 
         expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d)
@@ -193,6 +207,14 @@ class MixtureOfExperts(nn.Module):
             out = out + picked * coeff
 
         return out.reshape(b, l, d)
+
+    @torch.no_grad()
+    def apply_bias_update(self) -> None:
+        # Apply the load-balancing delta staged by the most recent forward (see
+        # forward). Called by Transformer.forward once per step, outside the
+        # gradient-checkpoint boundary, so the update lands exactly once whether
+        # or not the layer was recomputed in backward.
+        self.expert_bias += self._pending_bias_delta
 
 
 class SelfAttention(nn.Module):
@@ -453,6 +475,14 @@ class Transformer(nn.Module):
                 x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
             else:
                 x = layer(x)
+        if self.training:
+            # Apply each MoE's staged load-balancing bias update here -- once,
+            # outside the checkpointed layer forwards above. Done inside
+            # MoE.forward it would run twice under gradient checkpointing (see
+            # MixtureOfExperts.forward).
+            for layer in self.layers:
+                if hasattr(layer, "moe"):
+                    layer.moe.apply_bias_update()
         x = rms_norm(x)
         return x
 

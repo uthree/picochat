@@ -933,3 +933,79 @@ def test_muon_overfits_single_batch():
 def test_muon_group_requires_flag():
     with pytest.raises(ValueError):
         Muon([dict(params=[torch.nn.Parameter(torch.randn(4, 4))])])
+
+
+# ---------------------------------------------------------------------------
+# MoE load-balancing bias under gradient checkpointing
+# ---------------------------------------------------------------------------
+def _moe_transformer(grad_checkpoint: bool) -> Transformer:
+    return Transformer(
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        n_experts=4,
+        d_expert=16,
+        global_attn_ratio=1,  # all full attention -> CPU-friendly, no windows
+        grad_checkpoint=grad_checkpoint,
+    )
+
+
+def test_moe_bias_updates_once_per_training_forward():
+    m = _moe_transformer(grad_checkpoint=False).train()
+    moe = m.layers[0].moe
+    x = torch.randn(2, 8, 32)
+    before = moe.expert_bias.clone()
+    m(x)
+    # exactly one step of +/- bias_update_rate per expert
+    delta = moe.expert_bias - before
+    assert delta.abs().max() == pytest.approx(moe.bias_update_rate)
+    assert (delta != 0).any()
+
+
+def test_moe_bias_identical_with_and_without_checkpoint():
+    # regression: an in-place update inside the checkpointed forward would run
+    # twice (forward + backward recompute) and double the delta. Staging it and
+    # applying once outside the checkpoint keeps both paths identical.
+    import copy
+
+    torch.manual_seed(0)
+    base = _moe_transformer(grad_checkpoint=False)
+    x = torch.randn(2, 8, 32, requires_grad=True)
+
+    def run(model):
+        # reseed so dropout masks match across the two runs: a deeper layer's
+        # MoE routing depends on the (dropout-affected) output of earlier layers,
+        # so the comparison is only meaningful with the RNG aligned. Within a run,
+        # checkpoint's own preserve_rng_state keeps forward/recompute consistent.
+        torch.manual_seed(123)
+        model = model.train()
+        out = model(x)
+        out.sum().backward()
+        return [l.moe.expert_bias.clone() for l in model.layers]
+
+    off = run(copy.deepcopy(base))
+    on_model = copy.deepcopy(base)
+    on_model.grad_checkpoint = True
+    on = run(on_model)
+
+    assert any((b != 0).any() for b in off)  # the update actually happened
+    for a, b in zip(on, off):
+        assert torch.allclose(a, b)  # checkpoint on == off (single update)
+        # and each moved by exactly one rate step, not two
+        assert a.abs().max() == pytest.approx(base.layers[0].moe.bias_update_rate)
+
+
+def test_moe_bias_frozen_in_eval():
+    m = _moe_transformer(grad_checkpoint=False).eval()
+    moe = m.layers[0].moe
+    before = moe.expert_bias.clone()
+    m(torch.randn(2, 8, 32))
+    assert torch.equal(moe.expert_bias, before)  # no drift outside training
+
+
+def test_moe_pending_delta_not_in_state_dict():
+    # the staging buffer is per-step scratch, not persistent state
+    m = _moe_transformer(grad_checkpoint=False)
+    keys = m.state_dict().keys()
+    assert not any(k.endswith("_pending_bias_delta") for k in keys)
+    assert any(k.endswith("expert_bias") for k in keys)  # the real buffer persists
