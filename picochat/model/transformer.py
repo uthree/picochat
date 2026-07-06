@@ -145,10 +145,20 @@ class MixtureOfExperts(nn.Module):
         # expert-parallel training. Tokens beyond an expert's capacity are
         # dropped for that expert (Switch Transformer / GShard style); within
         # a token, slot 0 (its top choice) claims capacity before slot 1, etc.
-        capacity = max(
-            self.n_active,
-            math.ceil(n_tokens * self.n_active * self.capacity_factor / self.n_experts),
-        )
+        if self.training:
+            capacity = max(
+                self.n_active,
+                math.ceil(
+                    n_tokens * self.n_active * self.capacity_factor / self.n_experts
+                ),
+            )
+        else:
+            # Inference: never drop. n_tokens is the worst case (all tokens to one
+            # expert), so nothing overflows -- the layer becomes purely per-token,
+            # which makes chunked decode match a full forward exactly (and avoids
+            # silently dropping tokens while generating). Costs a larger, mostly
+            # empty buffer, acceptable for a single no-grad forward.
+            capacity = n_tokens
         n_slots = self.n_experts * capacity
         # Row n_slots is a trash bin: every dropped token's slot is redirected
         # there instead of a real expert, so index_add/index_select below can
@@ -426,7 +436,13 @@ class TransformerLayer(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         a, cache = self.attn.decode(x, cache, pos)
         x = a + x
-        x = self.ffn(x) + x
+        # Mirror forward(): MoE layers must apply their experts at inference too,
+        # otherwise generation silently runs a different (FFN-only) network than
+        # training. decode always runs in eval, so MoE drops nothing here.
+        if hasattr(self, "moe"):
+            x = self.ffn(x) + self.moe(x) + x
+        else:
+            x = self.ffn(x) + x
         return x, cache
 
 

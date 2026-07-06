@@ -1235,3 +1235,51 @@ def test_estimate_num_params_ignores_n_recursions():
     assert estimate_num_params(**cfg, n_recursions=1) == estimate_num_params(
         **cfg, n_recursions=9
     )
+
+
+# ---------------------------------------------------------------------------
+# MoE at inference (decode must apply the experts, and never drop tokens)
+# ---------------------------------------------------------------------------
+def test_moe_decode_matches_full_forward():
+    # regression: TransformerLayer.decode used to skip the MoE entirely, so a
+    # sparse model generated from an FFN-only network. It must now apply the
+    # experts, and (with no dropping in eval) match a full forward exactly.
+    torch.manual_seed(0)
+    m = Transformer(
+        d_model=32, n_heads=4, n_layers=3, n_experts=4, d_expert=16,
+        n_prelude_layers=1, n_coda_layers=1, n_recursions=2, global_attn_ratio=1,
+    ).eval()
+    x = torch.randn(1, 6, 32)
+    full = m(x)
+
+    out, cache, pos = m.decode(x[:, :4])  # prefill
+    outs = [out]
+    for t in range(4, 6):  # then step token by token
+        o, cache, pos = m.decode(x[:, t : t + 1], cache, pos)
+        outs.append(o)
+    assert torch.allclose(torch.cat(outs, dim=1), full, atol=1e-4)
+
+
+def test_moe_eval_is_per_token_no_drop():
+    # in eval the MoE must not drop tokens: a token's output is then independent
+    # of the other tokens sharing the forward (pure per-token routing).
+    torch.manual_seed(0)
+    m = _looped(n_experts=4, d_expert=16).eval()
+    moe = m.layers[0].moe
+    x = torch.randn(1, 7, 32)
+    full = moe(x)
+    single = moe(x[:, 3:4])  # same token, alone
+    assert torch.allclose(full[:, 3:4], single, atol=1e-5)
+
+
+def test_moe_still_uses_capacity_in_training():
+    # training keeps the fixed-capacity path (static shapes for compile); the
+    # eval no-drop change must not leak into training.
+    torch.manual_seed(0)
+    m = _looped(n_experts=4, d_expert=16).train()
+    moe = m.layers[0].moe
+    x = torch.randn(1, 7, 32)
+    # a token's output in training can depend on capacity/dropping, i.e. it is
+    # not guaranteed to equal the token processed alone -- but the forward must
+    # at least run and return the right shape.
+    assert moe(x).shape == x.shape
