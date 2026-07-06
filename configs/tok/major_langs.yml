@@ -1,0 +1,20 @@
+output: weights/tokenizer.json
+vocab_size: 128000
+
+total_chars: 1000000000
+streaming: false
+
+data:
+    - { preset: wikipedia-en, weight: 4 } # English
+    - { preset: wikipedia-ja, weight: 1 } # Japanese
+    - { preset: wikipedia-de, weight: 1 } # German
+    - { preset: wikipedia-es, weight: 1 } # Spanish
+    - { preset: wikipedia-fr, weight: 1 } # French
+    - { preset: wikipedia-it, weight: 1 } # Italian
+    - { preset: wikipedia-ko, weight: 1 } # Korean
+    - { preset: wikipedia-zh, weight: 1 } # Chinese
+    - { preset: wikipedia-ar, weight: 1 } # Arabic
+    - { preset: wikipedia-ru, weight: 1 } # Russian
+    - { preset: wikipedia-el, weight: 1 } # Greek
+    - { preset: wikipedia-la, weight: 1 } # Latin
+    - { preset: wikipedia-ms, weight: 1 } # Malay

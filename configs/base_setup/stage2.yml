@@ -1,0 +1,20 @@
+tokenizer: weights/tokenizer.json
+output_dir: data
+streaming: true
+
+datasets:
+    - { preset: fineweb-edu, output: fineweb-edu.bin }
+    - { preset: fineweb-edu-ja, output: fineweb-edu-ja.bin }
+    - { preset: fineweb-ja, output: fineweb-ja.bin }
+    - { preset: wikipedia-ja, output: wikipedia-ja.bin }
+    - { preset: wikipedia-de, output: wikipedia-de.bin }
+    - { preset: wikipedia-es, output: wikipedia-es.bin }
+    - { preset: wikipedia-fr, output: wikipedia-fr.bin }
+    - { preset: wikipedia-it, output: wikipedia-it.bin }
+    - { preset: wikipedia-ko, output: wikipedia-ko.bin }
+    - { preset: wikipedia-zh, output: wikipedia-zh.bin }
+    - { preset: wikipedia-ar, output: wikipedia-ar.bin }
+    - { preset: wikipedia-ru, output: wikipedia-ru.bin }
+    - { preset: wikipedia-el, output: wikipedia-el.bin }
+    - { preset: wikipedia-la, output: wikipedia-la.bin }
+    - { preset: wikipedia-ms, output: wikipedia-ms.bin }

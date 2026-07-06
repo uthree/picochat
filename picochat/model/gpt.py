@@ -367,7 +367,7 @@ class TransformerLayer(nn.Module):
         window_size: int | None = None,
         n_experts: int | None = None,
         n_active: int = 2,
-        d_expert: int = 1024,
+        d_expert: int | None = None,
     ):
         super().__init__()
         self.attn = SelfAttention(
@@ -378,10 +378,12 @@ class TransformerLayer(nn.Module):
             max_seq_len=max_seq_len,
             window_size=window_size,
         )
+        if d_expert is None:
+            d_expert = d_ffn
         self.ffn = SwiGLU(d_model, d_hidden=d_ffn)
         if n_experts is not None:
             self.moe = MixtureOfExperts(
-                d_model, d_hidden=d_ffn, n_experts=d_expert, n_active=n_active
+                d_model, d_hidden=d_expert, n_experts=n_experts, n_active=n_active
             )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -416,7 +418,7 @@ class Transformer(nn.Module):
         window_size: int = 64,
         global_attn_ratio: int = 4,
         n_experts: int | None = None,
-        d_expert: int = 1024,
+        d_expert: int | None = None,
         n_active: int = 2,
     ):
         super().__init__()
@@ -484,7 +486,7 @@ class TransformerLM(nn.Module):
         global_attn_ratio: int = 4,
         n_experts: int | None = None,
         n_active: int = 2,
-        d_expert: int = 1024,
+        d_expert: int | None = None,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -565,50 +567,60 @@ MODEL_PRESETS: dict[str, dict] = {
         n_layers=8,
         n_heads=8,
         n_kv_heads=2,
-        vocab_size=64000,
+        vocab_size=128000,
         tie_embeddings=True,
         window_size=64,
         global_attn_ratio=4,
+        n_experts=8,
+        d_expert=1024,
     ),
     "small": dict(
         d_model=768,
         n_layers=12,
         n_heads=12,
         n_kv_heads=4,
-        vocab_size=64000,
+        vocab_size=128000,
         tie_embeddings=True,
         window_size=128,
         global_attn_ratio=6,
+        n_experts=12,
+        d_expert=1024,
     ),
     "base": dict(
         d_model=1024,
         n_layers=12,
         n_heads=16,
         n_kv_heads=4,
-        vocab_size=64000,
+        vocab_size=128000,
         tie_embeddings=False,
         window_size=128,
         global_attn_ratio=6,
+        n_experts=16,
+        d_expert=1024,
     ),
     "medium": dict(
         d_model=2048,
         n_layers=24,
         n_heads=16,
         n_kv_heads=4,
-        vocab_size=64000,
+        vocab_size=128000,
         tie_embeddings=False,
         window_size=256,
         global_attn_ratio=6,
+        n_experts=24,
+        d_expert=1024,
     ),
     "large": dict(
         d_model=2560,
         n_layers=32,
         n_heads=20,
         n_kv_heads=5,
-        vocab_size=64000,
+        vocab_size=128000,
         tie_embeddings=False,
         window_size=256,
         global_attn_ratio=6,
+        n_experts=32,
+        d_expert=1024,
     ),
 }
 

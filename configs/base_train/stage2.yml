@@ -1,0 +1,47 @@
+# Stage 2: Learn from a broader range of content, such as website text.
+# Increasing the context length accordingly: 1024 -> 2048
+
+tokenizer: weights/tokenizer.json
+output_dir: weights/stage2
+init_from: weights/stage1/last.ckpt
+
+model:
+    size: pico
+    max_seq_len: 4096
+    grad_checkpoint: true
+
+data:
+    data_dir: data # joined with each dataset path/val_bin filename below
+    block_size: 2048
+
+    datasets:
+        - { path: fineweb-edu.bin, weight: 1.0 }
+        - { path: fineweb-edu-ja.bin, weight: 1.0 }
+        - { path: fineweb-ja.bin, weight: 1.0 }
+        - { path: wikipedia-en.bin, weight: 10.0 }
+        - { path: wikipedia-ja.bin, weight: 1.0 }
+        - { path: wikipedia-de.bin, weight: 1.0 }
+        - { path: wikipedia-es.bin, weight: 1.0 }
+        - { path: wikipedia-fr.bin, weight: 1.0 }
+        - { path: wikipedia-it.bin, weight: 1.0 }
+        - { path: wikipedia-ko.bin, weight: 1.0 }
+        - { path: wikipedia-zh.bin, weight: 1.0 }
+        - { path: wikipedia-ar.bin, weight: 1.0 }
+        - { path: wikipedia-ru.bin, weight: 1.0 }
+        - { path: wikipedia-el.bin, weight: 1.0 }
+        - { path: wikipedia-la.bin, weight: 1.0 }
+        - { path: wikipedia-ms.bin, weight: 1.0 }
+    val_bin: []
+optim:
+    lr: 1.0e-4
+    weight_decay: 0.1
+    warmup_steps: 1000
+    max_steps: 100000
+
+trainer:
+    batch_size: 8 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 4
+    val_check_interval: 1000
