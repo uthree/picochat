@@ -1009,3 +1009,88 @@ def test_moe_pending_delta_not_in_state_dict():
     keys = m.state_dict().keys()
     assert not any(k.endswith("_pending_bias_delta") for k in keys)
     assert any(k.endswith("expert_bias") for k in keys)  # the real buffer persists
+
+
+# ---------------------------------------------------------------------------
+# estimate_num_params
+# ---------------------------------------------------------------------------
+from picochat.model.gpt import estimate_num_params, estimate_preset_params  # noqa: E402
+
+
+def _actual_params(lm) -> int:
+    return sum(p.numel() for p in lm.parameters())
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2),  # dense MHA
+        dict(vocab_size=100, d_model=64, n_heads=8, n_kv_heads=2, n_layers=3),  # GQA
+        dict(vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_experts=4, d_expert=16),
+        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_lmheads=3),  # MTP
+        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, d_ffn=128, n_experts=4),
+    ],
+)
+def test_estimate_num_params_matches_actual(cfg):
+    # the estimate mirrors the real module shapes exactly for these configs
+    lm = TransformerLM(**cfg)
+    assert estimate_num_params(**cfg) == _actual_params(lm)
+
+
+def test_estimate_num_params_ignores_extra_kwargs():
+    # a preset / saved model_config carries non-shape keys (max_seq_len,
+    # window_size, ...) that must be accepted and ignored so it can be splatted
+    base = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    ref = estimate_num_params(**base)
+    extra = dict(
+        **base, max_seq_len=4096, window_size=128, global_attn_ratio=4, rope_base=10000
+    )
+    assert estimate_num_params(**extra) == ref
+
+
+def test_estimate_preset_params_matches_build_lm():
+    # same preset/override resolution as build_lm -> same model -> same count
+    lm = build_lm("pico", vocab_size=1000, n_layers=2)
+    assert estimate_preset_params("pico", vocab_size=1000, n_layers=2) == _actual_params(lm)
+
+
+def test_estimate_preset_params_all_presets_positive_and_monotone():
+    from picochat.model.gpt import MODEL_PRESETS
+
+    counts = [estimate_preset_params(s) for s in MODEL_PRESETS]
+    assert all(c > 0 for c in counts)
+    # the ladder is listed smallest -> largest
+    assert counts == sorted(counts)
+
+
+def test_estimate_preset_params_unknown_raises():
+    with pytest.raises(ValueError):
+        estimate_preset_params("gigantic")
+
+
+def test_estimate_active_params_equals_total_for_dense():
+    # no experts, single head -> nothing to sparsify
+    cfg = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(**cfg)
+
+
+def test_estimate_active_params_drops_inactive_experts_and_heads():
+    cfg = dict(
+        vocab_size=100, d_model=64, n_heads=8, n_layers=2,
+        n_experts=8, d_expert=16, n_active=2, n_lmheads=3,
+    )
+    total = estimate_num_params(**cfg)
+    active = estimate_num_params(**cfg, active_only=True)
+    # active drops (n_experts - n_active) experts per layer and the extra MTP heads
+    expert_drop = (8 - 2) * 3 * 16 * 64 * 2
+    head_drop = (3 - 1) * 100 * 64
+    assert active == total - expert_drop - head_drop
+    assert active < total
+
+
+def test_estimate_preset_active_params_smaller_than_total():
+    for size in MODEL_PRESETS:
+        total = estimate_preset_params(size)
+        active = estimate_preset_params(size, active_only=True)
+        # every preset is a MoE model, so active is a strict subset
+        assert 0 < active < total

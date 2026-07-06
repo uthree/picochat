@@ -586,3 +586,63 @@ class TransformerLM(nn.Module):
         # self-speculative decoding).
         return self.lmheads[0](x), cache, pos
 
+
+
+def estimate_num_params(
+    vocab_size: int,
+    d_model: int,
+    n_heads: int,
+    n_layers: int,
+    n_kv_heads: int | None = None,
+    d_ffn: int | None = None,
+    n_experts: int | None = None,
+    d_expert: int | None = None,
+    n_active: int = 2,
+    n_lmheads: int = 1,
+    active_only: bool = False,
+    **_ignored,
+) -> int:
+    """Estimate a TransformerLM's parameter count from its hyperparameters,
+    without building the model (which can OOM at large scale).
+
+    active_only=False (default) counts every parameter (the total). active_only=
+    True counts only the parameters that a single token's forward pass touches --
+    the "active parameters" headline for a sparse model: the router still runs
+    fully but only n_active of the n_experts experts fire per token, and only the
+    next-token head (lmheads[0]) is used, so the extra MTP heads drop out. The
+    embedding is counted in full in both. (For a dense model the two are equal.)
+
+    Mirrors the module shapes in this file. RMSNorm/RoPE add no parameters and
+    buffers (e.g. MoE expert_bias) are ignored, so this is the trainable
+    parameter count -- exact for the current architecture, but treat it as an
+    estimate since the shapes may drift. Extra keyword arguments (max_seq_len,
+    window_size, rope_base, ...) are accepted and ignored, so a preset or a saved
+    model_config can be splatted straight in:
+
+        estimate_num_params(**MODEL_PRESETS["base"])
+        estimate_num_params(**MODEL_PRESETS["base"], active_only=True)
+    """
+    n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
+    d_head = d_model // n_heads
+    kv_dim = d_head * n_kv_heads
+    ffn_hidden = 3 * d_model if d_ffn is None else d_ffn
+    # TransformerLayer falls d_expert back to d_ffn, and MoE falls a None hidden
+    # back to 3*d_model -- so an unset d_expert lands on ffn_hidden.
+    expert_hidden = ffn_hidden if d_expert is None else d_expert
+
+    # Attention: q/o are square (d_head*n_heads == d_model), k/v project to
+    # kv_dim. All bias-free.
+    attn = 2 * d_model * d_model + 2 * d_model * kv_dim
+    # SwiGLU: up/gate carry a bias, down is bias-free.
+    ffn = 3 * d_model * ffn_hidden + 2 * ffn_hidden
+    per_layer = attn + ffn
+    if n_experts is not None:
+        # router (always fully active) + per-expert up/gate/down; only n_active
+        # of the experts fire for a given token, so the active count uses those.
+        experts = n_active if active_only else n_experts
+        per_layer += n_experts * d_model + 3 * experts * expert_hidden * d_model
+
+    embed = vocab_size * d_model
+    # heads are untied, one Linear each; only lmheads[0] runs autoregressively.
+    lmheads = (1 if active_only else n_lmheads) * vocab_size * d_model
+    return embed + lmheads + n_layers * per_layer

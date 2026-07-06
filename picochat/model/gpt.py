@@ -14,6 +14,7 @@ from picochat.model.transformer import (
     Transformer,
     TransformerLayer,
     TransformerLM,
+    estimate_num_params,
     rms_norm,
     rotate_half,
 )
@@ -28,11 +29,13 @@ __all__ = [
     "Transformer",
     "TransformerLayer",
     "TransformerLM",
+    "estimate_num_params",
     "rms_norm",
     "rotate_half",
     "MODEL_PRESETS",
     "build_lm",
     "can_compile",
+    "estimate_preset_params",
     "GPT",
 ]
 
@@ -117,6 +120,26 @@ def build_lm(
     if vocab_size is not None:
         cfg["vocab_size"] = vocab_size
     return TransformerLM(max_seq_len=max_seq_len, **cfg)
+
+
+def estimate_preset_params(
+    size: str,
+    vocab_size: int | None = None,
+    active_only: bool = False,
+    **overrides,
+) -> int:
+    """Estimate the parameter count of build_lm(size, ...) without building it.
+
+    Same preset/override resolution as build_lm, so the two always describe the
+    same model. Handy for sizing the scale ladder on a machine that can't hold
+    the larger presets in memory. active_only=True returns the per-token active
+    parameter count instead of the total (see estimate_num_params)."""
+    if size not in MODEL_PRESETS:
+        raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
+    cfg = {**MODEL_PRESETS[size], **overrides}
+    if vocab_size is not None:
+        cfg["vocab_size"] = vocab_size
+    return estimate_num_params(**cfg, active_only=active_only)
 
 
 def can_compile() -> bool:
