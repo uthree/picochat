@@ -170,12 +170,15 @@ def main():
     # sees the same total number of tokens.
     num_devices = resolve_num_devices(args.devices)
     base_lr = optim_cfg.get("lr", 3e-4)
+    base_muon_lr = optim_cfg.get("muon_lr", 0.02)
     base_max_steps = optim_cfg.get("max_steps", 10000)
     lr = base_lr * num_devices
+    muon_lr = base_muon_lr * num_devices
     max_steps = max(1, round(base_max_steps / num_devices))
     if num_devices > 1:
         print(
             f"scaling for {num_devices} devices: lr {base_lr} -> {lr}, "
+            f"muon_lr {base_muon_lr} -> {muon_lr}, "
             f"max_steps {base_max_steps} -> {max_steps}",
             flush=True,
         )
@@ -184,6 +187,11 @@ def main():
         pad_idx=0,
         lr=lr,
         weight_decay=optim_cfg.get("weight_decay", 0.1),
+        # "muon" (default): Muon for hidden matrices + embedded AdamW for the
+        # rest. "adamw": plain AdamW for everything.
+        optimizer=optim_cfg.get("optimizer", "muon"),
+        muon_lr=muon_lr,
+        muon_momentum=optim_cfg.get("muon_momentum", 0.95),
         warmup_steps=optim_cfg.get("warmup_steps", 2000),
         max_steps=max_steps,
         # None -> auto (compile only where torch.compile is supported).

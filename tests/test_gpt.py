@@ -16,6 +16,7 @@ from picochat.model.gpt import (
     rms_norm,
     rotate_half,
 )
+from picochat.optim import Muon, zeropower_via_newtonschulz5
 
 
 # ---------------------------------------------------------------------------
@@ -538,22 +539,39 @@ def test_gpt_validation_step_returns_scalar(gpt_module):
 
 
 def test_gpt_configure_optimizers(gpt_module):
+    # default optimizer is Muon (with its embedded AdamW for non-Muon params);
     # without max_steps it returns just the optimizer (no scheduler)
     opt = gpt_module.configure_optimizers()
-    assert isinstance(opt, torch.optim.AdamW)
+    assert isinstance(opt, Muon)
     # optimizer must cover the model parameters
     n_opt = sum(p.numel() for group in opt.param_groups for p in group["params"])
     n_model = sum(p.numel() for p in gpt_module.model.parameters())
     assert n_opt == n_model
 
 
-def test_gpt_weight_decay_excludes_bias_and_embedding(gpt_module):
-    opt = gpt_module.configure_optimizers()
+def test_gpt_configure_optimizers_adamw():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    opt = GPT(lm, pad_idx=0, optimizer="adamw").configure_optimizers()
+    assert isinstance(opt, torch.optim.AdamW)
+    n_opt = sum(p.numel() for group in opt.param_groups for p in group["params"])
+    n_model = sum(p.numel() for p in lm.parameters())
+    assert n_opt == n_model
+
+
+def test_gpt_unknown_optimizer_raises():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    with pytest.raises(ValueError):
+        GPT(lm, pad_idx=0, optimizer="sgd").configure_optimizers()
+
+
+def test_gpt_weight_decay_excludes_bias_and_embedding():
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    opt = GPT(lm, pad_idx=0, optimizer="adamw").configure_optimizers()
     decay_group, no_decay_group = opt.param_groups
     assert decay_group["weight_decay"] > 0
     assert no_decay_group["weight_decay"] == 0.0
     # embeddings and biases (1-dim) are excluded from weight decay
-    embed_weight = gpt_module.model.embed.weight
+    embed_weight = lm.embed.weight
     no_decay_ids = {id(p) for p in no_decay_group["params"]}
     assert id(embed_weight) in no_decay_ids
     assert all(p.ndim >= 2 for p in decay_group["params"])
@@ -566,7 +584,7 @@ def test_gpt_configure_optimizers_with_schedule():
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, min_lr_ratio=0.1)
     config = gpt.configure_optimizers()
-    assert isinstance(config["optimizer"], torch.optim.AdamW)
+    assert isinstance(config["optimizer"], Muon)
     assert config["lr_scheduler"]["interval"] == "step"
     # warmup: ~0 at step 0, 1.0 at the end of warmup, then cosine down to min_lr_ratio
     assert gpt._lr_lambda(0) < gpt._lr_lambda(5)
@@ -719,3 +737,95 @@ def test_init_gives_near_uniform_loss():
     gpt = GPT(lm)
     loss = gpt._loss(torch.randint(0, 200, (4, 16))).item()
     assert loss == pytest.approx(math.log(200), abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Muon optimizer
+# ---------------------------------------------------------------------------
+def test_newtonschulz_orthogonalizes():
+    # Newton-Schulz drives every singular value toward ~1 (the coefficients
+    # trade exactness for speed, so allow a generous band around it).
+    torch.manual_seed(0)
+    for shape in ((16, 32), (32, 8)):  # wide and tall
+        X = zeropower_via_newtonschulz5(torch.randn(*shape)).float()
+        assert X.shape == shape
+        s = torch.linalg.svdvals(X)
+        assert ((s > 0.4) & (s < 1.4)).all()
+
+
+def test_muon_param_split_covers_everything_once():
+    lm = TransformerLM(
+        vocab_size=40,
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        n_experts=4,
+        d_expert=16,
+        n_lmheads=2,
+    )
+    gpt = GPT(lm, pad_idx=0)
+    muon_group, adam_decay, adam_no_decay = gpt._muon_param_groups()
+    muon_ids = {id(p) for p in muon_group["params"]}
+    decay_ids = {id(p) for p in adam_decay["params"]}
+    no_decay_ids = {id(p) for p in adam_no_decay["params"]}
+
+    # fused MoE weights (router 2D + experts 3D) are Muon-optimized
+    moe = lm.transformer.layers[0].moe
+    for w in (moe.weight_router, moe.weight_up, moe.weight_gate, moe.weight_down):
+        assert id(w) in muon_ids
+    # only matrix-shaped params reach Muon
+    assert all(p.ndim >= 2 for p in muon_group["params"])
+    # embedding (no decay) and every lm head (decay) go to the embedded AdamW
+    assert id(lm.embed.weight) in no_decay_ids
+    for head in lm.lmheads:
+        assert id(head.weight) in decay_ids
+    # each trainable param lands in exactly one group
+    all_ids = {id(p) for p in lm.parameters() if p.requires_grad}
+    assert muon_ids | decay_ids | no_decay_ids == all_ids
+    assert len(muon_ids) + len(decay_ids) + len(no_decay_ids) == len(all_ids)
+
+
+def test_muon_step_updates_moe_and_preserves_shapes():
+    torch.manual_seed(0)
+    lm = TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_experts=4, d_expert=16
+    )
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    opt = gpt.configure_optimizers()
+    moe = lm.transformer.layers[0].moe
+    attn = lm.transformer.layers[0].attn
+    shapes = {name: p.shape for name, p in lm.named_parameters()}
+    before_up = moe.weight_up.detach().clone()
+    before_q = attn.proj_q.weight.detach().clone()
+
+    gpt.train()
+    gpt._loss(torch.randint(1, 40, (2, 8))).backward()
+    opt.step()
+
+    for name, p in lm.named_parameters():
+        assert p.shape == shapes[name]  # flatten/reshape round-trips exactly
+        assert torch.isfinite(p).all()
+    # the 3D expert weight and a plain 2D hidden matrix both moved
+    assert not torch.allclose(moe.weight_up, before_up)
+    assert not torch.allclose(attn.proj_q.weight, before_q)
+
+
+def test_muon_overfits_single_batch():
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    opt = gpt.configure_optimizers()
+    batch = torch.randint(1, 40, (2, 8))
+    gpt.train()
+    first = gpt._loss(batch).item()
+    for _ in range(30):
+        opt.zero_grad()
+        loss = gpt._loss(batch)
+        loss.backward()
+        opt.step()
+    assert loss.item() < first
+
+
+def test_muon_group_requires_flag():
+    with pytest.raises(ValueError):
+        Muon([dict(params=[torch.nn.Parameter(torch.randn(4, 4))])])

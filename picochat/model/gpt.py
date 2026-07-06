@@ -12,6 +12,8 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
+from picochat.optim import Muon
+
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
     with torch.amp.autocast(device_type="cuda", enabled=False):
@@ -648,6 +650,9 @@ class GPT(L.LightningModule):
         lr: float = 3e-4,
         weight_decay: float = 0.1,
         betas: tuple[float, float] = (0.9, 0.95),
+        optimizer: str = "muon",
+        muon_lr: float = 0.02,
+        muon_momentum: float = 0.95,
         warmup_steps: int = 2000,
         max_steps: int | None = None,
         min_lr_ratio: float = 0.1,
@@ -675,6 +680,11 @@ class GPT(L.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.betas = betas
+        # "muon" (default) or "adamw". With muon, `lr`/`betas` still apply --
+        # to the embedded AdamW that handles the params Muon skips.
+        self.optimizer_name = optimizer
+        self.muon_lr = muon_lr
+        self.muon_momentum = muon_momentum
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.min_lr_ratio = min_lr_ratio
@@ -802,10 +812,68 @@ class GPT(L.LightningModule):
         coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * coeff
 
+    def _muon_param_groups(self) -> list[dict]:
+        # Muon orthogonalizes matrix-shaped *hidden* weights. The embedding and
+        # lm heads (input/output layers, per the Muon authors) and 1-dim params
+        # (biases) go to the embedded AdamW instead, keeping the same decay
+        # split as _param_groups: no decay for embeddings/1-dim, decay for the
+        # lm-head matrices. Everything else -- attention/FFN projections, the
+        # router, and the fused 3D MoE expert weights (flattened inside Muon.step)
+        # -- is optimized by Muon.
+        embed_ids = {
+            id(p)
+            for m in self.model.modules()
+            if isinstance(m, nn.Embedding)
+            for p in m.parameters()
+        }
+        head_ids = {
+            id(p) for head in self.model.lmheads for p in head.parameters()
+        }
+        muon, adam_decay, adam_no_decay = [], [], []
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            if p.ndim < 2 or id(p) in embed_ids:
+                adam_no_decay.append(p)
+            elif id(p) in head_ids:
+                adam_decay.append(p)
+            else:
+                muon.append(p)
+        return [
+            dict(
+                params=muon,
+                use_muon=True,
+                lr=self.muon_lr,
+                momentum=self.muon_momentum,
+                weight_decay=self.weight_decay,
+            ),
+            dict(
+                params=adam_decay,
+                use_muon=False,
+                lr=self.lr,
+                betas=self.betas,
+                weight_decay=self.weight_decay,
+            ),
+            dict(
+                params=adam_no_decay,
+                use_muon=False,
+                lr=self.lr,
+                betas=self.betas,
+                weight_decay=0.0,
+            ),
+        ]
+
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self._param_groups(), lr=self.lr, betas=self.betas
-        )
+        if self.optimizer_name == "muon":
+            optimizer = Muon(self._muon_param_groups())
+        elif self.optimizer_name == "adamw":
+            optimizer = torch.optim.AdamW(
+                self._param_groups(), lr=self.lr, betas=self.betas
+            )
+        else:
+            raise ValueError(
+                f"unknown optimizer '{self.optimizer_name}'. choices: muon, adamw"
+            )
         if self.max_steps is None:
             # No schedule when the training horizon is unknown (optimizer only).
             return optimizer
