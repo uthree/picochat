@@ -50,8 +50,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=4,
-        n_experts=8,
-        d_expert=1024,
         n_lmheads=1,
     ),
     "small": dict(
@@ -62,8 +60,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=4,
-        n_experts=16,
-        d_expert=1024,
         n_lmheads=1,
     ),
     "base": dict(

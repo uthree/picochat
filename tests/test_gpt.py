@@ -813,7 +813,7 @@ def test_preset_dims_are_consistent(size):
 def test_build_lm_pico_forward():
     lm = build_lm("pico", vocab_size=50, max_seq_len=64)
     logits = lm(torch.randint(0, 50, (2, 16)))
-    assert len(logits) == 4
+    assert len(logits) == 1
     assert logits[0].shape == (2, 16, 50)
 
 
@@ -1026,7 +1026,9 @@ def _actual_params(lm) -> int:
     [
         dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2),  # dense MHA
         dict(vocab_size=100, d_model=64, n_heads=8, n_kv_heads=2, n_layers=3),  # GQA
-        dict(vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_experts=4, d_expert=16),
+        dict(
+            vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_experts=4, d_expert=16
+        ),
         dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_lmheads=3),  # MTP
         dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, d_ffn=128, n_experts=4),
     ],
@@ -1051,7 +1053,9 @@ def test_estimate_num_params_ignores_extra_kwargs():
 def test_estimate_preset_params_matches_build_lm():
     # same preset/override resolution as build_lm -> same model -> same count
     lm = build_lm("pico", vocab_size=1000, n_layers=2)
-    assert estimate_preset_params("pico", vocab_size=1000, n_layers=2) == _actual_params(lm)
+    assert estimate_preset_params(
+        "pico", vocab_size=1000, n_layers=2
+    ) == _actual_params(lm)
 
 
 def test_estimate_preset_params_all_presets_positive_and_monotone():
@@ -1076,8 +1080,14 @@ def test_estimate_active_params_equals_total_for_dense():
 
 def test_estimate_active_params_drops_inactive_experts_and_heads():
     cfg = dict(
-        vocab_size=100, d_model=64, n_heads=8, n_layers=2,
-        n_experts=8, d_expert=16, n_active=2, n_lmheads=3,
+        vocab_size=100,
+        d_model=64,
+        n_heads=8,
+        n_layers=2,
+        n_experts=8,
+        d_expert=16,
+        n_active=2,
+        n_lmheads=3,
     )
     total = estimate_num_params(**cfg)
     active = estimate_num_params(**cfg, active_only=True)
@@ -1092,5 +1102,6 @@ def test_estimate_preset_active_params_smaller_than_total():
     for size in MODEL_PRESETS:
         total = estimate_preset_params(size)
         active = estimate_preset_params(size, active_only=True)
-        # every preset is a MoE model, so active is a strict subset
-        assert 0 < active < total
+        if "n_experts" in MODEL_PRESETS[size]:
+            # every preset is a MoE model, so active is a strict subset
+            assert 0 < active < total
