@@ -33,6 +33,9 @@ from picochat.data.sources import PRESETS, DatasetSpec, iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
 EOS_TOKEN = "</s>"
+# Used by the ad-hoc single-dataset mode; config mode reads the path from the
+# recipe's `tokenizer:` field instead.
+DEFAULT_TOKENIZER = "weights/tokenizer.json"
 # Encoding throughput is dominated by tiktoken. Encoding one doc at a time has
 # heavy per-call overhead, so we feed it large batches: encode_ordinary_batch
 # tokenizes them in parallel across Rust threads (GIL released).
@@ -207,7 +210,6 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-t", "--tokenizer", type=str, default="weights/tokenizer.json")
     parser.add_argument(
         "-c", "--config", type=str, default=None, help="preprocess recipe (YAML)"
     )
@@ -233,18 +235,20 @@ def main():
     )
     args = parser.parse_args()
 
-    enc, eos_id = load_enc(args.tokenizer)
-
     if args.config:
         with open(args.config) as f:
             cfg = yaml.safe_load(f)
-        if "tokenizer" in cfg:
-            enc, eos_id = load_enc(cfg["tokenizer"])
+        if "tokenizer" not in cfg:
+            raise SystemExit(
+                f"{args.config} needs a 'tokenizer:' field (path to tokenizer.json)"
+            )
+        enc, eos_id = load_enc(cfg["tokenizer"])
         run_config(cfg, enc, eos_id)
         return
 
     if not args.output:
         raise SystemExit("either --config, or --output with --preset/--dataset")
+    enc, eos_id = load_enc(DEFAULT_TOKENIZER)
     spec = resolve_spec(args.preset, args.dataset)
     if args.split is not None:
         spec.split = args.split
