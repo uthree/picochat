@@ -192,6 +192,10 @@ def main():
         optimizer=optim_cfg.get("optimizer", "muon"),
         muon_lr=muon_lr,
         muon_momentum=optim_cfg.get("muon_momentum", 0.95),
+        # GPT uses manual optimization (see GPT.__init__), so gradient clipping
+        # and accumulation are owned by the module, not the Trainer.
+        grad_clip=trainer_cfg.get("grad_clip", 1.0),
+        accumulate=trainer_cfg.get("accumulate", 1),
         warmup_steps=optim_cfg.get("warmup_steps", 2000),
         max_steps=max_steps,
         # None -> auto (compile only where torch.compile is supported).
@@ -232,8 +236,9 @@ def main():
         strategy=args.strategy,
         max_steps=max_steps,
         precision=trainer_cfg.get("precision", "bf16-mixed"),
-        gradient_clip_val=trainer_cfg.get("grad_clip", 1.0),
-        accumulate_grad_batches=trainer_cfg.get("accumulate", 1),
+        # gradient_clip_val / accumulate_grad_batches are intentionally omitted:
+        # GPT does manual optimization and Lightning forbids the Trainer from
+        # managing them in that mode. They are passed to GPT above instead.
         val_check_interval=val_check_interval if val_ds is not None else 1.0,
         callbacks=[ckpt_cb],
     )

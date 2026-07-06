@@ -534,10 +534,15 @@ class TransformerLM(nn.Module):
             elif isinstance(m, SwiGLU):
                 nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
 
+    def encode(self, x: Tensor) -> Tensor:
+        # Shared trunk (embed + transformer) up to the final hidden state, before
+        # the lm heads. Split out so training can backprop each MTP head
+        # separately off one trunk forward (see GPT._mtp_backward).
+        return self.transformer(self.embed(x))
+
     def forward(self, x: Tensor) -> list[Tensor]:
-        x = self.embed(x)
-        x = self.transformer(x)
-        return [h_t(x) for h_t in self.lmheads]
+        h = self.encode(x)
+        return [h_t(h) for h_t in self.lmheads]
 
     def decode(
         self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
@@ -656,6 +661,8 @@ class GPT(L.LightningModule):
         warmup_steps: int = 2000,
         max_steps: int | None = None,
         min_lr_ratio: float = 0.1,
+        grad_clip: float | None = 1.0,
+        accumulate: int = 1,
         compile: bool | None = None,
         tokenizer=None,
         sample_batches: int = 20,
@@ -688,30 +695,79 @@ class GPT(L.LightningModule):
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.min_lr_ratio = min_lr_ratio
-        # `compile=None` -> auto (compile iff the environment supports it). The
-        # compiled handle shares parameters with self.model; we stash it inside a
-        # list so nn.Module doesn't register it as a submodule (which would
-        # duplicate every parameter under a `_train_model._orig_mod.` prefix and
-        # break checkpoint loading). self.model stays uncompiled, so state_dict
-        # keys stay clean and decode() runs eager.
+        self.grad_clip = grad_clip
+        self.accumulate = accumulate
+        # Manual optimization: training backprops each lm head separately off a
+        # single trunk forward (see _mtp_backward / training_step), which the
+        # automatic loop -- one loss.backward() -- can't express. We therefore
+        # own the optimizer step, gradient accumulation, clipping and LR
+        # schedule here instead of leaving them to the Trainer.
+        self.automatic_optimization = False
+        # Set by configure_optimizers: the per-group base LR the schedule scales.
+        self._base_lrs: list[float] = []
+        # `compile=None` -> auto (compile iff the environment supports it). We
+        # compile only the shared trunk (encode); the lm heads are single
+        # matmuls left eager so _mtp_backward can drive them one at a time. The
+        # compiled handle shares parameters with self.model; stashing it in a
+        # list keeps nn.Module from registering it as a submodule (which would
+        # duplicate every parameter under a `_orig_mod.` prefix and break
+        # checkpoint loading). self.model stays uncompiled, so state_dict keys
+        # stay clean and decode() runs eager.
         self.compile = can_compile() if compile is None else compile
-        self._train_model = [torch.compile(self.model) if self.compile else self.model]
+        self._encode = [
+            torch.compile(self.model.encode) if self.compile else self.model.encode
+        ]
+
+    def _head_loss(self, h: Tensor, x: Tensor, k: int) -> Tensor:
+        # Multiple token prediction: head k's output at position i predicts token
+        # i+1+k, so each head shifts the targets one step further (head 0 is
+        # ordinary next-token prediction). `h` is the shared trunk hidden state.
+        shift = k + 1
+        logits = rearrange(self.model.lmheads[k](h)[:, :-shift], "b l v -> (b l) v")
+        targets = rearrange(x[:, shift:], "b l -> (b l)")
+        return F.cross_entropy(logits, targets, ignore_index=self.pad_idx)
 
     def _head_losses(self, x: Tensor) -> Tensor:
-        # Multiple token prediction: head k's output at position i predicts
-        # token i+1+k, so each head shifts the targets one step further (head 0
-        # is ordinary next-token prediction). Returns one loss per head.
-        head_logits = self._train_model[0](x)
-        losses = []
-        for k, logits in enumerate(head_logits):
-            shift = k + 1
-            logits = rearrange(logits[:, :-shift], "b l v -> (b l) v")
-            targets = rearrange(x[:, shift:], "b l -> (b l)")
-            losses.append(F.cross_entropy(logits, targets, ignore_index=self.pad_idx))
-        return torch.stack(losses)
+        # Per-head losses in one shot (no backward). Used for validation and as a
+        # reference in tests; the memory-optimized training path is
+        # _mtp_backward. One head's (B, L, V) logits is built at a time, so peak
+        # logits memory is independent of the head count.
+        h = self._encode[0](x)
+        return torch.stack(
+            [self._head_loss(h, x, k) for k in range(len(self.model.lmheads))]
+        )
 
     def _loss(self, x: Tensor) -> Tensor:
         return self._head_losses(x).mean()
+
+    def _mtp_backward(self, x: Tensor, scale: float) -> Tensor:
+        """Forward the shared trunk once, then backprop each lm head separately
+        so only one head's (B, L, V) logits is ever materialized for backward --
+        peak activation memory stays flat in the head count instead of holding
+        all heads at once. `scale` folds in gradient accumulation (1/accumulate).
+        Returns the detached per-head losses (unscaled) for logging.
+
+        Assumes bf16/fp32 (no fp16 GradScaler): plain .backward() is used so the
+        two-stage backward composes correctly and the method also works when
+        called outside a Trainer.
+        """
+        n = len(self.model.lmheads)
+        h = self._encode[0](x)  # (B, L, d); graph runs back to the trunk params
+        # Detach the trunk so each head backprops through its own small graph and
+        # frees its logits immediately; the gradients w.r.t. the hidden state
+        # accumulate into h_leaf.grad across heads.
+        h_leaf = h.detach().requires_grad_(True)
+        head_losses = []
+        for k in range(n):
+            loss_k = self._head_loss(h_leaf, x, k)
+            # 1/n: mean over heads (matches _loss). scale: gradient accumulation.
+            (loss_k * (scale / n)).backward()
+            head_losses.append(loss_k.detach())
+        # One backward through the trunk, driven by the head gradients collected
+        # in h_leaf.grad (which already carries the scale/n factor). Equivalent to
+        # backprop of sum_k loss_k*scale/n, but with the heads done sequentially.
+        h.backward(h_leaf.grad)
+        return torch.stack(head_losses)
 
     def _log_head_losses(self, prefix: str, head_losses: Tensor) -> None:
         # Per-head breakdown (head 0 is the loss comparable to a single-head
@@ -720,9 +776,39 @@ class GPT(L.LightningModule):
             for k, head_loss in enumerate(head_losses):
                 self.log(f"{prefix}_head{k}", head_loss)
 
+    def _optimizer_step(self, batch_idx: int) -> None:
+        # Manual optimization: step once every `accumulate` microbatches, applying
+        # the LR schedule and gradient clipping ourselves. No-op when not attached
+        # to a Trainer (e.g. training_step called directly in a unit test) --
+        # _mtp_backward has already populated .grad there.
+        if getattr(self, "_trainer", None) is None:
+            return
+        if (batch_idx + 1) % self.accumulate != 0:
+            return  # keep accumulating grads into .grad
+        opt = self.optimizers()
+        self._apply_lr(opt)
+        if self.grad_clip:
+            self.clip_gradients(
+                opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm"
+            )
+        opt.step()
+        opt.zero_grad()
+
+    def _apply_lr(self, opt) -> None:
+        # Scale each param group's base LR by the warmup/cosine schedule. Keyed on
+        # global_step (optimizer steps), matching the old "interval: step"
+        # scheduler. When max_steps is unknown, keep LR constant (as the previous
+        # optimizer-only path did).
+        if self.max_steps is None:
+            return
+        scale = self._lr_lambda(self.trainer.global_step)
+        for base, group in zip(self._base_lrs, opt.param_groups):
+            group["lr"] = base * scale
+
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        head_losses = self._head_losses(batch)
+        head_losses = self._mtp_backward(batch, scale=1.0 / self.accumulate)
         loss = head_losses.mean()
+        self._optimizer_step(batch_idx)
         self.log("train_loss", loss)
         self._log_head_losses("train_loss", head_losses)
         self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
@@ -874,11 +960,8 @@ class GPT(L.LightningModule):
             raise ValueError(
                 f"unknown optimizer '{self.optimizer_name}'. choices: muon, adamw"
             )
-        if self.max_steps is None:
-            # No schedule when the training horizon is unknown (optimizer only).
-            return optimizer
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self._lr_lambda)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
-        }
+        # Under manual optimization the LR schedule is applied by hand in
+        # _apply_lr (Lightning does not step schedulers for us here), so we just
+        # remember each group's base LR and return the bare optimizer.
+        self._base_lrs = [group["lr"] for group in optimizer.param_groups]
+        return optimizer

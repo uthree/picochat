@@ -447,20 +447,27 @@ def test_mtp_head_losses_shift_targets():
     gpt = GPT(lm, pad_idx=0, compile=False)
     x = torch.randint(1, vocab_size, (2, 7))
 
-    def oracle(tokens):
-        outs = []
-        for k in range(n_lmheads):
-            shift = k + 1
-            logits = torch.zeros(*tokens.shape, vocab_size)
-            # positions with a target k+1 steps ahead get one-hot logits for
-            # it; trailing positions keep zeros (the loss must slice them off)
-            logits[:, : tokens.shape[1] - shift] = (
-                F.one_hot(tokens[:, shift:], vocab_size).float() * 200.0
-            )
-            outs.append(logits)
-        return outs
+    # Replace each lm head with an oracle that ignores the hidden state and emits
+    # one-hot logits for the token k+1 steps ahead; the trailing positions (no
+    # such target) stay zeros, which _head_loss must slice off.
+    class _OracleHead(torch.nn.Module):
+        def __init__(self, logits):
+            super().__init__()
+            self.register_buffer("logits", logits)
 
-    gpt._train_model[0] = oracle
+        def forward(self, h):
+            return self.logits
+
+    heads = []
+    for k in range(n_lmheads):
+        shift = k + 1
+        logits = torch.zeros(*x.shape, vocab_size)
+        logits[:, : x.shape[1] - shift] = (
+            F.one_hot(x[:, shift:], vocab_size).float() * 200.0
+        )
+        heads.append(_OracleHead(logits))
+    gpt.model.lmheads = torch.nn.ModuleList(heads)
+
     losses = gpt._head_losses(x)
     assert losses.shape == (n_lmheads,)
     assert torch.allclose(losses, torch.zeros(n_lmheads), atol=1e-3)
@@ -486,6 +493,80 @@ def test_mtp_training_step_scalar_loss():
     loss = gpt.training_step(batch, 0)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
+
+
+def test_mtp_backward_matches_naive_summed_loss():
+    # the memory-optimized two-stage backward (detach trunk, backprop each head,
+    # then one trunk backward) must yield exactly the same gradients as a plain
+    # backward of the mean-over-heads loss.
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=3)
+    gpt = GPT(lm, pad_idx=0, compile=False).eval()  # eval: fixed (no) dropout masks
+    batch = torch.randint(1, 40, (2, 8))
+
+    gpt.zero_grad(set_to_none=True)
+    gpt._loss(batch).backward()  # reference: mean over heads, single backward
+    ref = {n: p.grad.clone() for n, p in lm.named_parameters()}
+
+    gpt.zero_grad(set_to_none=True)
+    gpt._mtp_backward(batch, scale=1.0)  # memory-optimized path
+    for n, p in lm.named_parameters():
+        assert torch.allclose(p.grad, ref[n], atol=1e-5), n
+
+
+def test_mtp_backward_scale_scales_grads():
+    # `scale` (gradient accumulation) linearly scales every gradient.
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=2)
+    gpt = GPT(lm, pad_idx=0, compile=False).eval()  # eval: fixed (no) dropout masks
+    batch = torch.randint(1, 40, (2, 8))
+
+    gpt.zero_grad(set_to_none=True)
+    gpt._mtp_backward(batch, scale=1.0)
+    full = lm.embed.weight.grad.clone()
+
+    gpt.zero_grad(set_to_none=True)
+    gpt._mtp_backward(batch, scale=0.25)
+    assert torch.allclose(lm.embed.weight.grad, full * 0.25, atol=1e-6)
+
+
+def test_gpt_gradient_accumulation_steps_once_per_cycle():
+    # with accumulate=2, an optimizer step fires only every 2nd microbatch;
+    # grads accumulate across the pair in between. global_step counts real steps.
+    import lightning as L
+    from torch.utils.data import DataLoader
+
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2, max_seq_len=64)
+    gpt = GPT(lm, pad_idx=0, compile=False, accumulate=2, max_steps=2)
+
+    real_steps = {"n": 0}
+    orig = gpt.optimizers
+
+    loader = DataLoader(_RandomTokenDataset(40, 6), batch_size=4)
+    trainer = L.Trainer(
+        max_steps=2,
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        enable_checkpointing=False,
+    )
+
+    seen = []
+    real_optimizer_step = GPT._optimizer_step
+
+    def counting_step(self, batch_idx):
+        stepped_before = self.trainer.global_step
+        real_optimizer_step(self, batch_idx)
+        seen.append(self.trainer.global_step > stepped_before)
+
+    gpt._optimizer_step = counting_step.__get__(gpt, GPT)
+    trainer.fit(gpt, loader)
+
+    # 2 optimizer steps at accumulate=2 => 4 microbatches; only the odd-indexed
+    # microbatches (1, 3) actually step
+    assert trainer.global_step == 2
+    assert seen == [False, True, False, True]
 
 
 def test_mtp_generate_works():
@@ -528,7 +609,9 @@ def test_gpt_training_step_returns_scalar_loss(gpt_module):
     loss = gpt_module.training_step(batch, 0)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
-    assert loss.requires_grad
+    # manual optimization: training_step runs the backward itself and returns a
+    # detached logging loss, so grads land on the params rather than on `loss`
+    assert gpt_module.model.embed.weight.grad is not None
 
 
 def test_gpt_validation_step_returns_scalar(gpt_module):
@@ -583,9 +666,12 @@ def test_gpt_weight_decay_excludes_bias_and_embedding():
 def test_gpt_configure_optimizers_with_schedule():
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, min_lr_ratio=0.1)
-    config = gpt.configure_optimizers()
-    assert isinstance(config["optimizer"], Muon)
-    assert config["lr_scheduler"]["interval"] == "step"
+    # manual optimization: configure_optimizers returns the bare optimizer and
+    # the LR schedule is applied by hand (see _apply_lr); the base LRs are
+    # captured for that.
+    opt = gpt.configure_optimizers()
+    assert isinstance(opt, Muon)
+    assert gpt._base_lrs == [g["lr"] for g in opt.param_groups]
     # warmup: ~0 at step 0, 1.0 at the end of warmup, then cosine down to min_lr_ratio
     assert gpt._lr_lambda(0) < gpt._lr_lambda(5)
     assert gpt._lr_lambda(9) == pytest.approx(1.0)
@@ -593,9 +679,27 @@ def test_gpt_configure_optimizers_with_schedule():
     assert gpt._lr_lambda(55) == pytest.approx(0.55, abs=0.05)
 
 
+def test_gpt_apply_lr_scales_base_lr():
+    # _apply_lr multiplies each group's captured base LR by the schedule factor.
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, optimizer="adamw")
+    opt = gpt.configure_optimizers()
+    base = list(gpt._base_lrs)
+
+    class _FakeTrainer:
+        global_step = 5  # mid-warmup
+
+    gpt._trainer = _FakeTrainer()
+    gpt._apply_lr(opt)
+    for b, g in zip(base, opt.param_groups):
+        assert g["lr"] == pytest.approx(b * gpt._lr_lambda(5))
+
+
 def test_gpt_loss_backward_reaches_embedding(gpt_module):
     batch = torch.randint(1, 40, (2, 6))
-    gpt_module.training_step(batch, 0).backward()
+    # manual optimization: training_step backprops internally (through the
+    # detached-trunk two-stage backward), so the grad must reach the embedding.
+    gpt_module.training_step(batch, 0)
     assert gpt_module.model.embed.weight.grad is not None
 
 
