@@ -52,7 +52,7 @@ MODEL_PRESETS: dict[str, dict] = {
         global_attn_ratio=4,
         n_experts=8,
         d_expert=1024,
-        n_lmheads=4,
+        n_lmheads=1,
     ),
     "small": dict(
         d_model=768,
@@ -64,7 +64,7 @@ MODEL_PRESETS: dict[str, dict] = {
         global_attn_ratio=4,
         n_experts=16,
         d_expert=1024,
-        n_lmheads=4,
+        n_lmheads=1,
     ),
     "base": dict(
         d_model=1024,
@@ -417,9 +417,7 @@ class GPT(L.LightningModule):
             if isinstance(m, nn.Embedding)
             for p in m.parameters()
         }
-        head_ids = {
-            id(p) for head in self.model.lmheads for p in head.parameters()
-        }
+        head_ids = {id(p) for head in self.model.lmheads for p in head.parameters()}
         muon, adam_decay, adam_no_decay = [], [], []
         for p in self.model.parameters():
             if not p.requires_grad:
