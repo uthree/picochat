@@ -1,4 +1,4 @@
-# Stage 1: Learn basic knowledge from wikipedia and textbooks.
+# Stage 1: Mastering basic English grammar.
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage1
@@ -11,25 +11,21 @@ model:
 
 data:
     data_dir: data # joined with each dataset path/val_bin filename below
-    block_size: 1024
+    block_size: 512
 
     datasets:
-        - { path: tiny-codes, weight: 1.0 }
-        - { path: tiny-textbooks, weight: 1.0 }
-        - { path: tiny-orca-textbooks, weight: 1.0 }
-        - { path: textbooks, weight: 1.0 }
-        - { path: cosmopedia, weight: 1.0 }
-        - { path: wikipedia-en, weight: 1.0 }
+        - { path: tinystories, weight: 1.0 }
+        - { path: children-stories, weight: 1.0 }
     val_bin: # per-dataset validation splits (see configs/base_setup/stage1_basic.yml)
-        - tiny-textbooks.val
+        - tinystories.val
 optim:
     lr: 1.0e-4
     weight_decay: 0.1
     warmup_steps: 2000
-    max_steps: 100000
+    max_steps: 20000
 
 trainer:
-    batch_size: 16 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
+    batch_size: 32 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
     accumulate: 1 # In the initial stages of training, I want to prioritize the number of parameter updates over accuracy, so I set gradient accumulation to 1.
     grad_clip: 1.0
     precision: bf16-mixed

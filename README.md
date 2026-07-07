@@ -19,8 +19,7 @@ uv pip install -e . # install dependencies.
 2. train tokenizer.
 Train a BPE tokenizer to split text into tokens.
 ```bash
-# Currently, only mixed Japanese and English data is supported.
-uv run scripts/tok_train.py --config configs/tok/en_ja.yml
+uv run scripts/tok_train.py --config configs/tok/major_langs.yml
 
 # evaluate trained tokenizer. 
 # It is not a problem if it is around 4–6 bytes per token.

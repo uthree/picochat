@@ -1,20 +1,12 @@
 tokenizer: weights/tokenizer.json
 output_dir: data
-streaming: true
+streaming: false # small datasets: download once, then iterate from local cache
 
 datasets:
-    - { preset: fineweb-edu, output: fineweb-edu }
-    - { preset: fineweb-edu-ja, output: fineweb-edu-ja }
-    - { preset: fineweb-ja, output: fineweb-ja }
-    - { preset: wikipedia-ja, output: wikipedia-ja }
-    - { preset: wikipedia-de, output: wikipedia-de }
-    - { preset: wikipedia-es, output: wikipedia-es }
-    - { preset: wikipedia-fr, output: wikipedia-fr }
-    - { preset: wikipedia-it, output: wikipedia-it }
-    - { preset: wikipedia-ko, output: wikipedia-ko }
-    - { preset: wikipedia-zh, output: wikipedia-zh }
-    - { preset: wikipedia-ar, output: wikipedia-ar }
-    - { preset: wikipedia-ru, output: wikipedia-ru }
-    - { preset: wikipedia-el, output: wikipedia-el }
-    - { preset: wikipedia-la, output: wikipedia-la }
-    - { preset: wikipedia-ms, output: wikipedia-ms }
+    - { preset: tiny-codes, output: tiny-codes }
+    - { preset: tiny-textbooks, output: tiny-textbooks }
+    - { preset: tiny-textbooks, output: tiny-textbooks.val, split: test }
+    - { preset: tiny-ocra-textbooks, output: tiny-ocra-textbooks }
+    - { preset: textbooks, output: textbooks }
+    - { preset: cosmopedia, output: cosmopedia }
+    - { preset: wikipedia-en, output: wikipedia-en }

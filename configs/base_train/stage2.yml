@@ -1,5 +1,4 @@
-# Stage 2: Learn from a broader range of content, such as website text.
-# Increasing the context length accordingly: 1024 -> 2048
+# Stage 2: Learn basic knowledge from wikipedia and textbooks.
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage2
@@ -8,40 +7,32 @@ init_from: weights/stage1/last.ckpt
 model:
     size: pico
     max_seq_len: 4096
-    grad_checkpoint: true
+    grad_checkpoint: true # set true to trade compute for memory (bigger models / longer seqs)
 
 data:
     data_dir: data # joined with each dataset path/val_bin filename below
-    block_size: 2048
+    block_size: 1024
 
     datasets:
-        - { path: fineweb-edu, weight: 1.0 }
-        - { path: fineweb-edu-ja, weight: 1.0 }
-        - { path: fineweb-ja, weight: 1.0 }
-        - { path: wikipedia-en, weight: 10.0 }
-        - { path: wikipedia-ja, weight: 1.0 }
-        - { path: wikipedia-de, weight: 1.0 }
-        - { path: wikipedia-es, weight: 1.0 }
-        - { path: wikipedia-fr, weight: 1.0 }
-        - { path: wikipedia-it, weight: 1.0 }
-        - { path: wikipedia-ko, weight: 1.0 }
-        - { path: wikipedia-zh, weight: 1.0 }
-        - { path: wikipedia-ar, weight: 1.0 }
-        - { path: wikipedia-ru, weight: 1.0 }
-        - { path: wikipedia-el, weight: 1.0 }
-        - { path: wikipedia-la, weight: 1.0 }
-        - { path: wikipedia-ms, weight: 1.0 }
-    val_bin: []
+        - { path: tiny-codes, weight: 1.0 }
+        - { path: tiny-textbooks, weight: 1.0 }
+        - { path: tiny-orca-textbooks, weight: 1.0 }
+        - { path: textbooks, weight: 1.0 }
+        - { path: cosmopedia, weight: 1.0 }
+        - { path: wikipedia-en, weight: 1.0 }
+    val_bin: # per-dataset validation splits (see configs/base_setup/stage1_basic.yml)
+        - tiny-textbooks.val
 optim:
     lr: 1.0e-4
     weight_decay: 0.1
-    warmup_steps: 1000
+    warmup_steps: 2000
     max_steps: 100000
 
 trainer:
-    batch_size: 8 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
-    accumulate: 1
+    batch_size: 16 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
+    accumulate: 1 # In the initial stages of training, I want to prioritize the number of parameter updates over accuracy, so I set gradient accumulation to 1.
     grad_clip: 1.0
     precision: bf16-mixed
     num_workers: 4
     val_check_interval: 1000
+    # compile: null # null=auto (compile only where torch.compile is supported); true/false to force
