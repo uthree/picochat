@@ -36,6 +36,7 @@ __all__ = [
     "build_lm",
     "can_compile",
     "estimate_preset_params",
+    "load_state_dict_expand",
     "GPT",
 ]
 
@@ -161,6 +162,44 @@ def can_compile() -> bool:
     first forward), so this just gates whether we wrap the model at all.
     """
     return hasattr(torch, "compile") and torch.cuda.is_available()
+
+
+def load_state_dict_expand(module: nn.Module, state_dict: dict) -> dict[str, int]:
+    """Load a checkpoint into `module`, expanding tensors whose shape grew.
+
+    Used to warm-start a bigger config (e.g. larger d_model/n_layers) from a
+    smaller checkpoint. For each tensor in `module`'s own state_dict:
+      - key missing from `state_dict`: left as-is (module's own random init).
+      - same shape: copied verbatim.
+      - same ndim, different shape: the checkpoint tensor is copied into the
+        low-index corner (e.g. top-left for a matrix) up to
+        min(old_size, new_size) along every axis; the rest of the module's
+        random init is kept untouched. This also covers shrinking (a larger
+        checkpoint loaded into a smaller module).
+      - different ndim: left as-is (skipped, shapes are incompatible).
+    Returns counts of tensors handled each way, keyed by "matched"/"expanded"/
+    "skipped".
+    """
+    own_state = module.state_dict()
+    stats = {"matched": 0, "expanded": 0, "skipped": 0}
+    with torch.no_grad():
+        for key, own_tensor in own_state.items():
+            if key not in state_dict:
+                stats["skipped"] += 1
+                continue
+            src = state_dict[key]
+            if src.shape == own_tensor.shape:
+                own_tensor.copy_(src)
+                stats["matched"] += 1
+            elif src.dim() == own_tensor.dim():
+                region = tuple(
+                    slice(0, min(s, d)) for s, d in zip(src.shape, own_tensor.shape)
+                )
+                own_tensor[region].copy_(src[region])
+                stats["expanded"] += 1
+            else:
+                stats["skipped"] += 1
+    return stats
 
 
 class GPT(L.LightningModule):
