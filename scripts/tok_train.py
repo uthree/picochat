@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from picochat.data.sources import PRESETS, DatasetSpec, Mixture, iter_mixture
+from picochat.data.pretrain import PRESETS, DatasetSpec, Mixture, iter_mixture
 from picochat.tokenizer import train_tokenizer
 
 NUM_RESERVED_SPECIAL_TOKENS = 16
@@ -30,7 +30,7 @@ SPECIAL_TOKENS = [
 def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `data:` entry into a DatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.sources, or an inline
+    Either {preset: <name>} referencing picochat.data.pretrain, or an inline
     {path, name, split, text_key}.
     """
     if "preset" in entry:

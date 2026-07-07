@@ -34,9 +34,12 @@ from tqdm import tqdm
 from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
     DEFAULT_SHARD_TOKENS,
     DTYPE,
+    PRESETS,
+    DatasetSpec,
     ShardWriter,
+    iter_texts,
+    resolve_spec,
 )
-from picochat.data.sources import PRESETS, DatasetSpec, iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
 BOS_TOKEN = "<s>"
@@ -103,7 +106,7 @@ def load_enc(tokenizer_path: str):
 def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `datasets:` entry into a DatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.sources, or an inline
+    Either {preset: <name>} referencing picochat.data.pretrain, or an inline
     {path, name, split, text_key}. An optional `split` overrides the preset's.
     """
     if "preset" in entry:
