@@ -1,12 +1,13 @@
 """Tokenize HF datasets and convert them into packed, sharded token binaries.
 
-Each document is encoded, an <eos> is appended, and everything is concatenated
-into a single continuous token stream split across fixed-size shard files
-(00000.bin, 00001.bin, ...) under one output directory per dataset, so no
-single file grows with the corpus. Only one encode batch is ever held in
-memory. No padding is added; the training side (PackedDataset) slices a
-block_size+1 window at read time. Tokens are stored as uint32 (DTYPE), which
-fits vocab up to ~4.29B.
+Each document is encoded and wrapped in <s> ... </s>, and everything is
+concatenated into a single continuous token stream split across fixed-size
+shard files (00000.bin, 00001.bin, ...) under one output directory per
+dataset, so no single file grows with the corpus:
+<s>doc1</s><s>doc2</s><s>doc3</s>...<s>docN</s>
+Only one encode batch is ever held in memory. No padding is added; the
+training side (PackedDataset) slices a block_size+1 window at read time.
+Tokens are stored as uint32 (DTYPE), which fits vocab up to ~4.29B.
 
 Two ways to run:
 
@@ -27,9 +28,8 @@ from typing import Iterator
 
 import numpy as np
 import yaml
-from tqdm import tqdm
-
 from datasets import get_dataset_split_names
+from tqdm import tqdm
 
 from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
     DEFAULT_SHARD_TOKENS,
@@ -39,6 +39,7 @@ from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
 from picochat.data.sources import PRESETS, DatasetSpec, iter_texts, resolve_spec
 from picochat.tokenizer import load_tokenizer
 
+BOS_TOKEN = "<s>"
 EOS_TOKEN = "</s>"
 # Used by the ad-hoc single-dataset mode; config mode reads the path from the
 # recipe's `tokenizer:` field instead.
@@ -88,13 +89,15 @@ def validate_specs(specs: list[DatasetSpec]) -> list[str]:
 
 
 def load_enc(tokenizer_path: str):
-    """Load the tokenizer and return (encoding, eos_id), checking vocab fits DTYPE."""
+    """Load the tokenizer and return (encoding, bos_id, eos_id), checking vocab
+    fits DTYPE."""
     enc = load_tokenizer(tokenizer_path)
+    bos_id = enc._special_tokens[BOS_TOKEN]
     eos_id = enc._special_tokens[EOS_TOKEN]
     assert enc.n_vocab <= np.iinfo(DTYPE).max + 1, (
         f"vocab {enc.n_vocab} does not fit in {DTYPE}"
     )
-    return enc, eos_id
+    return enc, bos_id, eos_id
 
 
 def spec_from_entry(entry: dict) -> DatasetSpec:
@@ -129,6 +132,7 @@ def process(
     spec: DatasetSpec,
     output: Path,
     enc,
+    bos_id: int,
     eos_id: int,
     streaming: bool = False,
     limit: int | None = None,
@@ -149,6 +153,7 @@ def process(
     n_docs = n_tokens = 0
     start = time.time()
     writer = ShardWriter(output, shard_tokens)
+    bos = np.asarray([bos_id], dtype=DTYPE)
     eos = np.asarray([eos_id], dtype=DTYPE)
     bar = tqdm()
     try:
@@ -156,6 +161,7 @@ def process(
             encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
             parts: list[np.ndarray] = []
             for ids in encoded:
+                parts.append(bos)
                 parts.append(np.asarray(ids, dtype=DTYPE))
                 parts.append(eos)
             tokens = np.concatenate(parts)
@@ -178,7 +184,7 @@ def process(
     return n_docs, n_tokens
 
 
-def run_config(cfg: dict, enc, eos_id: int) -> None:
+def run_config(cfg: dict, enc, bos_id: int, eos_id: int) -> None:
     """Process every dataset listed in a preprocess recipe.
 
     Each entry picks its own `split` (default train), so validation bins are
@@ -212,11 +218,14 @@ def run_config(cfg: dict, enc, eos_id: int) -> None:
         # Per-entry `streaming` overrides the file default, e.g. to stream a small
         # slice of a huge dataset instead of downloading all of it.
         entry_streaming = entry.get("streaming", streaming)
-        print(f"[{i}/{len(entries)}] {spec.path} ({spec.split}) -> {output}", flush=True)
+        print(
+            f"[{i}/{len(entries)}] {spec.path} ({spec.split}) -> {output}", flush=True
+        )
         process(
             spec,
             output,
             enc,
+            bos_id,
             eos_id,
             streaming=entry_streaming,
             limit=limit,
@@ -268,23 +277,26 @@ def main():
             raise SystemExit(
                 f"{args.config} needs a 'tokenizer:' field (path to tokenizer.json)"
             )
-        enc, eos_id = load_enc(cfg["tokenizer"])
-        run_config(cfg, enc, eos_id)
+        enc, bos_id, eos_id = load_enc(cfg["tokenizer"])
+        run_config(cfg, enc, bos_id, eos_id)
         return
 
     if not args.output:
         raise SystemExit("either --config, or --output with --preset/--dataset")
-    enc, eos_id = load_enc(DEFAULT_TOKENIZER)
+    enc, bos_id, eos_id = load_enc(DEFAULT_TOKENIZER)
     spec = resolve_spec(args.preset, args.dataset)
     if args.split is not None:
         spec.split = args.split
     problems = validate_specs([spec])
     if problems:
-        raise SystemExit("invalid dataset/split:\n" + "\n".join(f"  - {p}" for p in problems))
+        raise SystemExit(
+            "invalid dataset/split:\n" + "\n".join(f"  - {p}" for p in problems)
+        )
     process(
         spec,
         Path(args.output),
         enc,
+        bos_id,
         eos_id,
         streaming=args.streaming,
         limit=args.limit,

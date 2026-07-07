@@ -1,9 +1,10 @@
 """Interactive REPL for a trained picochat checkpoint.
 
 Loads a model + tokenizer from a checkpoint, then repeatedly reads a line
-from stdin, encodes it, appends "<s>", and autoregresses (streaming to
-stdout) until "</s>" is generated -- then goes back to waiting for the next
-input.
+from stdin, encodes it, prepends "<s>" (decoding always starts a fresh
+document, matching how scripts/base_setup.py wraps each document as
+<s>...</s>), and autoregresses (streaming to stdout) until "</s>" is
+generated -- then goes back to waiting for the next input.
 
     python scripts/base_chat.py --checkpoint weights/stage3/last.ckpt
 
@@ -119,6 +120,7 @@ def main():
     print("", flush=True)
     print("ready. Ctrl-C or Ctrl-D to exit.", flush=True)
 
+    bos_id = tokenizer._special_tokens["<s>"]
     while True:
         try:
             text = input("> ")
@@ -127,7 +129,7 @@ def main():
             break
         if not text.strip():
             continue
-        prompt_ids = tokenizer.encode(text, disallowed_special=())
+        prompt_ids = [bos_id] + tokenizer.encode(text, disallowed_special=())
         for token_id in generate(
             gpt,
             tokenizer,
