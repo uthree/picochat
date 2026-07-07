@@ -76,7 +76,7 @@ MODEL_PRESETS: dict[str, dict] = {
     "medium": dict(
         d_model=2048,
         n_layers=24,
-        n_heads=12,
+        n_heads=16,
         n_kv_heads=4,
         vocab_size=64000,
         window_size=256,
