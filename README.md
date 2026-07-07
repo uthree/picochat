@@ -42,11 +42,13 @@ uv run scripts/base_train.py --config configs/base_train/base_setup.yml
 ```
 
 ## Model Architecture
-We applied several improvements to a decoder-only Transformer, such as GPT-2.
-- RoPE
-- RMS Normalization
-- QK Normalization
-- SwiGLU
-- Flash Attention
-- Sliding Widnow Attention
-- Mixture of Experts
+We applied several improvements to a decoder-only Transformer, such as GPT.
+- [RoPE](https://arxiv.org/abs/2104.09864)
+- [RMS Normalization](https://arxiv.org/abs/1910.07467)
+- [QK Normalization](https://arxiv.org/abs/2010.04245)
+- [SwiGLU](https://arxiv.org/abs/2002.05202)
+- [Flash Attention](https://arxiv.org/abs/2307.08691)
+- [Sliding Widnow Attention](https://arxiv.org/abs/2502.18845)
+- [Mixture of Experts](https://arxiv.org/abs/2101.03961) with [Shared Expert](https://arxiv.org/abs/2401.06066)
+- [Looped Transformer](https://arxiv.org/abs/2502.05171v1)
+- [Multiple Token Prediction](https://arxiv.org/abs/2404.19737)
