@@ -5,4 +5,4 @@ streaming: false # small datasets: download once, then iterate from local cache
 datasets:
     - { preset: tinystories, output: tinystories }
     - { preset: tinystories, output: tinystories.val, split: validation }
-    - { preset: children-storie, output: children-stories }
+    - { preset: children-stories, output: children-stories }
