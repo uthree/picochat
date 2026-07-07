@@ -619,15 +619,24 @@ class TransformerLM(nn.Module):
         n_prelude_layers: int = 0,
         n_coda_layers: int = 0,
         n_recursions: int = 1,
+        tie_embeddings: bool = False,
     ):
         super().__init__()
         self.n_layers = n_layers
         self.init_std = init_std
+        self.tie_embeddings = tie_embeddings
 
         self.embed = nn.Embedding(vocab_size, d_model)
         self.lmheads = nn.ModuleList(
             [nn.Linear(d_model, vocab_size, bias=False) for _ in range(n_lmheads)]
         )
+        if tie_embeddings:
+            # Share the next-token head's weight with the embedding (the extra
+            # MTP heads, if any, stay untied). Assigning after construction
+            # drops the head's own Parameter and replaces it with the same
+            # tensor object as self.embed.weight, so the two stay in sync
+            # through training/optimization/checkpointing for free.
+            self.lmheads[0].weight = self.embed.weight
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -702,6 +711,7 @@ def estimate_num_params(
     n_prelude_layers: int = 0,
     n_coda_layers: int = 0,
     active_only: bool = False,
+    tie_embeddings: bool = False,
     **_ignored,
 ) -> int:
     """Estimate a TransformerLM's parameter count from its hyperparameters,
@@ -752,7 +762,14 @@ def estimate_num_params(
         mid_layer += n_experts * d_model + 3 * experts * expert_hidden * d_model
 
     embed = vocab_size * d_model
-    # heads are untied, one Linear each; only lmheads[0] runs autoregressively.
-    lmheads = (1 if active_only else n_lmheads) * vocab_size * d_model
+    # heads are untied by default, one Linear each; only lmheads[0] runs
+    # autoregressively. With tie_embeddings, lmheads[0] shares embed's weight
+    # (already counted in `embed`), so only the extra MTP heads (n_lmheads-1)
+    # add parameters, and active_only (which only touches lmheads[0]) adds none.
+    if tie_embeddings:
+        n_heads_counted = 0 if active_only else max(0, n_lmheads - 1)
+    else:
+        n_heads_counted = 1 if active_only else n_lmheads
+    lmheads = n_heads_counted * vocab_size * d_model
     layers = (n_prelude_layers + n_coda_layers) * dense_layer + n_layers * mid_layer
     return embed + lmheads + layers

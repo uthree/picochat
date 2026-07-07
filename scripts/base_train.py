@@ -35,6 +35,7 @@ MODEL_OVERRIDES = (
     "grad_checkpoint",
     "window_size",
     "n_lmheads",
+    "tie_embeddings",
 )
 
 
