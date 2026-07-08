@@ -608,7 +608,7 @@ class TransformerLM(nn.Module):
         rope_base: int = 10000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
-        init_std: float = 0.02,
+        init_std: float = 0.01,
         grad_checkpoint: bool = True,
         window_size: int = 64,
         global_attn_ratio: int = 4,
@@ -658,23 +658,18 @@ class TransformerLM(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        # GPT-2 style: init every weight with normal(0, init_std) and zero biases,
-        # then scale down the projections that write into the residual stream
-        # (proj_o / proj_down) by 1/sqrt(2*n_layers) so the residual variance stays
-        # roughly constant with depth.
+        # Every weight is init'd from the same normal(0, init_std); biases are
+        # zeroed. init_std is small enough (well under GPT-2's 0.02) that this
+        # needs no per-layer/depth scaling to stay stable, unlike GPT-2 style
+        # init -- and staying simple/uniform matters here since checkpoints get
+        # loaded into larger configs via load_state_dict_expand, where the
+        # untouched (randomly initialized) region should look statistically
+        # identical to every other weight, not depend on which layer it's in.
         for m in self.modules():
-            if isinstance(m, nn.Linear):
+            if isinstance(m, (nn.Linear, nn.Embedding)):
                 nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
-                if m.bias is not None:
+                if isinstance(m, nn.Linear) and m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Embedding):
-                nn.init.normal_(m.weight, mean=0.0, std=self.init_std)
-        scaled_std = self.init_std / math.sqrt(2 * self.n_layers)
-        for m in self.modules():
-            if isinstance(m, SelfAttention):
-                nn.init.normal_(m.proj_o.weight, mean=0.0, std=scaled_std)
-            elif isinstance(m, SwiGLU):
-                nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
 
     def encode(self, x: Tensor) -> Tensor:
         # Shared trunk (embed + transformer) up to the final hidden state, before

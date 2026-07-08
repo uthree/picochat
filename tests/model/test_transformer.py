@@ -89,6 +89,43 @@ def test_transformer_lm_incremental_matches_full():
 
 
 # ---------------------------------------------------------------------------
+# Weight init: every weight ~ normal(0, init_std), uniformly (no depth/residual
+# scaling) so a checkpoint expanded via load_state_dict_expand into a larger
+# config sees statistically identical random init in the untouched region
+# regardless of which layer it lands in.
+# ---------------------------------------------------------------------------
+def test_init_uses_configured_std_uniformly():
+    torch.manual_seed(0)
+    init_std = 0.01
+    lm = TransformerLM(
+        vocab_size=2000, d_model=64, n_heads=8, n_layers=6, init_std=init_std
+    )
+    # A layer-0 residual projection and a layer-5 one must share the same std
+    # -- there's no more 1/sqrt(2*n_layers) depth scaling.
+    proj_o_0 = lm.transformer.layers[0].attn.proj_o.weight
+    proj_o_5 = lm.transformer.layers[5].attn.proj_o.weight
+    proj_down_0 = lm.transformer.layers[0].ffn.proj_down.weight
+    for w in (proj_o_0, proj_o_5, proj_down_0, lm.embed.weight):
+        assert w.std().item() == pytest.approx(init_std, rel=0.15)
+
+
+def test_init_default_std_is_smaller_than_gpt2_style():
+    # 0.01 (well under GPT-2's canonical 0.02) since checkpoints get expanded
+    # into larger configs via load_state_dict_expand, and a smaller std keeps
+    # the freshly-random region closer in scale to the loaded region.
+    lm = TransformerLM(vocab_size=100, d_model=32, n_heads=4, n_layers=2)
+    assert lm.init_std == pytest.approx(0.01)
+    assert lm.init_std < 0.02
+
+
+def test_init_biases_are_zero():
+    lm = TransformerLM(vocab_size=100, d_model=32, n_heads=4, n_layers=2)
+    for m in lm.modules():
+        if isinstance(m, torch.nn.Linear) and m.bias is not None:
+            assert torch.all(m.bias == 0)
+
+
+# ---------------------------------------------------------------------------
 # Looped LM (prelude - recursed middle - coda)
 # ---------------------------------------------------------------------------
 def _looped(**over):
