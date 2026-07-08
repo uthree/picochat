@@ -30,7 +30,7 @@ optim:
     max_steps: 100000
 
 trainer:
-    batch_size: 16 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
+    batch_size: 16
     accumulate: 1 # In the initial stages of training, I want to prioritize the number of parameter updates over accuracy, so I set gradient accumulation to 1.
     grad_clip: 1.0
     precision: bf16-mixed

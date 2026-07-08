@@ -17,7 +17,6 @@ import lightning as L
 import torch
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.tuner import Tuner
 from torch.utils.data import ConcatDataset
 
 from picochat.data.pretrain import PretrainDataModule
@@ -125,7 +124,7 @@ def main():
     pad_idx = tokenizer.encode_single_token("<pad>")
 
     # --- data ---
-    batch_size = trainer_cfg.get("batch_size")
+    batch_size = trainer_cfg.get("batch_size", 2)
     num_workers = trainer_cfg.get("num_workers", 4)
     data_dir = data_cfg.get("data_dir", "data")
     train_paths, train_weights = resolve_paths(data_cfg["datasets"], data_dir)
@@ -141,7 +140,7 @@ def main():
     datamodule = PretrainDataModule(
         train_ds,
         val_ds,
-        batch_size=batch_size or 2,
+        batch_size=batch_size,
         num_workers=num_workers,
         train_group_weights=train_group_weights,
     )
@@ -214,15 +213,6 @@ def main():
         callbacks=[ckpt_cb],
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    if batch_size is None:
-        if val_ds is None:
-            # Lightning's BatchSizeFinder always probes the val dataloader
-            # during its search, which crashes if validation_step is defined
-            # but no val dataloader exists.
-            sft.validation_step = None
-        found = Tuner(trainer).scale_batch_size(sft, datamodule=datamodule, mode="power")
-        print(f"auto-tuned batch_size={found}", flush=True)
 
     trainer.fit(sft, datamodule=datamodule, ckpt_path=resume_ckpt)
 
