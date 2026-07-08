@@ -15,6 +15,7 @@ special-cases them.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterator
 
 import tiktoken
@@ -139,3 +140,22 @@ class SFTDataset(Dataset):
             "labels": labels,
             "attention_mask": attention_mask,
         }
+
+
+class SFTTensorDataset(Dataset):
+    """Reads a (input_ids, labels) tensor bundle written by
+    scripts/sft_setup.py's `process()` -- the on-disk counterpart of
+    SFTDataset, for training runs that shouldn't re-tokenize on every launch.
+    """
+
+    def __init__(self, path: str | Path):
+        bundle = torch.load(path, map_location="cpu")
+        self.input_ids = bundle["input_ids"]
+        self.labels = bundle["labels"]
+        self.pad_id = bundle["pad_id"]
+
+    def __len__(self) -> int:
+        return len(self.input_ids)
+
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+        return {"input_ids": self.input_ids[idx], "labels": self.labels[idx]}

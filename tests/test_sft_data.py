@@ -5,6 +5,7 @@ from picochat.data.sft import (
     PRESETS,
     ChatDatasetSpec,
     SFTDataset,
+    SFTTensorDataset,
     encode_conversation,
     resolve_spec,
 )
@@ -149,3 +150,17 @@ def test_sft_dataset_drops_conversations_with_no_trainable_span(tokenizer, pad_i
     ]
     ds = SFTDataset(conversations, tokenizer, max_length=4, pad_id=pad_id)
     assert len(ds) == 0
+
+
+def test_sft_tensor_dataset_reads_saved_bundle(tmp_path):
+    input_ids = torch.randint(1, 40, (3, 16))
+    labels = input_ids.clone()
+    labels[:, -4:] = 0
+    bundle_path = tmp_path / "bundle.pt"
+    torch.save({"input_ids": input_ids, "labels": labels, "pad_id": 0}, bundle_path)
+
+    ds = SFTTensorDataset(bundle_path)
+    assert len(ds) == 3
+    item = ds[0]
+    assert torch.equal(item["input_ids"], input_ids[0])
+    assert torch.equal(item["labels"], labels[0])
