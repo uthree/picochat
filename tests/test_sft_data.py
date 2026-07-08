@@ -1,7 +1,13 @@
 import pytest
 import torch
 
-from picochat.data.sft import SFTDataset, encode_conversation
+from picochat.data.sft import (
+    PRESETS,
+    ChatDatasetSpec,
+    SFTDataset,
+    encode_conversation,
+    resolve_spec,
+)
 from picochat.tokenizer import load_tokenizer, train_tokenizer
 
 CORPUS = [
@@ -87,6 +93,30 @@ def test_encode_conversation_returns_none_when_truncated_before_assistant(tokeni
     ]
     # max_length small enough that we never reach the assistant turn
     assert encode_conversation(messages, tokenizer, max_length=4, pad_id=pad_id) is None
+
+
+def test_resolve_spec_preset():
+    assert resolve_spec("smoltalk", None) is PRESETS["smoltalk"]
+
+
+def test_resolve_spec_unknown_preset_raises():
+    with pytest.raises(SystemExit):
+        resolve_spec("no-such-preset", None)
+
+
+def test_resolve_spec_inline_dataset():
+    spec = resolve_spec(None, "some/repo:config:val:turns")
+    assert spec == ChatDatasetSpec("some/repo", "config", "val", "turns")
+
+
+def test_resolve_spec_inline_dataset_defaults():
+    spec = resolve_spec(None, "some/repo")
+    assert spec == ChatDatasetSpec("some/repo", None, "train", "messages")
+
+
+def test_resolve_spec_requires_preset_or_dataset():
+    with pytest.raises(SystemExit):
+        resolve_spec(None, None)
 
 
 def test_sft_dataset_shapes_and_attention_mask(tokenizer, pad_id):

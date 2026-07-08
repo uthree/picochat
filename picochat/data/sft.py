@@ -52,6 +52,26 @@ def iter_conversations(
             yield messages
 
 
+def resolve_spec(preset: str | None, dataset: str | None) -> ChatDatasetSpec:
+    """Resolve a ChatDatasetSpec from CLI arguments.
+
+    Either --preset <name> or --dataset "path[:name[:split[:messages_key]]]".
+    """
+    if preset is not None:
+        if preset not in PRESETS:
+            raise SystemExit(
+                f"unknown preset '{preset}'. choices: {', '.join(PRESETS)}"
+            )
+        return PRESETS[preset]
+    if dataset is not None:
+        path, *rest = dataset.split(":")
+        name = rest[0] if len(rest) > 0 and rest[0] else None
+        split = rest[1] if len(rest) > 1 and rest[1] else "train"
+        messages_key = rest[2] if len(rest) > 2 and rest[2] else "messages"
+        return ChatDatasetSpec(path, name, split, messages_key)
+    raise SystemExit("either --preset or --dataset is required")
+
+
 def encode_conversation(
     messages: list[dict],
     tokenizer: tiktoken.Encoding,
