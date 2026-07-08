@@ -1,0 +1,30 @@
+# SFT stage 1: fine-tune the final pretraining checkpoint on smoltalk-style
+# chat data (see configs/sft/setup.yml for the preprocessing step).
+#
+#   python scripts/sft_train.py --config configs/sft/stage1.yml
+
+tokenizer: weights/tokenizer.json
+output_dir: weights/sft-stage1
+init_from: weights/stage3/last.ckpt # architecture is rebuilt from this checkpoint
+
+data:
+    data_dir: data/sft # joined with each dataset path/val_path filename below
+    datasets:
+        - { path: smoltalk.pt, weight: 1.0 }
+    val_path: smoltalk.val.pt
+
+optim:
+    lr: 1.0e-5 # much lower than pretraining: fine-tuning, not training from scratch
+    muon_lr: 0.005
+    weight_decay: 0.1
+    warmup_steps: 100
+    max_steps: 2000
+
+trainer:
+    batch_size: 16 # null -> auto: search for the largest power-of-2 batch size that fits the GPU
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 4
+    val_check_interval: 200
+    # compile: null # null=auto (compile only where torch.compile is supported); true/false to force
