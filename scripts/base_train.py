@@ -134,6 +134,7 @@ def main():
 
     tokenizer = load_tokenizer(tokenizer_path)
     vocab_size = tokenizer.n_vocab
+    pad_idx = tokenizer.encode_single_token("<pad>")
 
     # --- data ---
     block_size = data_cfg.get("block_size", 1024)
@@ -196,7 +197,7 @@ def main():
         )
     gpt = GPT(
         lm,
-        pad_idx=0,
+        pad_idx=pad_idx,
         lr=lr,
         weight_decay=optim_cfg.get("weight_decay", 0.1),
         # "muon" (default): Muon for hidden matrices + embedded AdamW for the
