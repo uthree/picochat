@@ -7,6 +7,10 @@ tokenizer: weights/tokenizer.json
 output_dir: weights/sft-stage1
 init_from: weights/stage3/last.ckpt # architecture is rebuilt from this checkpoint
 
+# model:
+#     max_seq_len: 8192 # raise to extend context length beyond the checkpoint's
+#     rope_base: 1000000 # raise alongside max_seq_len (NTK-style RoPE scaling)
+
 data:
     data_dir: data/sft # joined with each dataset path/val_path filename below
     datasets:

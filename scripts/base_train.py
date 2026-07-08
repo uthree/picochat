@@ -35,6 +35,7 @@ MODEL_OVERRIDES = (
     "window_size",
     "n_lmheads",
     "tie_embeddings",
+    "rope_base",
 )
 
 
@@ -137,6 +138,12 @@ def main():
 
     # --- data ---
     block_size = data_cfg.get("block_size", 1024)
+    # max_seq_len/rope_base (the latter via MODEL_OVERRIDES) can both be raised
+    # in a later stage's config to extend context length via continual learning
+    # (init_from): RoPE's sin/cos tables are non-persistent buffers rebuilt from
+    # these at construction time, not part of the checkpoint, so changing them
+    # doesn't affect any learned tensor's shape and init_from's plain
+    # load_state_dict (no init_expand needed) still applies cleanly.
     max_seq_len = model_cfg.pop("max_seq_len", 4096)
     assert block_size < max_seq_len, "block_size+1 <= max_seq_len required"
     batch_size = trainer_cfg.get("batch_size", 2)

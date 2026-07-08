@@ -9,6 +9,7 @@ init_expand: true
 model:
     size: base
     max_seq_len: 4096
+    # rope_base: 1000000 # raise alongside max_seq_len when extending context length
     grad_checkpoint: true
 
 data:

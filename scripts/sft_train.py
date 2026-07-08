@@ -6,8 +6,9 @@ from a YAML recipe.
 Unlike base_train.py (continual pretraining, optional init_from), SFT always
 fine-tunes an existing pretrained checkpoint: init_from is required, and the
 architecture is rebuilt from that checkpoint's own `model_config`
-hyperparameter (see scripts/base_chat.py for the same pattern) rather than
-from a `model:` section in this config.
+hyperparameter (see scripts/base_chat.py for the same pattern). An optional
+`model:` section in this config can override a couple of fields on top of
+that (see MODEL_OVERRIDES) -- e.g. to extend context length.
 """
 
 import argparse
@@ -68,10 +69,18 @@ def make_dataset(paths: list[str], weights: list[float] | None = None):
     return dataset, list(weights)
 
 
-def load_pretrained(checkpoint: str, vocab_size: int):
+# Fields under `model:` that override the checkpoint's own model_config, e.g.
+# to extend context length via continual learning: RoPE's sin/cos tables are
+# non-persistent buffers rebuilt from these at construction time, not part of
+# the checkpoint, so raising them doesn't affect any learned tensor's shape
+# and the plain load_state_dict below still applies cleanly.
+MODEL_OVERRIDES = ("rope_base", "max_seq_len")
+
+
+def load_pretrained(checkpoint: str, vocab_size: int, overrides: dict | None = None):
     """Rebuild the TransformerLM architecture from a checkpoint's own
-    `model_config` hyperparameter (see scripts/base_chat.py) and load its
-    weights. Returns (TransformerLM, model_config).
+    `model_config` hyperparameter (see scripts/base_chat.py), apply `overrides`
+    on top, and load the checkpoint's weights. Returns (TransformerLM, model_config).
     """
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
@@ -82,6 +91,7 @@ def load_pretrained(checkpoint: str, vocab_size: int):
             f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
             "GPT.__init__ saving it, so its architecture can't be rebuilt."
         )
+    model_config = {**model_config, **(overrides or {})}
     lm = build_lm(**{**model_config, "vocab_size": vocab_size})
     # GPT's state_dict keys are "model.*" (the wrapped TransformerLM) plus the
     # trainer scaffolding around it; strip the prefix to load into a bare lm.
@@ -110,6 +120,7 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    model_cfg = cfg.get("model", {})
     data_cfg = cfg.get("data", {})
     optim_cfg = cfg.get("optim", {})
     trainer_cfg = cfg.get("trainer", {})
@@ -145,8 +156,10 @@ def main():
         train_group_weights=train_group_weights,
     )
 
-    # --- model: rebuilt from the pretrained checkpoint's own architecture ---
-    lm, model_config = load_pretrained(init_from, vocab_size)
+    # --- model: rebuilt from the pretrained checkpoint's own architecture,
+    # optionally overriding e.g. max_seq_len/rope_base to extend context ---
+    model_overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
+    lm, model_config = load_pretrained(init_from, vocab_size, overrides=model_overrides)
     print(f"fine-tuning from {init_from} (model_config: {model_config})", flush=True)
 
     # Same per-device-config / linear-scaling convention as base_train.py.
