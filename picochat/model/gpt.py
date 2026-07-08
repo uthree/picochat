@@ -81,8 +81,7 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=256,
         global_attn_ratio=6,
-        n_experts=64,
-        d_expert=1024,
+        n_experts=16,
         n_lmheads=4,
     ),
     "large": dict(
@@ -93,8 +92,7 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=256,
         global_attn_ratio=6,
-        n_experts=256,
-        d_expert=1024,
+        n_experts=64,
         n_lmheads=4,
     ),
 }
