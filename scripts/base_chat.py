@@ -67,6 +67,7 @@ class ChatApp(App):
         sampling: SamplingConfig | None = None,
         system: str | None = None,
         banner: str | None = None,
+        max_seq_len: int = 4096,
     ):
         super().__init__()
         self.model = model
@@ -76,6 +77,7 @@ class ChatApp(App):
         self.system = system
         self.messages: list[dict] = []  # user/assistant turns only
         self.banner = banner
+        self.max_seq_len = max_seq_len
         self._generating = False
 
     # --- UI scaffolding ----------------------------------------------------
@@ -162,13 +164,41 @@ class ChatApp(App):
         self.workers.cancel_group(self, "generate")
 
     # --- generation --------------------------------------------------------
+    def _build_prompt(self) -> tuple[list[int], bool]:
+        """Render the ChatML prompt, dropping the oldest turns while it
+        overflows the model's context window -- the prompt must fit
+        max_seq_len (the RoPE tables) with some room left to reply. Returns
+        (ids, trimmed). self.messages itself is never modified."""
+        system = [{"role": "system", "content": self.system}] if self.system else []
+        # Leave room for the reply: the full budget when it is modest, but a
+        # long history shouldn't be dropped just because max_new_tokens is
+        # large -- generate() caps the reply to whatever room remains.
+        reserve = min(self.sampling.max_new_tokens, max(self.max_seq_len // 4, 1))
+        keep = list(self.messages)
+        trimmed = False
+        while True:
+            ids = render_chat_prompt(system + keep, self.tokenizer)
+            if len(ids) + reserve <= self.max_seq_len or len(keep) <= 1:
+                break
+            keep = keep[1:]
+            trimmed = True
+        if len(ids) >= self.max_seq_len:
+            # A single oversized turn: hard-truncate, keeping the leading BOS
+            # and the tail (which ends in the assistant cue).
+            ids = [ids[0], *ids[-(self.max_seq_len - reserve - 1) :]]
+            trimmed = True
+        return ids, trimmed
+
     @work(thread=True, exclusive=True, group="generate")
     def _generate_reply(self) -> None:
         """Streams one assistant reply in a worker thread; every UI touch
         goes through call_from_thread."""
         worker = get_current_worker()
-        prompt = [{"role": "system", "content": self.system}] if self.system else []
-        prompt_ids = render_chat_prompt(prompt + self.messages, self.tokenizer)
+        prompt_ids, trimmed = self._build_prompt()
+        if trimmed:
+            self.call_from_thread(
+                self._notice, "context window full: oldest turns were dropped"
+            )
 
         widget = self.call_from_thread(self._add_message, "assistant", "...")
         reply_ids: list[int] = []
@@ -176,7 +206,12 @@ class ChatApp(App):
         # across tokens shows replacement chars until complete)...
         shown = ""
         for token_id in generate(
-            self.model, self.tokenizer, prompt_ids, self.sampling, self.device
+            self.model,
+            self.tokenizer,
+            prompt_ids,
+            self.sampling,
+            self.device,
+            max_seq_len=self.max_seq_len,
         ):
             if worker.is_cancelled:
                 break
@@ -249,6 +284,7 @@ def main():
         sampling=sampling,
         system=args.system,
         banner=banner,
+        max_seq_len=(gpt.hparams["model_config"] or {}).get("max_seq_len", 4096),
     )
     app.run()
 

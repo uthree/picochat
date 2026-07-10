@@ -96,11 +96,23 @@ def generate(
     prompt_ids: list[int],
     cfg: SamplingConfig,
     device: torch.device | str = "cpu",
+    max_seq_len: int | None = None,
 ) -> Iterator[int]:
     """Stream token ids continuing `prompt_ids` (KV-cached decode) until
     `<|im_end|>` (the ChatML stop token), `<|end_of_text|>`, or the token
     budget. `model` is a TransformerLM (e.g. gpt.model). Lazy: breaking out
-    of the loop aborts generation immediately."""
+    of the loop aborts generation immediately.
+
+    `max_seq_len` is the model's positional range (its RoPE tables): decoding
+    past it asserts, so the budget is capped to stop generation early instead.
+    The caller is responsible for a prompt that already fits (see
+    ChatApp._build_prompt / picochat.eval.encode_choice)."""
+    budget = cfg.max_new_tokens
+    if max_seq_len is not None:
+        budget = min(budget, max_seq_len - len(prompt_ids))
+        if budget <= 0:
+            return
+
     stop_ids = {
         tokenizer.encode_single_token(IM_END),
         tokenizer.encode_single_token(EOS_TOKEN),
@@ -110,7 +122,7 @@ def generate(
     logits, cache, pos = model.decode(x)
     next_token = sample(logits[:, -1], cfg)
 
-    for _ in range(cfg.max_new_tokens):
+    for _ in range(budget):
         token_id = int(next_token.item())
         if token_id in stop_ids:
             return

@@ -18,10 +18,13 @@ class ByteTokenizer:
         return self._special[token]
 
     def decode_single_token_bytes(self, token_id: int) -> bytes:
-        return bytes([token_id])
+        # ids past the byte range (special/out-of-script tokens a random
+        # model may sample) render as "?"
+        return bytes([token_id]) if token_id < 256 else b"?"
 
     def decode(self, ids: list[int]) -> str:
-        return bytes(ids).decode("utf-8", errors="replace")
+        joined = b"".join(self.decode_single_token_bytes(i) for i in ids)
+        return joined.decode("utf-8", errors="replace")
 
 
 class ScriptedModel(torch.nn.Module):
@@ -36,7 +39,8 @@ class ScriptedModel(torch.nn.Module):
 
     def decode(self, x, cache=None, pos=0):
         logits = torch.full((x.shape[0], x.shape[1], self.vocab_size), -100.0)
-        logits[:, -1, self.script[self.calls]] = 100.0
+        # wrap around so multi-turn tests replay the same scripted reply
+        logits[:, -1, self.script[self.calls % len(self.script)]] = 100.0
         self.calls += 1
         return logits, None, pos + x.shape[1]
 
@@ -133,6 +137,37 @@ def test_generate_respects_token_budget():
     model = ScriptedModel([65] * 20)
     cfg = SamplingConfig(temperature=0.0, max_new_tokens=5)
     assert list(generate(model, tok, [1], cfg)) == [65] * 5
+
+
+def test_generate_caps_budget_at_max_seq_len():
+    # A real TransformerLM asserts if decode runs past its RoPE tables; the
+    # cap must stop generation instead. vocab < 256 keeps the byte
+    # tokenizer's stop-token ids unreachable, so only the cap can end it.
+    from picochat.model.gpt import TransformerLM
+
+    torch.manual_seed(0)
+    lm = TransformerLM(
+        vocab_size=200,
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        max_seq_len=32,
+        window_size=8,
+        grad_checkpoint=False,
+    ).eval()
+    tok = ByteTokenizer()
+    cfg = SamplingConfig(temperature=1.0, top_k=None, max_new_tokens=100)
+    prompt = list(range(1, 11))
+    out = list(generate(lm, tok, prompt, cfg, max_seq_len=32))
+    assert len(out) == 32 - len(prompt)
+
+
+def test_generate_yields_nothing_when_prompt_fills_window():
+    tok = ByteTokenizer()
+    model = ScriptedModel([65] * 5)
+    cfg = SamplingConfig(temperature=0.0)
+    assert list(generate(model, tok, [1] * 8, cfg, max_seq_len=8)) == []
+    assert model.calls == 0  # not even the prefill runs
 
 
 def test_generate_is_lazy():
