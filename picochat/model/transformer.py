@@ -130,13 +130,15 @@ class MixtureOfExperts(nn.Module):
         n_tokens = b * l
         tokens = rms_norm(x).reshape(n_tokens, d)
 
-        # Route every token to its top-n_active experts. expert_bias only steers
-        # *which* experts are picked (DeepSeek-V3 aux-loss-free balancing); the
-        # combine weights come from the raw logits, so they stay a differentiable
-        # function of weight_router alone.
-        logits = tokens @ self.weight_router.T  # (n_tokens, n_experts)
-        top_idx = (logits + self.expert_bias).topk(self.n_active, dim=-1).indices
-        top_weight = F.softmax(logits.gather(-1, top_idx), dim=-1)  # (T, n_active)
+        # Route every token to its top-n_active experts (DeepSeek-V3 style). The
+        # router affinity is a per-expert sigmoid; expert_bias only steers *which*
+        # experts are picked (aux-loss-free load balancing), while the combine
+        # weights are the selected affinities renormalized to sum to 1, so they
+        # stay a differentiable function of weight_router alone.
+        scores = torch.sigmoid(tokens @ self.weight_router.T)  # (n_tokens, n_experts)
+        top_idx = (scores + self.expert_bias).topk(self.n_active, dim=-1).indices
+        top_scores = scores.gather(-1, top_idx)  # (T, n_active)
+        top_weight = top_scores / top_scores.sum(-1, keepdim=True).clamp_min(1e-9)
 
         # Flatten the (token, expert) assignments to one row per routed pair, in
         # slot-major order so a token's 1st-choice expert claims capacity before
