@@ -16,7 +16,7 @@ Two ways to run:
   python scripts/sft_setup.py -p smoltalk -o data/sft/smoltalk.pt
 
   # many datasets from a recipe (configs/sft_setup/*.yml)
-  python scripts/sft_setup.py --config configs/sft_setup/stage1.yml
+  python scripts/sft_setup.py --config configs/sft_setup/setup.yml
 """
 
 import argparse
@@ -165,10 +165,15 @@ def main():
         "-c", "--config", type=str, default=None, help="preprocess recipe (YAML)"
     )
     # Single-dataset (ad-hoc) mode; ignored when --config is given.
-    parser.add_argument("-o", "--output", type=str, default=None, help="output .pt file")
+    parser.add_argument(
+        "-o", "--output", type=str, default=None, help="output .pt file"
+    )
     parser.add_argument("-p", "--preset", type=str, default=None)
     parser.add_argument(
-        "-d", "--dataset", type=str, default=None,
+        "-d",
+        "--dataset",
+        type=str,
+        default=None,
         help='inline spec: "path[:name[:split[:messages_key]]]"',
     )
     parser.add_argument(

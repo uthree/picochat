@@ -1,7 +1,7 @@
 [project]
 name = "picochat"
 version = "0.1.0"
-description = "Add your description here"
+description = "Train a small chat LLM from scratch for ~$100 (nanochat-inspired)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

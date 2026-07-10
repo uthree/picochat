@@ -1,7 +1,7 @@
 # SFT stage 1: fine-tune the final pretraining checkpoint on smoltalk-style
-# chat data (see configs/sft/setup.yml for the preprocessing step).
+# chat data (see configs/sft_setup/setup.yml for the preprocessing step).
 #
-#   python scripts/sft_train.py --config configs/sft/stage1.yml
+#   python scripts/sft_train.py --config configs/sft_train/stage1.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/sft-stage1

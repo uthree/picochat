@@ -15,7 +15,7 @@ Two ways to run:
   python scripts/base_setup.py -p tinystories -o data/tinystories
 
   # many datasets from a recipe (configs/base_setup/*.yml)
-  python scripts/base_setup.py --config configs/base_setup/stage1_basic.yml
+  python scripts/base_setup.py --config configs/base_setup/stage1.yml
 """
 
 import argparse

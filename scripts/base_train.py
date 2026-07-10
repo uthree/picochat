@@ -6,7 +6,7 @@ curriculum, train one stage, then point the next stage's config at the produced
 checkpoint via `init_from` to warm-start (continual learning) with a fresh
 optimizer and LR schedule.
 
-    python scripts/base_train.py --config configs/base_train/stage1_basic.yml
+    python scripts/base_train.py --config configs/base_train/stage1.yml
 
 The model architecture must stay the same across stages that chain via
 `init_from` (only the data / schedule change).
@@ -88,8 +88,7 @@ def make_dataset(bins, block_size: int, random: bool, weights=None):
         return dataset, None
     if len(weights) != len(parts):
         raise ValueError(
-            f"train_weights has {len(weights)} entries but train_bin has "
-            f"{len(parts)}"
+            f"train_weights has {len(weights)} entries but train_bin has {len(parts)}"
         )
     return dataset, list(weights)
 
@@ -104,8 +103,12 @@ def main():
         help="checkpoint to warm-start from (overrides config's init_from)",
     )
     p.add_argument("--accelerator", type=str, default="auto")
-    p.add_argument("--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'")
-    p.add_argument("--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'")
+    p.add_argument(
+        "--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'"
+    )
+    p.add_argument(
+        "--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'"
+    )
     args = p.parse_args()
 
     with open(args.config) as f:
@@ -148,7 +151,9 @@ def main():
     val_ds = None
     monitor = None
     if data_cfg.get("val_bin"):
-        val_ds, _ = make_dataset(resolve_bins(data_cfg["val_bin"], data_dir), block_size, random=False)
+        val_ds, _ = make_dataset(
+            resolve_bins(data_cfg["val_bin"], data_dir), block_size, random=False
+        )
         monitor = "val_loss"
 
     datamodule = PretrainDataModule(
@@ -166,7 +171,9 @@ def main():
     # Recipe for rebuilding this exact architecture later (see GPT.model_config);
     # saved into the checkpoint so scripts/base_chat.py doesn't need it
     # repeated on the command line.
-    model_config = dict(size=size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
+    model_config = dict(
+        size=size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides
+    )
 
     # Config values are per-GPU (batch_size is per-device, lr/max_steps are
     # tuned for a single-device effective batch). Scale them by the device

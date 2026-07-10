@@ -16,7 +16,7 @@ data:
     datasets:
         - { path: tinystories, weight: 1.0 }
         - { path: children-stories, weight: 1.0 }
-    val_bin: # per-dataset validation splits (see configs/base_setup/stage1_basic.yml)
+    val_bin: # per-dataset validation splits (see configs/base_setup/stage1.yml)
         - tinystories.val
 optim:
     lr: 1.0e-4

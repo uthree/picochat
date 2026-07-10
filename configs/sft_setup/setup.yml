@@ -1,7 +1,7 @@
 # Preprocessing recipe for scripts/sft_setup.py: tokenize smoltalk into the
 # (input_ids, labels) tensor bundles consumed by scripts/sft_train.py.
 #
-#   python scripts/sft_setup.py --config configs/sft/setup.yml
+#   python scripts/sft_setup.py --config configs/sft_setup/setup.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: data/sft
