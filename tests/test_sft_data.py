@@ -8,6 +8,7 @@ from picochat.data.sft import (
     SFTTensorDataset,
     encode_conversation,
     pack_examples,
+    render_chat_prompt,
     resolve_spec,
 )
 from picochat.tokenizer import load_tokenizer, train_tokenizer
@@ -20,7 +21,15 @@ CORPUS = [
     "let me think about this",
 ] * 25
 
-SPECIAL_TOKENS = ["<pad>", "<s>", "</s>", "<think>", "</think>"]
+SPECIAL_TOKENS = [
+    "<pad>",
+    "<s>",
+    "</s>",
+    "<think>",
+    "</think>",
+    "<|im_start|>",
+    "<|im_end|>",
+]
 
 
 @pytest.fixture
@@ -56,29 +65,81 @@ def test_encode_conversation_masks_non_assistant_turns(tokenizer, pad_id):
     assert "France" not in tokenizer.decode(trainable) or "Paris" in tokenizer.decode(trainable)
 
 
-def test_encode_conversation_only_assistant_span_is_trainable(tokenizer, pad_id):
+def test_encode_conversation_renders_chatml(tokenizer, pad_id):
+    # the exact ChatML wire format: <s> + <|im_start|>{role}\n{content}
+    # <|im_end|>\n per turn + </s>, with <s>/</s> document-level (one each)
+    messages = [
+        {"role": "user", "content": "hello world"},
+        {"role": "assistant", "content": "the quick brown fox"},
+    ]
+    input_ids, _ = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
+    assert tokenizer.decode(input_ids) == (
+        "<s>"
+        "<|im_start|>user\nhello world<|im_end|>\n"
+        "<|im_start|>assistant\nthe quick brown fox<|im_end|>\n"
+        "</s>"
+    )
+
+
+def test_encode_conversation_only_assistant_body_is_trainable(tokenizer, pad_id):
     messages = [
         {"role": "user", "content": "hello world"},
         {"role": "assistant", "content": "the quick brown fox"},
     ]
     input_ids, labels = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
-    bos = tokenizer.encode_single_token("<s>")
-    eos = tokenizer.encode_single_token("</s>")
+    im_start = tokenizer.encode_single_token("<|im_start|>")
+    im_end = tokenizer.encode_single_token("<|im_end|>")
 
-    # reconstruct turn boundaries from input_ids (each turn is <s> ... </s>)
+    # reconstruct turn boundaries from the <|im_start|> ... <|im_end|> pairs
     turns = []
     start = None
     for i, t in enumerate(input_ids):
-        if t == bos:
+        if t == im_start:
             start = i
-        elif t == eos and start is not None:
+        elif t == im_end and start is not None:
             turns.append((start, i))
             start = None
     assert len(turns) == 2
     user_span, assistant_span = turns
-    assert all(labels[i] == pad_id for i in range(*user_span))
-    assert any(labels[i] != pad_id for i in range(*assistant_span))
-    assert all(labels[i] == pad_id for i in range(assistant_span[1] + 1, len(labels)))
+    # the user turn is fully masked, closing <|im_end|> included
+    assert all(labels[i] == pad_id for i in range(user_span[0], user_span[1] + 1))
+    # assistant: the header `<|im_start|>assistant\n` is masked ...
+    a_start, a_end = assistant_span
+    header_len = 1 + len(tokenizer.encode_ordinary("assistant\n"))
+    assert all(labels[i] == pad_id for i in range(a_start, a_start + header_len))
+    # ... the body is trainable, up to and including <|im_end|> (the stop token)
+    assert all(labels[i] != pad_id for i in range(a_start + header_len, a_end + 1))
+    assert labels[a_end] == im_end
+    # everything after the turn (inter-turn newline, </s>) is masked
+    assert all(labels[i] == pad_id for i in range(a_end + 1, len(labels)))
+
+
+def test_render_chat_prompt_ends_with_assistant_cue(tokenizer):
+    messages = [
+        {"role": "system", "content": "the capital of France is Paris"},
+        {"role": "user", "content": "hello world"},
+    ]
+    assert tokenizer.decode(render_chat_prompt(messages, tokenizer)) == (
+        "<s>"
+        "<|im_start|>system\nthe capital of France is Paris<|im_end|>\n"
+        "<|im_start|>user\nhello world<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
+def test_render_chat_prompt_is_prefix_of_training_encoding(tokenizer, pad_id):
+    # train/inference alignment: the generation prompt must be exactly the
+    # tokens the training encoder places before the assistant body, so the
+    # trainable span starts right where generation starts
+    messages = [
+        {"role": "user", "content": "what is the capital of France"},
+        {"role": "assistant", "content": "the capital of France is Paris"},
+    ]
+    input_ids, labels = encode_conversation(messages, tokenizer, max_length=128, pad_id=pad_id)
+    prompt = render_chat_prompt(messages[:1], tokenizer)
+    assert input_ids[: len(prompt)] == prompt
+    assert all(label == pad_id for label in labels[: len(prompt)])
+    assert labels[len(prompt)] != pad_id  # first generated token is trainable
 
 
 def test_encode_conversation_returns_unpadded_length(tokenizer, pad_id):

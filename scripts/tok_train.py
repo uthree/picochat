@@ -14,7 +14,11 @@ import yaml
 from picochat.data.pretrain import PRESETS, DatasetSpec, Mixture, iter_mixture
 from picochat.tokenizer import train_tokenizer
 
-NUM_RESERVED_SPECIAL_TOKENS = 16
+# Two reserved slots were repurposed for the ChatML turn delimiters, keeping
+# the total (and thus the vocab size) unchanged; an existing tokenizer.json
+# can be migrated in place with scripts/tok_patch_chatml.py instead of
+# retraining.
+NUM_RESERVED_SPECIAL_TOKENS = 14
 SPECIAL_TOKENS = [
     "<pad>",  # padding
     "<mask>",  # mask (not used in causal language model)
@@ -22,8 +26,10 @@ SPECIAL_TOKENS = [
     "<sep>",  # separator for multiple sentences.
     "<think>",  # start thinking (for Chain of Tought)
     "</think>",  # Stop thinking
-    "<s>",  # start decoding
-    "</s>",  # stop decoding
+    "<s>",  # start of a document (pretraining) / conversation (SFT)
+    "</s>",  # end of a document / conversation
+    "<|im_start|>",  # ChatML: start of a turn (followed by "{role}\n")
+    "<|im_end|>",  # ChatML: end of a turn (the chat stop token)
 ] + [f"<reserved_token_{n}>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
 
 

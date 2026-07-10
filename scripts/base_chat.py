@@ -1,18 +1,21 @@
-"""Interactive REPL for a trained picochat checkpoint.
+"""Interactive chat REPL for a trained picochat checkpoint.
 
-Loads a model + tokenizer from a checkpoint, then repeatedly reads a line
-from stdin, encodes it, prepends "<s>" (decoding always starts a fresh
-document, matching how scripts/base_setup.py wraps each document as
-<s>...</s>), and autoregresses (streaming to stdout) until "</s>" is
-generated -- then goes back to waiting for the next input.
+Loads a model + tokenizer from a checkpoint, then runs a multi-turn ChatML
+conversation: each stdin line becomes a user turn, the full history is
+rendered via picochat.data.sft.render_chat_prompt (ending in the
+`<|im_start|>assistant\\n` cue) and the reply streams to stdout until the
+model emits `<|im_end|>` (or `</s>`/the token budget). Pass --system to
+prepend a system turn; --no-history makes every exchange independent.
 
-    python scripts/base_chat.py --checkpoint weights/stage3/last.ckpt
+    python scripts/base_chat.py --checkpoint weights/sft/last.ckpt \\
+        --system "You are a helpful assistant."
 
-Requires a checkpoint produced by the current scripts/base_train.py, which
-embeds a `model_config` hyperparameter (see GPT.__init__) recording the
-exact build_lm() recipe used to construct the model -- the architecture is
-rebuilt from the checkpoint itself. Checkpoints predating that (no
-`model_config` hparam) aren't supported; retrain or patch one in by hand.
+Requires a checkpoint produced by the current scripts/base_train.py or
+sft_train.py, which embeds a `model_config` hyperparameter (see GPT.__init__)
+recording the exact build_lm() recipe used to construct the model -- the
+architecture is rebuilt from the checkpoint itself. Note that a base
+(pretrain-only) checkpoint has never seen ChatML turns, so it will ramble;
+this REPL is primarily for SFT checkpoints.
 """
 
 import argparse
@@ -22,6 +25,7 @@ from typing import Iterator
 import torch
 from tiktoken import Encoding
 
+from picochat.data.sft import IM_END, render_chat_prompt
 from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
 
@@ -76,7 +80,13 @@ def generate(
     temperature: float,
     top_k: int | None,
 ) -> Iterator[int]:
-    eos = tokenizer._special_tokens["</s>"]
+    # <|im_end|> ends the assistant turn (the ChatML stop token); </s> ends
+    # the whole document -- a well-trained SFT model emits the former, but
+    # stop on either.
+    stop_ids = {
+        tokenizer.encode_single_token(IM_END),
+        tokenizer.encode_single_token("</s>"),
+    }
 
     x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     logits, cache, pos = gpt.model.decode(x)
@@ -84,7 +94,7 @@ def generate(
 
     for _ in range(max_new_tokens):
         token_id = next_token.item()
-        if token_id == eos:
+        if token_id in stop_ids:
             return
         yield token_id
         logits, cache, pos = gpt.model.decode(next_token, cache, pos)
@@ -101,6 +111,17 @@ def main():
     )
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--device", type=str, default=None)
+    p.add_argument(
+        "--system",
+        type=str,
+        default=None,
+        help="optional system prompt, prepended as a ChatML system turn",
+    )
+    p.add_argument(
+        "--no-history",
+        action="store_true",
+        help="treat every exchange as a fresh single-turn conversation",
+    )
     args = p.parse_args()
 
     if args.device:
@@ -120,7 +141,13 @@ def main():
     print("", flush=True)
     print("ready. Ctrl-C or Ctrl-D to exit.", flush=True)
 
-    bos_id = tokenizer._special_tokens["<s>"]
+    # Conversation state: the running ChatML history. The whole history is
+    # re-prefilled each turn (the models are small; simpler than carrying the
+    # KV cache across turns).
+    system_messages = (
+        [{"role": "system", "content": args.system}] if args.system else []
+    )
+    messages = list(system_messages)
     while True:
         try:
             text = input("> ")
@@ -129,7 +156,11 @@ def main():
             break
         if not text.strip():
             continue
-        prompt_ids = [bos_id] + tokenizer.encode(text, disallowed_special=())
+        if args.no_history:
+            messages = list(system_messages)
+        messages.append({"role": "user", "content": text})
+        prompt_ids = render_chat_prompt(messages, tokenizer)
+        reply_ids: list[int] = []
         for token_id in generate(
             gpt,
             tokenizer,
@@ -139,6 +170,9 @@ def main():
             args.temperature,
             args.top_k,
         ):
+            reply_ids.append(token_id)
+            # Streamed display is per-token (a multi-byte character split
+            # across tokens shows replacement chars until complete)...
             sys.stdout.write(
                 tokenizer.decode_single_token_bytes(token_id).decode(
                     "utf-8", errors="replace"
@@ -146,6 +180,9 @@ def main():
             )
             sys.stdout.flush()
         print()
+        # ...but the history entry is decoded from the full id sequence, so
+        # the next turn's prompt re-encodes clean text.
+        messages.append({"role": "assistant", "content": tokenizer.decode(reply_ids)})
 
 
 if __name__ == "__main__":

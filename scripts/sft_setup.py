@@ -2,7 +2,7 @@
 tensors ready for picochat.data.sft.SFTTensorDataset.
 
 Every conversation is tokenized via picochat.data.sft.encode_conversation
-(turn-by-turn tokenization, <pad>-based loss masking -- see that module), and
+(ChatML rendering, <pad>-based loss masking -- see that module), and
 the surviving conversations are packed several-per-sequence into fixed-length
 rows (MosaicBERT-style sequence packing, picochat.data.sft.pack_examples)
 saved as a single {input_ids, labels, doc_ids, pad_id} tensor bundle in one
