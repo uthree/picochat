@@ -132,6 +132,24 @@ def test_prompt_trimming_drops_oldest_turns():
     asyncio.run(go())
 
 
+def test_theme_flag_and_command():
+    async def go():
+        # --theme equivalent: applied on mount
+        app = make_app(theme="ansi-dark")
+        async with app.run_test() as pilot:
+            assert app.theme == "ansi-dark"
+            # /theme switches at runtime
+            await submit(app, pilot, "/theme ansi-light")
+            assert app.theme == "ansi-light"
+            # unknown theme: error notice, theme unchanged
+            await submit(app, pilot, "/theme not-a-theme")
+            assert app.theme == "ansi-light"
+            notices = [str(w.content) for w in app.query(".notice").results(Static)]
+            assert any("unknown theme" in n for n in notices)
+
+    asyncio.run(go())
+
+
 def test_unknown_command_notice():
     async def go():
         app = make_app()

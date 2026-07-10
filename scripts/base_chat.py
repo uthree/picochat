@@ -9,11 +9,13 @@ cue) and the reply streams into the log until the model emits `<|im_end|>`
     /reset               clear the conversation (keeps the system prompt)
     /system <text>       set the system prompt and reset the conversation
     /set <key> <value>   temperature, top_k, top_p, max_new_tokens
+    /theme <name>        switch UI theme (ansi-dark/ansi-light use the
+                         terminal's own ANSI palette instead of true color)
     /help                list commands
     /quit                exit (also Ctrl+Q); Esc stops a running generation
 
     python scripts/base_chat.py --checkpoint weights/sft-stage1/last.ckpt \\
-        --system "You are a helpful assistant."
+        --system "You are a helpful assistant." --theme ansi-dark
 
 Like base_eval.py, the architecture is rebuilt from the checkpoint's embedded
 model_config. A base (pretrain-only) checkpoint has never seen ChatML turns,
@@ -26,8 +28,9 @@ from pathlib import Path
 import torch
 from rich.text import Text
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, InvalidThemeError
 from textual.containers import VerticalScroll
+from textual.theme import BUILTIN_THEMES
 from textual.widgets import Input, Static
 from textual.worker import get_current_worker
 
@@ -39,6 +42,7 @@ HELP = """\
 /reset               clear the conversation (keeps the system prompt)
 /system <text>       set the system prompt and reset the conversation
 /set <key> <value>   temperature, top_k, top_p, max_new_tokens
+/theme <name>        switch UI theme (ansi-dark/ansi-light -> ANSI palette)
 /help                list commands
 /quit                exit (also Ctrl+Q); Esc stops a running generation"""
 
@@ -68,6 +72,7 @@ class ChatApp(App):
         system: str | None = None,
         banner: str | None = None,
         max_seq_len: int = 4096,
+        theme: str | None = None,
     ):
         super().__init__()
         self.model = model
@@ -78,6 +83,7 @@ class ChatApp(App):
         self.messages: list[dict] = []  # user/assistant turns only
         self.banner = banner
         self.max_seq_len = max_seq_len
+        self._theme_name = theme
         self._generating = False
 
     # --- UI scaffolding ----------------------------------------------------
@@ -87,6 +93,8 @@ class ChatApp(App):
         yield Input(placeholder="message picochat (/help for commands)")
 
     def on_mount(self) -> None:
+        if self._theme_name:
+            self.theme = self._theme_name
         if self.banner:
             self._add_widget(Static(Text(self.banner), classes="notice"))
         if self.system:
@@ -153,6 +161,20 @@ class ChatApp(App):
                 self._notice(self.sampling.describe())
             except ValueError as e:
                 self._notice(f"error: {e}")
+        elif cmd == "/theme":
+            if not arg:
+                self._notice(
+                    f"theme: {self.theme} (choices: {', '.join(BUILTIN_THEMES)})"
+                )
+            else:
+                try:
+                    self.theme = arg
+                    self._notice(f"theme: {arg}")
+                except InvalidThemeError:
+                    self._notice(
+                        f"error: unknown theme '{arg}' "
+                        f"(choices: {', '.join(BUILTIN_THEMES)})"
+                    )
         elif cmd == "/help":
             self._notice(HELP)
         elif cmd in ("/quit", "/exit"):
@@ -249,12 +271,24 @@ def main():
     p.add_argument("--top-p", type=float, default=1.0, help="1.0 -> disabled")
     p.add_argument("--device", type=str, default=None)
     p.add_argument(
+        "--theme",
+        type=str,
+        default=None,
+        help="UI theme; ansi-dark/ansi-light render with the terminal's own "
+        f"ANSI palette instead of true color (choices: {', '.join(BUILTIN_THEMES)})",
+    )
+    p.add_argument(
         "--system",
         type=str,
         default=None,
         help="optional system prompt, prepended as a ChatML system turn",
     )
     args = p.parse_args()
+
+    if args.theme and args.theme not in BUILTIN_THEMES:
+        raise SystemExit(
+            f"unknown theme '{args.theme}'. choices: {', '.join(BUILTIN_THEMES)}"
+        )
 
     if args.device:
         device = torch.device(args.device)
@@ -285,6 +319,7 @@ def main():
         system=args.system,
         banner=banner,
         max_seq_len=(gpt.hparams["model_config"] or {}).get("max_seq_len", 4096),
+        theme=args.theme,
     )
     app.run()
 
