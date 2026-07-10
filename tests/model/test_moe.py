@@ -18,15 +18,6 @@ def _moe_transformer(grad_checkpoint: bool) -> Transformer:
     )
 
 
-def _looped(**over):
-    cfg = dict(
-        d_model=32, n_heads=4, n_layers=3,
-        n_prelude_layers=2, n_coda_layers=1, n_recursions=2, global_attn_ratio=1,
-    )
-    cfg.update(over)
-    return Transformer(**cfg)
-
-
 # ---------------------------------------------------------------------------
 # MoE load-balancing bias under gradient checkpointing
 # ---------------------------------------------------------------------------
@@ -100,7 +91,7 @@ def test_moe_decode_matches_full_forward():
     torch.manual_seed(0)
     m = Transformer(
         d_model=32, n_heads=4, n_layers=3, n_experts=2, d_expert=16, n_active=2,
-        n_prelude_layers=1, n_coda_layers=1, n_recursions=2, global_attn_ratio=1,
+        global_attn_ratio=1,
     ).eval()
     x = torch.randn(1, 6, 32)
     full = m(x)
@@ -117,7 +108,7 @@ def test_moe_no_drop_flag_is_per_token():
     # no_drop=True (the decode path) processes every token independently: a
     # token's output does not depend on the others sharing the forward.
     torch.manual_seed(0)
-    moe = _looped(n_experts=4, d_expert=16).eval().layers[0].moe
+    moe = _moe_transformer(grad_checkpoint=False).eval().layers[0].moe
     x = torch.randn(1, 7, 32)
     full = moe(x, no_drop=True)
     single = moe(x[:, 3:4], no_drop=True)  # same token, alone

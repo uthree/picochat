@@ -468,52 +468,14 @@ class Transformer(nn.Module):
         n_experts: int | None = None,
         d_expert: int | None = None,
         n_active: int = 2,
-        n_prelude_layers: int = 0,
-        n_coda_layers: int = 0,
-        n_recursions: int = 1,
     ):
         super().__init__()
         self.n_layers = n_layers
-        self.n_prelude_layers = n_prelude_layers
-        self.n_coda_layers = n_coda_layers
-        self.n_recursions = n_recursions
         # Trade compute for memory during training: don't keep each layer's
         # activations for the backward pass, recompute them instead. Lets us fit
         # bigger models / longer sequences on a fixed GPU. No effect on decode().
         self.grad_checkpoint = grad_checkpoint
 
-        # initialize prelude and coda layers
-        # MoE and global attention are not used in the prelude and coda layers.
-        self.prelude_layers = nn.ModuleList(
-            [
-                TransformerLayer(
-                    d_model,
-                    n_heads,
-                    n_kv_heads=n_kv_heads,
-                    rope_base=rope_base,
-                    d_ffn=d_ffn,
-                    max_seq_len=max_seq_len,
-                    window_size=window_size,
-                )
-                for _ in range(n_prelude_layers)
-            ]
-        )
-        self.coda_layers = nn.ModuleList(
-            [
-                TransformerLayer(
-                    d_model,
-                    n_heads,
-                    n_kv_heads=n_kv_heads,
-                    rope_base=rope_base,
-                    d_ffn=d_ffn,
-                    max_seq_len=max_seq_len,
-                    window_size=window_size,
-                )
-                for _ in range(n_coda_layers)
-            ]
-        )
-
-        # initialize middle layers
         self.layers = nn.ModuleList()
         for i in range(n_layers):
             layer = TransformerLayer(
@@ -531,24 +493,7 @@ class Transformer(nn.Module):
             self.layers.append(layer)
 
     def forward(self, x: Tensor) -> Tensor:
-
-        # pass prelude layers
-        for layer in self.prelude_layers:
-            if self.grad_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
-            else:
-                x = layer(x)
-
-        # pass mid layers
-        for _ in range(self.n_recursions):
-            for layer in self.layers:
-                if self.grad_checkpoint and self.training:
-                    x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
-                else:
-                    x = layer(x)
-
-        # pass coda layers
-        for layer in self.coda_layers:
+        for layer in self.layers:
             if self.grad_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
             else:
@@ -573,26 +518,10 @@ class Transformer(nn.Module):
         # only this method computes/advances it. Neither the cache nor the
         # position is kept as model state -- both flow through args/returns only.
         if cache is None:
-            n_cache = (
-                self.n_layers * self.n_recursions
-                + self.n_prelude_layers
-                + self.n_coda_layers
-            )
-            cache = [None] * n_cache
+            cache = [None] * self.n_layers
         q_len = x.shape[-2]
-        # Cache layout: [prelude | recursion0 mid | recursion1 mid | ... | coda].
-        # Each recursion reuses the middle *weights* but keeps its own KV cache,
-        # so every (recursion, layer) pair needs a distinct slot.
-        for i, layer in enumerate(self.prelude_layers):
-            cache_idx = i
-            x, cache[cache_idx] = layer.decode(x, cache[cache_idx], pos)
-        for i in range(self.n_recursions):
-            for j, layer in enumerate(self.layers):
-                cache_idx = i * self.n_layers + j + self.n_prelude_layers
-                x, cache[cache_idx] = layer.decode(x, cache[cache_idx], pos)
-        for i, layer in enumerate(self.coda_layers):
-            cache_idx = i + self.n_layers * self.n_recursions + self.n_prelude_layers
-            x, cache[cache_idx] = layer.decode(x, cache[cache_idx], pos)
+        for i, layer in enumerate(self.layers):
+            x, cache[i] = layer.decode(x, cache[i], pos)
         x = rms_norm(x)
         return x, cache, pos + q_len  # type: ignore
 
@@ -616,9 +545,6 @@ class TransformerLM(nn.Module):
         n_active: int = 2,
         d_expert: int | None = None,
         n_lmheads: int = 1,
-        n_prelude_layers: int = 0,
-        n_coda_layers: int = 0,
-        n_recursions: int = 1,
         tie_embeddings: bool = False,
     ):
         super().__init__()
@@ -651,9 +577,6 @@ class TransformerLM(nn.Module):
             n_experts=n_experts,
             n_active=n_active,
             d_expert=d_expert,
-            n_recursions=n_recursions,
-            n_prelude_layers=n_prelude_layers,
-            n_coda_layers=n_coda_layers,
         )
         self._init_weights()
 
@@ -703,8 +626,6 @@ def estimate_num_params(
     d_expert: int | None = None,
     n_active: int = 2,
     n_lmheads: int = 1,
-    n_prelude_layers: int = 0,
-    n_coda_layers: int = 0,
     active_only: bool = False,
     tie_embeddings: bool = False,
     **_ignored,
@@ -719,18 +640,12 @@ def estimate_num_params(
     next-token head (lmheads[0]) is used, so the extra MTP heads drop out. The
     embedding is counted in full in both. (For a dense model the two are equal.)
 
-    Looped-LM shape: the n_layers middle block carries the MoE and is *reused*
-    across n_recursions (shared weights), so it is counted once regardless of
-    n_recursions -- that is the whole point of the recursion, more compute from
-    the same parameters. The n_prelude_layers / n_coda_layers wrappers are dense
-    (no MoE).
-
     Mirrors the module shapes in this file. RMSNorm/RoPE add no parameters and
     buffers (e.g. MoE expert_bias) are ignored, so this is the trainable
     parameter count -- exact for the current architecture, but treat it as an
     estimate since the shapes may drift. Extra keyword arguments (max_seq_len,
-    window_size, rope_base, n_recursions, ...) are accepted and ignored, so a
-    preset or a saved model_config can be splatted straight in:
+    window_size, rope_base, ...) are accepted and ignored, so a preset or a
+    saved model_config can be splatted straight in:
 
         estimate_num_params(**MODEL_PRESETS["base"])
         estimate_num_params(**MODEL_PRESETS["base"], active_only=True)
@@ -748,13 +663,12 @@ def estimate_num_params(
     attn = 2 * d_model * d_model + 2 * d_model * kv_dim
     # SwiGLU: up/gate carry a bias, down is bias-free.
     ffn = 3 * d_model * ffn_hidden + 2 * ffn_hidden
-    dense_layer = attn + ffn  # prelude/coda layers: no MoE
-    mid_layer = dense_layer
+    layer_params = attn + ffn
     if n_experts is not None:
         # router (always fully active) + per-expert up/gate/down; only n_active
         # of the experts fire for a given token, so the active count uses those.
         experts = n_active if active_only else n_experts
-        mid_layer += n_experts * d_model + 3 * experts * expert_hidden * d_model
+        layer_params += n_experts * d_model + 3 * experts * expert_hidden * d_model
 
     embed = vocab_size * d_model
     # heads are untied by default, one Linear each; only lmheads[0] runs
@@ -766,5 +680,5 @@ def estimate_num_params(
     else:
         n_heads_counted = 1 if active_only else n_lmheads
     lmheads = n_heads_counted * vocab_size * d_model
-    layers = (n_prelude_layers + n_coda_layers) * dense_layer + n_layers * mid_layer
+    layers = n_layers * layer_params
     return embed + lmheads + layers
