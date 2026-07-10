@@ -126,37 +126,36 @@ class MixtureOfExperts(nn.Module):
         )
 
     def forward(self, x: Tensor, no_drop: bool = False) -> Tensor:
-        # no_drop=True (used only by decode) never drops a token; the training /
-        # validation forward keeps the bounded, fixed-capacity path. See the
-        # capacity computation below.
         b, l, d = x.shape
         n_tokens = b * l
         tokens = rms_norm(x).reshape(n_tokens, d)
 
-        # Route every token to its top-n_active experts. The bias only affects
-        # *which* experts are selected; the combine weight is still softmax
-        # over the real (unbiased) logits, so it stays a differentiable
+        # Route every token to its top-n_active experts. expert_bias only steers
+        # *which* experts are picked (DeepSeek-V3 aux-loss-free balancing); the
+        # combine weights come from the raw logits, so they stay a differentiable
         # function of weight_router alone.
         logits = tokens @ self.weight_router.T  # (n_tokens, n_experts)
         top_idx = (logits + self.expert_bias).topk(self.n_active, dim=-1).indices
-        top_logits = logits.gather(-1, top_idx)
-        top_weight = F.softmax(top_logits, dim=-1)  # (n_tokens, n_active)
+        top_weight = F.softmax(logits.gather(-1, top_idx), dim=-1)  # (T, n_active)
 
-        # Fixed per-expert capacity keeps every tensor below a static shape --
-        # unlike a data-dependent gather/nonzero, this stays traceable under
-        # torch.compile and shards cleanly across devices for future
-        # expert-parallel training. Tokens beyond an expert's capacity are
-        # dropped for that expert (Switch Transformer / GShard style); within
-        # a token, slot 0 (its top choice) claims capacity before slot 1, etc.
+        # Flatten the (token, expert) assignments to one row per routed pair, in
+        # slot-major order so a token's 1st-choice expert claims capacity before
+        # its 2nd choice.
+        pair_expert = top_idx.T.reshape(-1)  # (n_active * T,)
+        pair_token = torch.arange(n_tokens, device=x.device).repeat(self.n_active)
+        pair_weight = top_weight.T.reshape(-1)
+
+        # Give each pair a slot within its expert (its rank among pairs routed
+        # there). Fixed per-expert capacity keeps every tensor statically shaped
+        # -- traceable under torch.compile, unlike a data-dependent gather -- and
+        # pairs past capacity are dropped (Switch Transformer / GShard style).
+        counts = F.one_hot(pair_expert, self.n_experts)  # (pairs, n_experts)
+        slot = (counts.cumsum(0) - 1).gather(-1, pair_expert[:, None]).squeeze(-1)
         if no_drop:
-            # Decode/generation: never drop a token. n_tokens is the worst case
-            # (all tokens to one expert), so nothing overflows -- the layer
-            # becomes purely per-token, so chunked decode matches a full no-drop
-            # forward exactly and no generated token is silently dropped. Only
-            # reached from decode(), where n_tokens is small, so the larger,
-            # mostly-empty buffer is cheap. The training/validation forward keeps
-            # the bounded path below: bounding it here too would blow the buffer
-            # up n_experts/(n_active*capacity_factor)x on full-batch validation.
+            # Decode: size capacity so nothing overflows (a token routes to each
+            # expert at most once, so no expert gets more than n_tokens pairs).
+            # Makes the layer purely per-token, so chunked decode matches a full
+            # forward exactly. Only reached from decode(), where n_tokens is small.
             capacity = n_tokens
         else:
             capacity = max(
@@ -165,47 +164,28 @@ class MixtureOfExperts(nn.Module):
                     n_tokens * self.n_active * self.capacity_factor / self.n_experts
                 ),
             )
+        keep = slot < capacity
         n_slots = self.n_experts * capacity
-        # Row n_slots is a trash bin: every dropped token's slot is redirected
-        # there instead of a real expert, so index_add/index_select below can
-        # use a fixed-size index (no dynamic-length gather) while still
-        # discarding the overflow.
-        buffer = tokens.new_zeros(n_slots + 1, d)
-        filled = torch.zeros(self.n_experts, dtype=torch.long, device=x.device)
-        dests, keeps = [], []
-        for slot in range(self.n_active):
-            expert_idx = top_idx[:, slot]  # (n_tokens,)
-            one_hot = F.one_hot(expert_idx, self.n_experts)  # int64, exact counts
-            position = one_hot.cumsum(dim=0) - 1 + filled
-            token_position = position.gather(-1, expert_idx.unsqueeze(-1)).squeeze(-1)
-            keep = token_position < capacity
-            dest = torch.where(
-                keep,
-                expert_idx * capacity + token_position,
-                torch.full_like(expert_idx, n_slots),
-            )
-            buffer = buffer.index_add(
-                0, dest, tokens * keep.unsqueeze(-1).to(tokens.dtype)
-            )
-            filled = filled + one_hot.sum(dim=0)
-            dests.append(dest)
-            keeps.append(keep)
+        # Dropped pairs are redirected to a trash-bin row (index n_slots) so the
+        # scatter/gather below use a fixed-size index instead of a dynamic one.
+        dest = torch.where(keep, pair_expert * capacity + slot, n_slots)
 
         if self.training:
-            # Stage the bias delta instead of applying it here. Under gradient
-            # checkpointing this forward is run twice (once for real, once
-            # recomputed in backward), so an in-place `expert_bias +=` would
-            # double the update -- and worse, the recompute would then route
-            # against an already-shifted bias, diverging from the forward it is
-            # meant to reproduce. Staging into a buffer is idempotent (same value
-            # each run); Transformer.forward applies it exactly once, outside the
-            # checkpoint. expert_bias itself stays constant across the pair.
+            # Stage the load-balancing delta rather than applying it here. Under
+            # gradient checkpointing this forward runs twice (once for real, once
+            # recomputed in backward); staging into a buffer is idempotent, and
+            # Transformer.forward applies it exactly once outside the checkpoint.
             with torch.no_grad():
-                load = filled.float()
+                load = counts.sum(0).float()  # tokens routed to each expert
                 self._pending_bias_delta.copy_(
                     self.bias_update_rate * torch.sign(load.mean() - load)
                 )
 
+        # Dispatch pairs into per-expert buffers, run the expert SwiGLU, combine.
+        keep_f = keep.unsqueeze(-1).to(tokens.dtype)
+        buffer = tokens.new_zeros(n_slots + 1, d).index_add(
+            0, dest, tokens[pair_token] * keep_f
+        )
         expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d)
         up = torch.bmm(expert_in, self.weight_up.transpose(1, 2))
         gate = torch.bmm(expert_in, self.weight_gate.transpose(1, 2))
@@ -216,12 +196,8 @@ class MixtureOfExperts(nn.Module):
             [expert_out.reshape(n_slots, d), expert_out.new_zeros(1, d)], dim=0
         )
 
-        out = tokens.new_zeros(n_tokens, d)
-        for slot in range(self.n_active):
-            picked = expert_out.index_select(0, dests[slot])
-            coeff = (top_weight[:, slot] * keeps[slot]).unsqueeze(-1).to(tokens.dtype)
-            out = out + picked * coeff
-
+        contrib = expert_out[dest] * (pair_weight.unsqueeze(-1) * keep_f)
+        out = tokens.new_zeros(n_tokens, d).index_add(0, pair_token, contrib)
         return out.reshape(b, l, d)
 
     @torch.no_grad()
