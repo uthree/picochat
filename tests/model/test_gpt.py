@@ -150,6 +150,54 @@ def test_gpt_pad_targets_are_ignored(gpt_module):
     assert torch.isfinite(loss_a) and torch.isfinite(loss_b)
 
 
+def test_gpt_loss_derives_doc_ids_from_bos():
+    # with bos_idx set, _loss numbers the documents packed into the window by
+    # counting <s> markers and builds their attention masks outside the
+    # compiled forward (sequence packing)
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    gpt = GPT(lm, pad_idx=0, bos_idx=5, compile=False)
+    seen = {}
+    real = lm.transformer.packed_masks
+
+    def spy(doc_ids):
+        seen["doc_ids"] = doc_ids
+        return real(doc_ids)
+
+    lm.transformer.packed_masks = spy
+    loss = gpt._loss(torch.tensor([[3, 5, 4, 4, 5, 6]]))
+    assert torch.isfinite(loss)
+    assert seen["doc_ids"].tolist() == [[0, 1, 1, 1, 2, 2]]
+
+
+def test_gpt_without_bos_idx_passes_no_masks(gpt_module):
+    seen = {}
+
+    def spy(x, doc_ids=None, masks=None):
+        seen["masks"] = masks
+        return gpt_module.model(x, doc_ids, masks)
+
+    # bypass nn.Module.__setattr__: _forward is registered as a submodule
+    object.__setattr__(gpt_module, "_forward", spy)
+    gpt_module._loss(torch.randint(1, 40, (2, 6)))
+    assert seen["masks"] is None
+
+
+def test_gpt_doc_mask_blocks_cross_document_loss_leak():
+    # perturbing tokens of an earlier document must not change the model's
+    # view of a later one: logits after the second <s> stay identical
+    torch.manual_seed(0)
+    bos = 5
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2).eval()
+    x = torch.tensor([[bos, 7, 8, 9, bos, 11, 12, 13]])
+    doc_ids = (x == bos).cumsum(-1)
+    base = lm(x, doc_ids)
+
+    perturbed = x.clone()
+    perturbed[:, 1:4] = torch.tensor([20, 21, 22])
+    out = lm(perturbed, (perturbed == bos).cumsum(-1))
+    assert torch.allclose(base[:, 4:], out[:, 4:], atol=1e-5)
+
+
 def test_gpt_trainer_fast_dev_run(gpt_module):
     loader = DataLoader(_RandomTokenDataset(40, 6), batch_size=4)
     trainer = L.Trainer(

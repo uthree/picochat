@@ -59,6 +59,77 @@ def test_transformer_backward():
 
 
 # ---------------------------------------------------------------------------
+# Sequence packing: doc_ids confines attention to one document
+# ---------------------------------------------------------------------------
+def test_transformer_packed_forward_matches_separate_documents():
+    # two documents packed into one sequence with doc_ids must produce exactly
+    # what each document produces on its own: the mask blocks cross-document
+    # attention, and RoPE is relative so the second document's offset position
+    # doesn't matter. Mix windowed and full-attention layers.
+    torch.manual_seed(0)
+    model = Transformer(
+        d_model=32, n_heads=4, n_layers=4, window_size=3, global_attn_ratio=2
+    ).eval()
+    a, b = torch.randn(1, 4, 32), torch.randn(1, 6, 32)
+    packed = torch.cat([a, b], dim=1)
+    doc_ids = torch.tensor([[0] * 4 + [1] * 6])
+
+    out = model(packed, doc_ids)
+    assert torch.allclose(out[:, :4], model(a), atol=1e-4)
+    assert torch.allclose(out[:, 4:], model(b), atol=1e-4)
+
+
+def test_transformer_doc_ids_blocks_cross_document_attention():
+    torch.manual_seed(0)
+    model = Transformer(d_model=32, n_heads=4, n_layers=2).eval()
+    x = torch.randn(1, 8, 32)
+    doc_ids = torch.tensor([[0] * 4 + [1] * 4])
+    base = model(x, doc_ids)
+
+    perturbed = x.clone()
+    perturbed[:, 0] += 100.0  # inside document 0
+    out = model(perturbed, doc_ids)
+    # document 1 must not see the change; document 0 must
+    assert torch.allclose(base[:, 4:], out[:, 4:], atol=1e-5)
+    assert not torch.allclose(base[:, :4], out[:, :4], atol=1e-5)
+    # without doc_ids the change leaks into the second half
+    assert not torch.allclose(model(x)[:, 4:], model(perturbed)[:, 4:], atol=1e-5)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="flex_attention path is CUDA-only"
+)
+def test_transformer_packed_forward_matches_separate_documents_on_cuda():
+    # on CUDA the packed mask is a flex_attention BlockMask instead of a dense
+    # SDPA mask; it must agree with per-document forwards just like on CPU
+    torch.manual_seed(0)
+    model = (
+        Transformer(
+            d_model=64, n_heads=8, n_layers=4, window_size=3, global_attn_ratio=2
+        )
+        .cuda()
+        .eval()
+    )
+    a = torch.randn(1, 4, 64, device="cuda")
+    b = torch.randn(1, 6, 64, device="cuda")
+    packed = torch.cat([a, b], dim=1)
+    doc_ids = torch.tensor([[0] * 4 + [1] * 6], device="cuda")
+
+    out = model(packed, doc_ids)
+    assert torch.allclose(out[:, :4], model(a), atol=1e-3)
+    assert torch.allclose(out[:, 4:], model(b), atol=1e-3)
+
+
+def test_transformer_packed_backward_with_grad_checkpoint():
+    model = Transformer(d_model=32, n_heads=4, n_layers=2, grad_checkpoint=True)
+    model.train()
+    x = torch.randn(2, 6, 32, requires_grad=True)
+    doc_ids = torch.tensor([[0, 0, 0, 1, 1, 1], [0, 1, 1, 1, 2, 2]])
+    model(x, doc_ids).sum().backward()
+    assert x.grad is not None
+
+
+# ---------------------------------------------------------------------------
 # TransformerLM
 # ---------------------------------------------------------------------------
 def test_transformer_lm_logits_shape():

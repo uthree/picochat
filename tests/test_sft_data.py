@@ -7,6 +7,7 @@ from picochat.data.sft import (
     SFTDataset,
     SFTTensorDataset,
     encode_conversation,
+    pack_examples,
     resolve_spec,
 )
 from picochat.tokenizer import load_tokenizer, train_tokenizer
@@ -43,7 +44,7 @@ def test_encode_conversation_masks_non_assistant_turns(tokenizer, pad_id):
     ]
     input_ids, labels = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
 
-    assert len(input_ids) == len(labels) == 64
+    assert len(input_ids) == len(labels) <= 64
     # every masked-out label is pad_id; every non-pad label matches its input token
     for tok, lab in zip(input_ids, labels):
         assert lab in (pad_id, tok)
@@ -77,14 +78,87 @@ def test_encode_conversation_only_assistant_span_is_trainable(tokenizer, pad_id)
     user_span, assistant_span = turns
     assert all(labels[i] == pad_id for i in range(*user_span))
     assert any(labels[i] != pad_id for i in range(*assistant_span))
-    assert all(labels[i] == pad_id for i in range(assistant_span[1] + 1, 64))
+    assert all(labels[i] == pad_id for i in range(assistant_span[1] + 1, len(labels)))
 
 
-def test_encode_conversation_pads_short_sequences(tokenizer, pad_id):
+def test_encode_conversation_returns_unpadded_length(tokenizer, pad_id):
+    # no padding: packing into fixed-length rows happens in pack_examples
     messages = [{"role": "assistant", "content": "hi"}]
     input_ids, labels = encode_conversation(messages, tokenizer, max_length=32, pad_id=pad_id)
-    assert input_ids[-1] == pad_id
-    assert labels[-1] == pad_id
+    eos = tokenizer.encode_single_token("</s>")
+    assert len(input_ids) == len(labels) < 32
+    assert input_ids[-1] == eos
+
+
+# ---------------------------------------------------------------------------
+# pack_examples: MosaicBERT-style sequence packing
+# ---------------------------------------------------------------------------
+PAD = 0
+
+
+def _example(tokens: list[int]) -> tuple[list[int], list[int]]:
+    return tokens, list(tokens)
+
+
+def test_pack_examples_packs_several_examples_per_row():
+    examples = [_example([1, 2, 3]), _example([4, 5]), _example([6, 7, 8])]
+    input_ids, labels, doc_ids = pack_examples(examples, max_length=8, pad_id=PAD)
+    assert input_ids.shape == labels.shape == doc_ids.shape == (1, 8)
+    # all 8 tokens fit into one row; no padding at all
+    assert (input_ids != PAD).all()
+    # rows are filled longest-first, then largest-that-fits
+    assert input_ids[0].tolist() == [6, 7, 8, 1, 2, 3, 4, 5]
+    assert doc_ids[0].tolist() == [0, 0, 0, 1, 1, 1, 2, 2]
+
+
+def test_pack_examples_pads_leftover_room_with_own_doc_id():
+    input_ids, labels, doc_ids = pack_examples(
+        [_example([1, 2, 3]), _example([4, 5, 6])], max_length=4, pad_id=PAD
+    )
+    assert input_ids.shape == (2, 4)
+    for row in range(2):
+        assert input_ids[row, 3] == PAD
+        assert labels[row, 3] == PAD
+        # the padding tail is its own document, distinct from the real one
+        assert doc_ids[row, 3] == 1
+        assert (doc_ids[row, :3] == 0).all()
+
+
+def test_pack_examples_masks_each_examples_first_label():
+    # the first token of every packed example must not be a training target:
+    # after the loss shift it would be predicted across a document boundary
+    examples = [_example([1, 2, 3]), _example([4, 5])]
+    input_ids, labels, doc_ids = pack_examples(examples, max_length=5, pad_id=PAD)
+    starts = [0] + [
+        i
+        for i in range(1, 5)
+        if doc_ids[0, i] != doc_ids[0, i - 1] and input_ids[0, i] != PAD
+    ]
+    assert len(starts) == 2
+    for s in starts:
+        assert labels[0, s] == PAD
+    # every other position keeps its label
+    others = [i for i in range(5) if i not in starts]
+    assert all(labels[0, i] == input_ids[0, i] for i in others)
+
+
+def test_pack_examples_keeps_every_token():
+    torch.manual_seed(0)
+    examples = [
+        _example(torch.randint(1, 40, (int(n),)).tolist())
+        for n in torch.randint(1, 16, (50,))
+    ]
+    max_length = 16
+    input_ids, _, doc_ids = pack_examples(examples, max_length, pad_id=PAD)
+    n_tokens = sum(len(ids) for ids, _ in examples)
+    assert int((input_ids != PAD).sum()) == n_tokens
+    # each row's real span is partitioned into contiguous documents 0..k-1
+    for row_ids, row_docs in zip(input_ids, doc_ids):
+        real = row_docs[row_ids != PAD]
+        assert (real.diff() >= 0).all()  # doc ids only ever increase
+        pad_docs = row_docs[row_ids == PAD]
+        if len(pad_docs):
+            assert (pad_docs == real.max() + 1).all()
 
 
 def test_encode_conversation_returns_none_when_truncated_before_assistant(tokenizer, pad_id):
@@ -120,7 +194,7 @@ def test_resolve_spec_requires_preset_or_dataset():
         resolve_spec(None, None)
 
 
-def test_sft_dataset_shapes_and_attention_mask(tokenizer, pad_id):
+def test_sft_dataset_packs_conversations_into_fixed_length_rows(tokenizer, pad_id):
     conversations = [
         [
             {"role": "user", "content": "hello world"},
@@ -131,14 +205,15 @@ def test_sft_dataset_shapes_and_attention_mask(tokenizer, pad_id):
             {"role": "assistant", "content": "the capital of France is Paris"},
         ],
     ]
-    ds = SFTDataset(conversations, tokenizer, max_length=48, pad_id=pad_id)
-    assert len(ds) == 2
+    ds = SFTDataset(conversations, tokenizer, max_length=128, pad_id=pad_id)
+    # both short conversations fit into one packed row
+    assert len(ds) == 1
     item = ds[0]
-    assert item["input_ids"].shape == (48,)
-    assert item["labels"].shape == (48,)
-    assert item["attention_mask"].shape == (48,)
-    assert item["attention_mask"].dtype == torch.long
-    assert torch.equal(item["attention_mask"], (item["input_ids"] != pad_id).long())
+    assert item["input_ids"].shape == (128,)
+    assert item["labels"].shape == (128,)
+    assert item["doc_ids"].shape == (128,)
+    real = item["input_ids"] != pad_id
+    assert set(item["doc_ids"][real].tolist()) == {0, 1}  # two packed documents
 
 
 def test_sft_dataset_drops_conversations_with_no_trainable_span(tokenizer, pad_id):
@@ -156,11 +231,17 @@ def test_sft_tensor_dataset_reads_saved_bundle(tmp_path):
     input_ids = torch.randint(1, 40, (3, 16))
     labels = input_ids.clone()
     labels[:, -4:] = 0
+    doc_ids = torch.zeros(3, 16, dtype=torch.long)
+    doc_ids[:, 8:] = 1
     bundle_path = tmp_path / "bundle.pt"
-    torch.save({"input_ids": input_ids, "labels": labels, "pad_id": 0}, bundle_path)
+    torch.save(
+        {"input_ids": input_ids, "labels": labels, "doc_ids": doc_ids, "pad_id": 0},
+        bundle_path,
+    )
 
     ds = SFTTensorDataset(bundle_path)
     assert len(ds) == 3
     item = ds[0]
     assert torch.equal(item["input_ids"], input_ids[0])
     assert torch.equal(item["labels"], labels[0])
+    assert torch.equal(item["doc_ids"], doc_ids[0])

@@ -1,12 +1,14 @@
-"""Tokenize HF chat datasets (e.g. HuggingFaceTB/smoltalk) into padded SFT
-tensors ready for picochat.data.sft.SFTDataset.
+"""Tokenize HF chat datasets (e.g. HuggingFaceTB/smoltalk) into packed SFT
+tensors ready for picochat.data.sft.SFTTensorDataset.
 
-Every conversation is turned into a fixed-length (input_ids, labels) pair via
-picochat.data.sft.encode_conversation (turn-by-turn tokenization, <pad>-based
-loss masking -- see that module), and every surviving conversation is stacked
-into a single {input_ids, labels, pad_id} tensor bundle saved as one .pt file.
-SFT corpora are small enough to fit in memory, unlike base_setup.py's sharded
-token-stream binaries for pretraining, so no shard directory is needed here.
+Every conversation is tokenized via picochat.data.sft.encode_conversation
+(turn-by-turn tokenization, <pad>-based loss masking -- see that module), and
+the surviving conversations are packed several-per-sequence into fixed-length
+rows (MosaicBERT-style sequence packing, picochat.data.sft.pack_examples)
+saved as a single {input_ids, labels, doc_ids, pad_id} tensor bundle in one
+.pt file. SFT corpora are small enough to fit in memory, unlike
+base_setup.py's sharded token-stream binaries for pretraining, so no shard
+directory is needed here.
 
 Two ways to run:
 
@@ -30,6 +32,7 @@ from picochat.data.sft import (
     ChatDatasetSpec,
     encode_conversation,
     iter_conversations,
+    pack_examples,
     resolve_spec,
 )
 from picochat.tokenizer import load_tokenizer
@@ -82,13 +85,14 @@ def process(
     streaming: bool = True,
     limit: int | None = None,
 ) -> tuple[int, int]:
-    """Tokenize every conversation of `spec` and save the surviving ones as a
-    single (input_ids, labels) tensor pair at `output`. Returns (n_kept,
+    """Tokenize every conversation of `spec`, pack the surviving ones into
+    fixed-length sequences (several conversations per sequence, see
+    picochat.data.sft.pack_examples) and save them as a single
+    {input_ids, labels, doc_ids, pad_id} bundle at `output`. Returns (n_kept,
     n_dropped); a conversation is dropped when truncation to max_length left
     no assistant turn to train on (see encode_conversation).
     """
-    all_input_ids: list[list[int]] = []
-    all_labels: list[list[int]] = []
+    examples: list[tuple[list[int], list[int]]] = []
     n_dropped = 0
     bar = tqdm(desc=str(output))
     for messages in iter_conversations(spec, streaming=streaming, limit=limit):
@@ -96,27 +100,31 @@ def process(
         if encoded is None:
             n_dropped += 1
             continue
-        input_ids, labels = encoded
-        all_input_ids.append(input_ids)
-        all_labels.append(labels)
+        examples.append(encoded)
         bar.update(1)
     bar.close()
-    if not all_input_ids:
+    if not examples:
         raise SystemExit(f"no usable conversations from {spec.path} ({spec.split})")
 
+    input_ids, labels, doc_ids = pack_examples(examples, max_length, pad_id)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "input_ids": torch.tensor(all_input_ids, dtype=torch.long),
-            "labels": torch.tensor(all_labels, dtype=torch.long),
+            "input_ids": input_ids,
+            "labels": labels,
+            "doc_ids": doc_ids,
             "pad_id": pad_id,
         },
         output,
     )
-    n_kept = len(all_input_ids)
+    n_kept = len(examples)
+    n_tokens = sum(len(ids) for ids, _ in examples)
+    efficiency = n_tokens / max(1, input_ids.numel())  # real tokens vs padding
     size_mb = output.stat().st_size / 1e6
     print(
-        f"done: {n_kept:,} kept, {n_dropped:,} dropped -> {output} ({size_mb:.1f} MB)"
+        f"done: {n_kept:,} kept, {n_dropped:,} dropped -> {output} "
+        f"({len(input_ids):,} packed rows, {efficiency:.1%} packing efficiency, "
+        f"{size_mb:.1f} MB)"
     )
     return n_kept, n_dropped
 

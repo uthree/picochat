@@ -48,6 +48,58 @@ def _sliding_window_block_mask(
     return _block_mask_cache[key]
 
 
+@torch._dynamo.disable()
+def _packed_attention_mask(
+    doc_ids: Tensor, window_size: int | None
+) -> BlockMask | Tensor:
+    """Causal mask that keeps attention within one packed document
+    (MosaicBERT-style sequence packing): several documents share one training
+    sequence, and a token may only attend to earlier tokens carrying the same
+    doc id (further limited to the sliding window when window_size is set).
+
+    Unlike _sliding_window_block_mask this is data-dependent (doc_ids changes
+    every batch), so it can't be cached; Transformer.packed_masks builds it
+    once per step per distinct window size. CUDA gets a flex_attention
+    BlockMask (block-granular, cheap relative to the attention itself);
+    elsewhere a dense (b, 1, l, l) bool mask for SDPA, since flex_attention
+    has no CPU backward. RoPE is relative, so masking is all packing needs --
+    no per-document position reset.
+
+    dynamo-disabled because create_block_mask isn't traceable; but note that
+    calling this *inside* a compiled forward silently drops the surrounding
+    layers out of torch.compile once the returned BlockMask sits in a
+    container across the graph break, which runs flex_attention unfused (it
+    materializes the full scores matrix). The training modules therefore call
+    packed_masks() outside the compiled callable and pass the masks in as
+    inputs (BlockMask is a pytree, so it traces cleanly as a graph input);
+    the in-forward fallback below is for eager/CPU use only.
+    """
+    if doc_ids.is_cuda:
+
+        def mask_mod(b, h, q_idx, kv_idx):
+            ok = (kv_idx <= q_idx) & (doc_ids[b, q_idx] == doc_ids[b, kv_idx])
+            if window_size is not None:
+                ok = ok & (kv_idx > q_idx - window_size)
+            return ok
+
+        batch, seq_len = doc_ids.shape
+        return create_block_mask(
+            mask_mod,
+            B=batch,
+            H=None,
+            Q_LEN=seq_len,
+            KV_LEN=seq_len,
+            device=doc_ids.device,
+        )
+    idx = torch.arange(doc_ids.shape[-1], device=doc_ids.device)
+    mask = (idx[:, None] >= idx[None, :]) & (
+        doc_ids[:, :, None] == doc_ids[:, None, :]
+    )
+    if window_size is not None:
+        mask &= idx[None, :] > idx[:, None] - window_size
+    return mask[:, None]  # (b, 1, l, l): broadcasts over heads
+
+
 def rotate_half(x: Tensor) -> Tensor:
     x = rearrange(x, "... (d r) -> ... d r", r=2)
     x1, x2 = x[..., 0], x[..., 1]
@@ -276,11 +328,23 @@ class SelfAttention(nn.Module):
             mask &= k_idx > q_idx - self.window_size
         return mask
 
-    def forward(self, x: Tensor) -> Tensor:
-        # Training path: full causal attention over the whole sequence, no cache.
+    def forward(self, x: Tensor, attn_mask: BlockMask | Tensor | None = None) -> Tensor:
+        # Training path: causal attention over the whole sequence, no cache.
+        # `attn_mask` is the packed-document mask built by Transformer.forward
+        # (a flex_attention BlockMask on CUDA, a dense bool mask elsewhere); it
+        # already encodes causality, document boundaries and this layer's
+        # window, so it replaces the plain causal/windowed paths below.
         query, key, value = self._project(x)
         query, key = self._rope(query), self._rope(key)
-        if self.window_size is None:
+        if isinstance(attn_mask, BlockMask):
+            attn = flex_attention(
+                query, key, value, block_mask=attn_mask, enable_gqa=True
+            )
+        elif attn_mask is not None:
+            attn = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=attn_mask, enable_gqa=True
+            )
+        elif self.window_size is None:
             # Fast path: let SDPA use its native causal kernel instead of a
             # materialized mask.
             attn = F.scaled_dot_product_attention(
@@ -406,9 +470,9 @@ class TransformerLayer(nn.Module):
                 d_model, d_hidden=d_expert, n_experts=n_experts, n_active=n_active
             )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, attn_mask: BlockMask | Tensor | None = None) -> Tensor:
         # attn/ffn apply pre-norm (rms_norm) internally, so add the raw residual.
-        x = self.attn(x) + x
+        x = self.attn(x, attn_mask) + x
         if hasattr(self, "moe"):
             x = self.ffn(x) + self.moe(x) + x
         else:
@@ -470,12 +534,40 @@ class Transformer(nn.Module):
             )
             self.layers.append(layer)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def packed_masks(self, doc_ids: Tensor) -> dict[int | None, BlockMask | Tensor]:
+        # One packed-document mask per distinct window size among the layers
+        # (see _packed_attention_mask). Called by the training modules once
+        # per step, *outside* the compiled forward: built inside it, the
+        # graph break around the dynamo-disabled builder would drop the
+        # layers out of torch.compile and run flex_attention unfused.
+        masks: dict[int | None, BlockMask | Tensor] = {}
         for layer in self.layers:
+            ws = layer.attn.window_size
+            if ws not in masks:
+                masks[ws] = _packed_attention_mask(doc_ids, ws)
+        return masks
+
+    def forward(
+        self,
+        x: Tensor,
+        doc_ids: Tensor | None = None,
+        masks: dict[int | None, BlockMask | Tensor] | None = None,
+    ) -> Tensor:
+        # doc_ids (b, l): id of the packed document each token belongs to.
+        # When given, attention is confined within documents (sequence
+        # packing). `masks` is the precomputed packed_masks(doc_ids) -- pass
+        # it when this forward runs under torch.compile (see packed_masks);
+        # otherwise it is built here for eager/CPU convenience.
+        if masks is None and doc_ids is not None:
+            masks = self.packed_masks(doc_ids)
+        for layer in self.layers:
+            mask = masks[layer.attn.window_size] if masks is not None else None
             if self.grad_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
+                x = torch.utils.checkpoint.checkpoint(
+                    layer, x, mask, use_reentrant=False
+                )
             else:
-                x = layer(x)
+                x = layer(x, mask)
 
         if self.training:
             # Apply each MoE's staged load-balancing bias update here -- once,
@@ -566,13 +658,23 @@ class TransformerLM(nn.Module):
             elif isinstance(m, MixtureOfExperts):
                 nn.init.normal_(m.weight_down, mean=0.0, std=scaled_std)
 
-    def encode(self, x: Tensor) -> Tensor:
+    def encode(
+        self,
+        x: Tensor,
+        doc_ids: Tensor | None = None,
+        masks: dict[int | None, BlockMask | Tensor] | None = None,
+    ) -> Tensor:
         # Shared trunk (embed + transformer) up to the final hidden state, before
-        # the lm head.
-        return self.transformer(self.embed(x))
+        # the lm head. doc_ids/masks: see Transformer.forward (sequence packing).
+        return self.transformer(self.embed(x), doc_ids, masks)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.lmhead(self.encode(x))
+    def forward(
+        self,
+        x: Tensor,
+        doc_ids: Tensor | None = None,
+        masks: dict[int | None, BlockMask | Tensor] | None = None,
+    ) -> Tensor:
+        return self.lmhead(self.encode(x, doc_ids, masks))
 
     def decode(
         self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0

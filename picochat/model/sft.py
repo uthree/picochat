@@ -63,11 +63,20 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         self.compile = can_compile() if compile is None else compile
         self._forward = torch.compile(self.model) if self.compile else self.model
 
-    def _loss(self, input_ids: Tensor, labels: Tensor) -> Tensor:
+    def _loss(
+        self, input_ids: Tensor, labels: Tensor, doc_ids: Tensor | None = None
+    ) -> Tensor:
         # Next-token prediction: position i's logits predict token i+1, so
         # compare against labels shifted left by one -- labels is already
-        # input-aligned (see picochat.data.sft), not pre-shifted.
-        logits = self._forward(input_ids)[:, :-1]
+        # input-aligned (see picochat.data.sft), not pre-shifted. doc_ids marks
+        # which packed conversation each token belongs to (see
+        # picochat.data.sft.pack_examples) so attention stays within one
+        # conversation; its masks are built here, outside the compiled
+        # forward -- see Transformer.packed_masks.
+        masks = None
+        if doc_ids is not None:
+            masks = self.model.transformer.packed_masks(doc_ids)
+        logits = self._forward(input_ids, masks=masks)[:, :-1]
         targets = labels[:, 1:]
         return F.cross_entropy(
             rearrange(logits, "b l v -> (b l) v"),
@@ -76,7 +85,7 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         )
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
-        loss = self._loss(batch["input_ids"], batch["labels"])
+        loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))
         (loss / self.accumulate).backward()
         self._optimizer_step(batch_idx)
         self.log("train_loss", loss)
@@ -84,6 +93,6 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         return loss
 
     def validation_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
-        loss = self._loss(batch["input_ids"], batch["labels"])
+        loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))
         self.log("val_loss", loss, prog_bar=True)
         return loss

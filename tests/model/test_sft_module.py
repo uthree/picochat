@@ -88,6 +88,38 @@ def test_loss_shifts_labels_by_one():
     assert torch.allclose(loss_shifted, ref)
 
 
+def test_training_step_with_packed_doc_ids(sft_module):
+    # packed batches (see picochat.data.sft.pack_examples) carry doc_ids;
+    # the step must route them through to the model's document mask
+    batch = _batch()
+    batch["doc_ids"] = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]]).expand(2, -1)
+    loss = sft_module.training_step(batch, 0)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
+def test_loss_doc_ids_isolate_packed_conversations():
+    # with doc_ids, tokens of the second packed conversation must be scored
+    # independently of the first: perturbing conversation 0's tokens leaves
+    # the loss over conversation 1 unchanged
+    torch.manual_seed(0)
+    module = SFTModule(_tiny_lm(), pad_idx=PAD_ID, compile=False).eval()
+    input_ids = torch.randint(1, 40, (1, 8))
+    doc_ids = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]])
+    labels = input_ids.clone()
+    labels[:, :5] = PAD_ID  # train only on conversation 1 (past its first token)
+
+    base = module._loss(input_ids, labels, doc_ids)
+    perturbed = input_ids.clone()
+    perturbed[:, 1:4] = (perturbed[:, 1:4] + 7) % 39 + 1
+    out = module._loss(perturbed, labels, doc_ids)
+    assert torch.allclose(base, out, atol=1e-6)
+    # without doc_ids the perturbation leaks into conversation 1's loss
+    assert not torch.allclose(
+        module._loss(input_ids, labels), module._loss(perturbed, labels), atol=1e-6
+    )
+
+
 def test_configure_optimizers_muon(sft_module):
     opt = sft_module.configure_optimizers()
     assert isinstance(opt, Muon)
