@@ -152,10 +152,16 @@ class MixtureOfExperts(nn.Module):
         self.bias_update_rate = bias_update_rate
         if d_hidden is None:
             d_hidden = d_model * 3
+        self.d_hidden = d_hidden
         self.weight_router = nn.Parameter(torch.empty(n_experts, d_model))
-        self.weight_up = nn.Parameter(torch.empty(n_experts, d_hidden, d_model))
-        self.weight_gate = nn.Parameter(torch.empty(n_experts, d_hidden, d_model))
-        self.weight_down = nn.Parameter(torch.empty(n_experts, d_model, d_hidden))
+        # The fused expert weights are stored 2D, experts stacked along the
+        # rows -- (n_experts * out_features, in_features) -- and viewed back
+        # to (n_experts, out, in) for the bmm in forward. torch.optim.Muon
+        # accepts only 2D parameters, and this flattened matrix is exactly
+        # what Muon orthogonalizes for a stacked expert weight anyway.
+        self.weight_up = nn.Parameter(torch.empty(n_experts * d_hidden, d_model))
+        self.weight_gate = nn.Parameter(torch.empty(n_experts * d_hidden, d_model))
+        self.weight_down = nn.Parameter(torch.empty(n_experts * d_model, d_hidden))
         for w in (
             self.weight_router,
             self.weight_up,
@@ -241,10 +247,13 @@ class MixtureOfExperts(nn.Module):
             0, dest, tokens[pair_token] * keep_f
         )
         expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d)
-        up = torch.bmm(expert_in, self.weight_up.transpose(1, 2))
-        gate = torch.bmm(expert_in, self.weight_gate.transpose(1, 2))
+        w_up = self.weight_up.view(self.n_experts, self.d_hidden, d)
+        w_gate = self.weight_gate.view(self.n_experts, self.d_hidden, d)
+        w_down = self.weight_down.view(self.n_experts, d, self.d_hidden)
+        up = torch.bmm(expert_in, w_up.transpose(1, 2))
+        gate = torch.bmm(expert_in, w_gate.transpose(1, 2))
         h = F.dropout(up * F.silu(gate), self.p_dropout, training=self.training)
-        expert_out = torch.bmm(h, self.weight_down.transpose(1, 2))
+        expert_out = torch.bmm(h, w_down.transpose(1, 2))
         expert_out = F.dropout(expert_out, self.p_dropout, training=self.training)
         expert_out = torch.cat(
             [expert_out.reshape(n_slots, d), expert_out.new_zeros(1, d)], dim=0

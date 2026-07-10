@@ -4,7 +4,6 @@ import torch
 
 from picochat.model.sft import SFTModule
 from picochat.model.transformer import TransformerLM
-from picochat.optim import Muon
 
 PAD_ID = 0
 
@@ -121,16 +120,22 @@ def test_loss_doc_ids_isolate_packed_conversations():
 
 
 def test_configure_optimizers_muon(sft_module):
-    opt = sft_module.configure_optimizers()
-    assert isinstance(opt, Muon)
-    n_opt = sum(p.numel() for g in opt.param_groups for p in g["params"])
+    muon_opt, adam_opt = sft_module.configure_optimizers()
+    assert isinstance(muon_opt, torch.optim.Muon)
+    assert isinstance(adam_opt, torch.optim.AdamW)
+    n_opt = sum(
+        p.numel()
+        for opt in (muon_opt, adam_opt)
+        for g in opt.param_groups
+        for p in g["params"]
+    )
     n_model = sum(p.numel() for p in sft_module.model.parameters())
     assert n_opt == n_model
 
 
 def test_configure_optimizers_adamw():
     module = SFTModule(_tiny_lm(), pad_idx=PAD_ID, optimizer="adamw", compile=False)
-    opt = module.configure_optimizers()
+    [opt] = module.configure_optimizers()
     assert isinstance(opt, torch.optim.AdamW)
 
 

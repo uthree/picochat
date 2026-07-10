@@ -3,6 +3,13 @@
 schedule applied by hand under manual optimization, and greedy KV-cache
 generation. Both subclasses differ only in how they build the batch into a
 next-token cross-entropy loss, so that part stays in each class.
+
+The "muon" mode runs two optimizers side by side: torch.optim.Muon for the
+matrix-shaped hidden weights and torch.optim.AdamW for the rest (embeddings,
+lm head, 1-dim params) -- torch's Muon is Muon-only, unlike the previous
+in-repo implementation that embedded its own AdamW. Both subclasses already
+use manual optimization, so _optimizer_step owns the pair (see the
+global_step note there).
 """
 
 import math
@@ -10,8 +17,6 @@ import math
 import torch
 import torch.nn as nn
 from torch import Tensor
-
-from picochat.optim import Muon
 
 
 def can_compile() -> bool:
@@ -49,7 +54,7 @@ class LMTrainerMixin:
         self.weight_decay = weight_decay
         self.betas = betas
         # "muon" (default) or "adamw". With muon, `lr`/`betas` still apply --
-        # to the embedded AdamW that handles the params Muon skips.
+        # to the AdamW that runs alongside it for the params Muon skips.
         self.optimizer_name = optimizer
         self.muon_lr = muon_lr
         self.muon_momentum = muon_momentum
@@ -58,8 +63,9 @@ class LMTrainerMixin:
         self.min_lr_ratio = min_lr_ratio
         self.grad_clip = grad_clip
         self.accumulate = accumulate
-        # Set by configure_optimizers: the per-group base LR the schedule scales.
-        self._base_lrs: list[float] = []
+        # Set by configure_optimizers: per optimizer, the per-group base LRs
+        # the schedule scales.
+        self._base_lrs: list[list[float]] = []
         # Optional tiktoken Encoding used to turn generated token ids back into
         # readable text (e.g. for TensorBoard generation samples).
         self.tokenizer = tokenizer
@@ -86,14 +92,15 @@ class LMTrainerMixin:
             {"params": no_decay, "weight_decay": 0.0},
         ]
 
-    def _muon_param_groups(self) -> list[dict]:
+    def _muon_param_split(self) -> tuple[list, list[dict]]:
         # Muon orthogonalizes matrix-shaped *hidden* weights. The embedding and
         # lm heads (input/output layers, per the Muon authors) and 1-dim params
-        # (biases) go to the embedded AdamW instead, keeping the same decay
-        # split as _param_groups: no decay for embeddings/1-dim, decay for the
-        # lm-head matrices. Everything else -- attention/FFN projections, the
-        # router, and the fused 3D MoE expert weights (flattened inside Muon.step)
-        # -- is optimized by Muon.
+        # (biases) go to the AdamW running alongside it instead, keeping the
+        # same decay split as _param_groups: no decay for embeddings/1-dim,
+        # decay for the lm-head matrices. Everything else -- attention/FFN
+        # projections, the router, and the fused MoE expert weights (stored 2D
+        # exactly because torch.optim.Muon accepts nothing else, see
+        # MixtureOfExperts) -- is optimized by Muon.
         embed_ids = {
             id(p)
             for m in self.model.modules()
@@ -111,46 +118,39 @@ class LMTrainerMixin:
                 adam_decay.append(p)
             else:
                 muon.append(p)
-        return [
-            dict(
-                params=muon,
-                use_muon=True,
-                lr=self.muon_lr,
-                momentum=self.muon_momentum,
-                weight_decay=self.weight_decay,
-            ),
-            dict(
-                params=adam_decay,
-                use_muon=False,
-                lr=self.lr,
-                betas=self.betas,
-                weight_decay=self.weight_decay,
-            ),
-            dict(
-                params=adam_no_decay,
-                use_muon=False,
-                lr=self.lr,
-                betas=self.betas,
-                weight_decay=0.0,
-            ),
+        return muon, [
+            dict(params=adam_decay, weight_decay=self.weight_decay),
+            dict(params=adam_no_decay, weight_decay=0.0),
         ]
 
     def configure_optimizers(self):
         if self.optimizer_name == "muon":
-            optimizer = Muon(self._muon_param_groups())
+            muon_params, adam_groups = self._muon_param_split()
+            # adjust_lr_fn defaults to "original" (sqrt(max(1, rows/cols))
+            # update scaling), the same correction the previous in-repo Muon
+            # applied.
+            optimizers = [
+                torch.optim.Muon(
+                    muon_params,
+                    lr=self.muon_lr,
+                    momentum=self.muon_momentum,
+                    weight_decay=self.weight_decay,
+                ),
+                torch.optim.AdamW(adam_groups, lr=self.lr, betas=self.betas),
+            ]
         elif self.optimizer_name == "adamw":
-            optimizer = torch.optim.AdamW(
-                self._param_groups(), lr=self.lr, betas=self.betas
-            )
+            optimizers = [
+                torch.optim.AdamW(self._param_groups(), lr=self.lr, betas=self.betas)
+            ]
         else:
             raise ValueError(
                 f"unknown optimizer '{self.optimizer_name}'. choices: muon, adamw"
             )
         # Under manual optimization the LR schedule is applied by hand in
         # _apply_lr (Lightning does not step schedulers for us here), so we just
-        # remember each group's base LR and return the bare optimizer.
-        self._base_lrs = [group["lr"] for group in optimizer.param_groups]
-        return optimizer
+        # remember each group's base LR and return the bare optimizers.
+        self._base_lrs = [[g["lr"] for g in opt.param_groups] for opt in optimizers]
+        return optimizers
 
     def _lr_lambda(self, step: int) -> float:
         # Linear warmup -> cosine decay (down to min_lr_ratio).
@@ -164,15 +164,16 @@ class LMTrainerMixin:
         coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * coeff
 
-    def _apply_lr(self, opt) -> None:
+    def _apply_lr(self, opts: list) -> None:
         # Scale each param group's base LR by the warmup/cosine schedule. Keyed on
         # global_step (optimizer steps), matching the old "interval: step"
         # scheduler. When max_steps is unknown, keep LR constant.
         if self.max_steps is None:
             return
         scale = self._lr_lambda(self.trainer.global_step)
-        for base, group in zip(self._base_lrs, opt.param_groups):
-            group["lr"] = base * scale
+        for base_lrs, opt in zip(self._base_lrs, opts):
+            for base, group in zip(base_lrs, opt.param_groups):
+                group["lr"] = base * scale
 
     def _optimizer_step(self, batch_idx: int) -> None:
         # Manual optimization: step once every `accumulate` microbatches, applying
@@ -183,14 +184,29 @@ class LMTrainerMixin:
             return
         if (batch_idx + 1) % self.accumulate != 0:
             return  # keep accumulating grads into .grad
-        opt = self.optimizers()
-        self._apply_lr(opt)
+        opts = self.optimizers()
+        if not isinstance(opts, list):
+            opts = [opts]  # Lightning unwraps a single optimizer
+        self._apply_lr(opts)
         if self.grad_clip:
-            self.clip_gradients(
-                opt, gradient_clip_val=self.grad_clip, gradient_clip_algorithm="norm"
-            )
-        opt.step()
-        opt.zero_grad()
+            # One global-norm clip over every parameter, matching the previous
+            # single-optimizer behavior; self.clip_gradients per optimizer
+            # would clip each subset against the threshold separately. (The
+            # bf16-mixed precision used here has no grad scaler, so clipping
+            # raw grads directly is safe.)
+            torch.nn.utils.clip_grad_norm_(self.parameters(), self.grad_clip)
+        # Step the first optimizer through its Lightning wrapper and the rest
+        # on the raw optimizer: Lightning counts every wrapped .step() into
+        # trainer.global_step, so stepping both Muon and AdamW through
+        # wrappers would advance global_step twice per cycle, doubling the LR
+        # schedule's clock and halving the effective max_steps. Checkpointing
+        # is unaffected -- Lightning saves optimizer state from
+        # trainer.optimizers, not from who called .step().
+        opts[0].step()
+        for opt in opts[1:]:
+            opt.optimizer.step()
+        for opt in opts:
+            opt.zero_grad()
 
     @torch.no_grad()
     def _generate(self, prompt: Tensor, max_new_tokens: int) -> Tensor:

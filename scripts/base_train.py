@@ -196,8 +196,8 @@ def main():
         bos_idx=bos_idx,
         lr=lr,
         weight_decay=optim_cfg.get("weight_decay", 0.1),
-        # "muon" (default): Muon for hidden matrices + embedded AdamW for the
-        # rest. "adamw": plain AdamW for everything.
+        # "muon" (default): torch.optim.Muon for hidden matrices + AdamW for
+        # the rest. "adamw": plain AdamW for everything.
         optimizer=optim_cfg.get("optimizer", "muon"),
         muon_lr=muon_lr,
         muon_momentum=optim_cfg.get("muon_momentum", 0.95),

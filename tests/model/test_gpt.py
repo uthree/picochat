@@ -6,7 +6,6 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from picochat.model.gpt import GPT, TransformerLM
-from picochat.optim import Muon
 
 
 class _RandomTokenDataset(Dataset):
@@ -57,19 +56,26 @@ def test_gpt_validation_step_returns_scalar(gpt_module):
 
 
 def test_gpt_configure_optimizers(gpt_module):
-    # default optimizer is Muon (with its embedded AdamW for non-Muon params);
-    # without max_steps it returns just the optimizer (no scheduler)
-    opt = gpt_module.configure_optimizers()
-    assert isinstance(opt, Muon)
-    # optimizer must cover the model parameters
-    n_opt = sum(p.numel() for group in opt.param_groups for p in group["params"])
+    # default is the torch.optim.Muon + AdamW pair (Muon for hidden matrices,
+    # AdamW for embeddings/lm head/1-dim params); no scheduler is returned --
+    # the LR schedule is applied by hand under manual optimization
+    muon_opt, adam_opt = gpt_module.configure_optimizers()
+    assert isinstance(muon_opt, torch.optim.Muon)
+    assert isinstance(adam_opt, torch.optim.AdamW)
+    # together they must cover the model parameters
+    n_opt = sum(
+        p.numel()
+        for opt in (muon_opt, adam_opt)
+        for group in opt.param_groups
+        for p in group["params"]
+    )
     n_model = sum(p.numel() for p in gpt_module.model.parameters())
     assert n_opt == n_model
 
 
 def test_gpt_configure_optimizers_adamw():
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
-    opt = GPT(lm, pad_idx=0, optimizer="adamw").configure_optimizers()
+    [opt] = GPT(lm, pad_idx=0, optimizer="adamw").configure_optimizers()
     assert isinstance(opt, torch.optim.AdamW)
     n_opt = sum(p.numel() for group in opt.param_groups for p in group["params"])
     n_model = sum(p.numel() for p in lm.parameters())
@@ -84,7 +90,7 @@ def test_gpt_unknown_optimizer_raises():
 
 def test_gpt_weight_decay_excludes_bias_and_embedding():
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
-    opt = GPT(lm, pad_idx=0, optimizer="adamw").configure_optimizers()
+    [opt] = GPT(lm, pad_idx=0, optimizer="adamw").configure_optimizers()
     decay_group, no_decay_group = opt.param_groups
     assert decay_group["weight_decay"] > 0
     assert no_decay_group["weight_decay"] == 0.0
@@ -101,12 +107,12 @@ def test_gpt_weight_decay_excludes_bias_and_embedding():
 def test_gpt_configure_optimizers_with_schedule():
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, min_lr_ratio=0.1)
-    # manual optimization: configure_optimizers returns the bare optimizer and
+    # manual optimization: configure_optimizers returns the bare optimizers and
     # the LR schedule is applied by hand (see _apply_lr); the base LRs are
-    # captured for that.
-    opt = gpt.configure_optimizers()
-    assert isinstance(opt, Muon)
-    assert gpt._base_lrs == [g["lr"] for g in opt.param_groups]
+    # captured per optimizer for that.
+    opts = gpt.configure_optimizers()
+    assert isinstance(opts[0], torch.optim.Muon)
+    assert gpt._base_lrs == [[g["lr"] for g in opt.param_groups] for opt in opts]
     # warmup: ~0 at step 0, 1.0 at the end of warmup, then cosine down to min_lr_ratio
     assert gpt._lr_lambda(0) < gpt._lr_lambda(5)
     assert gpt._lr_lambda(9) == pytest.approx(1.0)
@@ -115,19 +121,21 @@ def test_gpt_configure_optimizers_with_schedule():
 
 
 def test_gpt_apply_lr_scales_base_lr():
-    # _apply_lr multiplies each group's captured base LR by the schedule factor.
+    # _apply_lr multiplies each group's captured base LR by the schedule
+    # factor, across every optimizer of the muon+adamw pair.
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
-    gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100, optimizer="adamw")
-    opt = gpt.configure_optimizers()
-    base = list(gpt._base_lrs)
+    gpt = GPT(lm, pad_idx=0, warmup_steps=10, max_steps=100)
+    opts = gpt.configure_optimizers()
+    base = [list(lrs) for lrs in gpt._base_lrs]
 
     class _FakeTrainer:
         global_step = 5  # mid-warmup
 
     gpt._trainer = _FakeTrainer()
-    gpt._apply_lr(opt)
-    for b, g in zip(base, opt.param_groups):
-        assert g["lr"] == pytest.approx(b * gpt._lr_lambda(5))
+    gpt._apply_lr(opts)
+    for base_lrs, opt in zip(base, opts):
+        for b, g in zip(base_lrs, opt.param_groups):
+            assert g["lr"] == pytest.approx(b * gpt._lr_lambda(5))
 
 
 def test_gpt_loss_backward_reaches_embedding(gpt_module):
