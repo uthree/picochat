@@ -49,7 +49,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=4,
-        n_lmheads=1,
         tie_embeddings=True,
     ),
     "small": dict(
@@ -60,7 +59,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=4,
-        n_lmheads=1,
         tie_embeddings=True,
     ),
     "base": dict(
@@ -71,7 +69,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=6,
-        n_lmheads=4,
     ),
     "medium": dict(
         d_model=2048,
@@ -82,7 +79,6 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=256,
         global_attn_ratio=6,
         n_experts=16,
-        n_lmheads=4,
     ),
     "large": dict(
         d_model=2560,
@@ -93,7 +89,6 @@ MODEL_PRESETS: dict[str, dict] = {
         window_size=256,
         global_attn_ratio=6,
         n_experts=64,
-        n_lmheads=4,
     ),
 }
 
@@ -221,97 +216,39 @@ class GPT(LMTrainerMixin, L.LightningModule):
             accumulate=accumulate,
             tokenizer=tokenizer,
         )
-        # Manual optimization: training backprops each lm head separately off a
-        # single trunk forward (see _mtp_backward / training_step), which the
-        # automatic loop -- one loss.backward() -- can't express. We therefore
-        # own the optimizer step, gradient accumulation, clipping and LR
-        # schedule here instead of leaving them to the Trainer.
+        # Manual optimization: mirrors SFTModule so the two share the same LR
+        # schedule / gradient-accumulation step (see LMTrainerMixin._optimizer_step),
+        # which Lightning's automatic loop can't express. We own the optimizer
+        # step, gradient accumulation, clipping and LR schedule here.
         self.automatic_optimization = False
-        # `compile=None` -> auto (compile iff the environment supports it). We
-        # compile only the shared trunk (encode); the lm heads are single
-        # matmuls left eager so _mtp_backward can drive them one at a time. The
-        # compiled handle shares parameters with self.model; stashing it in a
-        # list keeps nn.Module from registering it as a submodule (which would
-        # duplicate every parameter under a `_orig_mod.` prefix and break
-        # checkpoint loading). self.model stays uncompiled, so state_dict keys
-        # stay clean and decode() runs eager.
+        # `compile=None` -> auto (compile iff the environment supports it). The
+        # compiled handle shares parameters with self.model, which stays
+        # uncompiled, so state_dict keys stay clean and decode() runs eager.
         self.compile = can_compile() if compile is None else compile
-        self._encode = [
-            torch.compile(self.model.encode) if self.compile else self.model.encode
-        ]
-
-    def _head_loss(self, h: Tensor, x: Tensor, k: int) -> Tensor:
-        # Multiple token prediction: head k's output at position i predicts token
-        # i+1+k, so each head shifts the targets one step further (head 0 is
-        # ordinary next-token prediction). `h` is the shared trunk hidden state.
-        shift = k + 1
-        logits = rearrange(self.model.lmheads[k](h)[:, :-shift], "b l v -> (b l) v")
-        targets = rearrange(x[:, shift:], "b l -> (b l)")
-        return F.cross_entropy(logits, targets, ignore_index=self.pad_idx)
-
-    def _head_losses(self, x: Tensor) -> Tensor:
-        # Per-head losses in one shot (no backward). Used for validation and as a
-        # reference in tests; the memory-optimized training path is
-        # _mtp_backward. One head's (B, L, V) logits is built at a time, so peak
-        # logits memory is independent of the head count.
-        h = self._encode[0](x)
-        return torch.stack(
-            [self._head_loss(h, x, k) for k in range(len(self.model.lmheads))]
-        )
+        self._forward = torch.compile(self.model) if self.compile else self.model
 
     def _loss(self, x: Tensor) -> Tensor:
-        return self._head_losses(x).mean()
-
-    def _mtp_backward(self, x: Tensor, scale: float) -> Tensor:
-        """Forward the shared trunk once, then backprop each lm head separately
-        so only one head's (B, L, V) logits is ever materialized for backward --
-        peak activation memory stays flat in the head count instead of holding
-        all heads at once. `scale` folds in gradient accumulation (1/accumulate).
-        Returns the detached per-head losses (unscaled) for logging.
-
-        Assumes bf16/fp32 (no fp16 GradScaler): plain .backward() is used so the
-        two-stage backward composes correctly and the method also works when
-        called outside a Trainer.
-        """
-        n = len(self.model.lmheads)
-        h = self._encode[0](x)  # (B, L, d); graph runs back to the trunk params
-        # Detach the trunk so each head backprops through its own small graph and
-        # frees its logits immediately; the gradients w.r.t. the hidden state
-        # accumulate into h_leaf.grad across heads.
-        h_leaf = h.detach().requires_grad_(True)
-        head_losses = []
-        for k in range(n):
-            loss_k = self._head_loss(h_leaf, x, k)
-            # 1/n: mean over heads (matches _loss). scale: gradient accumulation.
-            (loss_k * (scale / n)).backward()
-            head_losses.append(loss_k.detach())
-        # One backward through the trunk, driven by the head gradients collected
-        # in h_leaf.grad (which already carries the scale/n factor). Equivalent to
-        # backprop of sum_k loss_k*scale/n, but with the heads done sequentially.
-        h.backward(h_leaf.grad)
-        return torch.stack(head_losses)
-
-    def _log_head_losses(self, prefix: str, head_losses: Tensor) -> None:
-        # Per-head breakdown (head 0 is the loss comparable to a single-head
-        # run); skip when there's nothing to break down.
-        if head_losses.numel() > 1:
-            for k, head_loss in enumerate(head_losses):
-                self.log(f"{prefix}_head{k}", head_loss)
+        # Next-token prediction: position i's logits predict token i+1, so
+        # compare the logits against the input shifted left by one.
+        logits = self._forward(x)[:, :-1]
+        targets = x[:, 1:]
+        return F.cross_entropy(
+            rearrange(logits, "b l v -> (b l) v"),
+            rearrange(targets, "b l -> (b l)"),
+            ignore_index=self.pad_idx,
+        )
 
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        head_losses = self._mtp_backward(batch, scale=1.0 / self.accumulate)
-        loss = head_losses.mean()
+        loss = self._loss(batch)
+        (loss / self.accumulate).backward()
         self._optimizer_step(batch_idx)
         self.log("train_loss", loss)
-        self._log_head_losses("train_loss", head_losses)
         self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
         return loss
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        head_losses = self._head_losses(batch)
-        loss = head_losses.mean()
+        loss = self._loss(batch)
         self.log("val_loss", loss, prog_bar=True)
-        self._log_head_losses("val_loss", head_losses)
         if batch_idx <= self.sample_batches:
             # Sanity-check what the model actually generates: prefill the first
             # half of the sequence and let it autoregress the second half, then

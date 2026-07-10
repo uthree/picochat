@@ -49,4 +49,3 @@ We applied several improvements to a decoder-only Transformer, such as GPT.
 - [Flash Attention](https://arxiv.org/abs/2307.08691)
 - [Sliding Widnow Attention](https://arxiv.org/abs/2502.18845)
 - [Mixture of Experts](https://arxiv.org/abs/2101.03961) with [Shared Expert](https://arxiv.org/abs/2401.06066)
-- [Multiple Token Prediction](https://arxiv.org/abs/2404.19737)

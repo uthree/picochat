@@ -544,7 +544,6 @@ class TransformerLM(nn.Module):
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
-        n_lmheads: int = 1,
         tie_embeddings: bool = False,
     ):
         super().__init__()
@@ -553,16 +552,13 @@ class TransformerLM(nn.Module):
         self.tie_embeddings = tie_embeddings
 
         self.embed = nn.Embedding(vocab_size, d_model)
-        self.lmheads = nn.ModuleList(
-            [nn.Linear(d_model, vocab_size, bias=False) for _ in range(n_lmheads)]
-        )
+        self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
         if tie_embeddings:
-            # Share the next-token head's weight with the embedding (the extra
-            # MTP heads, if any, stay untied). Assigning after construction
-            # drops the head's own Parameter and replaces it with the same
-            # tensor object as self.embed.weight, so the two stay in sync
-            # through training/optimization/checkpointing for free.
-            self.lmheads[0].weight = self.embed.weight
+            # Share the lm head's weight with the embedding. Assigning after
+            # construction drops the head's own Parameter and replaces it with
+            # the same tensor object as self.embed.weight, so the two stay in
+            # sync through training/optimization/checkpointing for free.
+            self.lmhead.weight = self.embed.weight
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -596,23 +592,18 @@ class TransformerLM(nn.Module):
 
     def encode(self, x: Tensor) -> Tensor:
         # Shared trunk (embed + transformer) up to the final hidden state, before
-        # the lm heads. Split out so training can backprop each MTP head
-        # separately off one trunk forward (see GPT._mtp_backward).
+        # the lm head.
         return self.transformer(self.embed(x))
 
-    def forward(self, x: Tensor) -> list[Tensor]:
-        h = self.encode(x)
-        return [h_t(h) for h_t in self.lmheads]
+    def forward(self, x: Tensor) -> Tensor:
+        return self.lmhead(self.encode(x))
 
     def decode(
         self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
     ) -> tuple[Tensor, list[Tensor], int]:
         x = self.embed(x)
         x, cache, pos = self.transformer.decode(x, cache, pos)
-        # Autoregressive decoding only consumes the next-token head; the extra
-        # MTP heads are a training-time signal (and a future hook for
-        # self-speculative decoding).
-        return self.lmheads[0](x), cache, pos
+        return self.lmhead(x), cache, pos
 
 
 def estimate_num_params(
@@ -625,7 +616,6 @@ def estimate_num_params(
     n_experts: int | None = None,
     d_expert: int | None = None,
     n_active: int = 2,
-    n_lmheads: int = 1,
     active_only: bool = False,
     tie_embeddings: bool = False,
     **_ignored,
@@ -636,9 +626,9 @@ def estimate_num_params(
     active_only=False (default) counts every parameter (the total). active_only=
     True counts only the parameters that a single token's forward pass touches --
     the "active parameters" headline for a sparse model: the router still runs
-    fully but only n_active of the n_experts experts fire per token, and only the
-    next-token head (lmheads[0]) is used, so the extra MTP heads drop out. The
-    embedding is counted in full in both. (For a dense model the two are equal.)
+    fully but only n_active of the n_experts experts fire per token. The
+    embedding and the lm head are counted in full in both. (For a dense model
+    the two are equal.)
 
     Mirrors the module shapes in this file. RMSNorm/RoPE add no parameters and
     buffers (e.g. MoE expert_bias) are ignored, so this is the trainable
@@ -671,14 +661,8 @@ def estimate_num_params(
         layer_params += n_experts * d_model + 3 * experts * expert_hidden * d_model
 
     embed = vocab_size * d_model
-    # heads are untied by default, one Linear each; only lmheads[0] runs
-    # autoregressively. With tie_embeddings, lmheads[0] shares embed's weight
-    # (already counted in `embed`), so only the extra MTP heads (n_lmheads-1)
-    # add parameters, and active_only (which only touches lmheads[0]) adds none.
-    if tie_embeddings:
-        n_heads_counted = 0 if active_only else max(0, n_lmheads - 1)
-    else:
-        n_heads_counted = 1 if active_only else n_lmheads
-    lmheads = n_heads_counted * vocab_size * d_model
+    # The lm head is one Linear. With tie_embeddings it shares embed's weight
+    # (already counted in `embed`), so it adds nothing; untied it adds its own.
+    lmhead = 0 if tie_embeddings else vocab_size * d_model
     layers = n_layers * layer_params
-    return embed + lmheads + layers
+    return embed + lmhead + layers

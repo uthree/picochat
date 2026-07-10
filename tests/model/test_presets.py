@@ -31,8 +31,7 @@ def test_preset_dims_are_consistent(size):
 def test_build_lm_pico_forward():
     lm = build_lm("pico", vocab_size=50, max_seq_len=64)
     logits = lm(torch.randint(0, 50, (2, 16)))
-    assert len(logits) == 1
-    assert logits[0].shape == (2, 16, 50)
+    assert logits.shape == (2, 16, 50)
 
 
 def test_build_lm_overrides_preset():
@@ -43,12 +42,7 @@ def test_build_lm_overrides_preset():
 def test_build_lm_vocab_override():
     lm = build_lm("pico", vocab_size=123)
     assert lm.embed.num_embeddings == 123
-    assert all(head.out_features == 123 for head in lm.lmheads)
-
-
-def test_build_lm_n_lmheads_override():
-    lm = build_lm("pico", vocab_size=50, n_lmheads=2)
-    assert len(lm.lmheads) == 2
+    assert lm.lmhead.out_features == 123
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +60,8 @@ def _actual_params(lm) -> int:
         dict(
             vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_experts=4, d_expert=16
         ),
-        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_lmheads=3),  # MTP
         dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, d_ffn=128, n_experts=4),
         dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=True),
-        dict(
-            vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_lmheads=3,
-            tie_embeddings=True,
-        ),  # tied + MTP: only lmheads[0] is tied
     ],
 )
 def test_estimate_num_params_matches_actual(cfg):
@@ -81,13 +70,13 @@ def test_estimate_num_params_matches_actual(cfg):
     assert estimate_num_params(**cfg) == _actual_params(lm)
 
 
-def test_estimate_num_params_tie_embeddings_active_only_adds_nothing_extra():
-    # active params only touch lmheads[0]; when tied it's already counted in
-    # the embedding, so tied active count == untied active count minus one head.
-    cfg = dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_lmheads=3)
-    untied_active = estimate_num_params(**cfg, active_only=True)
-    tied_active = estimate_num_params(**cfg, tie_embeddings=True, active_only=True)
-    assert untied_active - tied_active == 50 * 48
+def test_estimate_num_params_tie_embeddings_saves_one_head():
+    # tie_embeddings shares the lm head with the embedding, so the tied count is
+    # exactly one head's worth (vocab * d_model) smaller than the untied count.
+    cfg = dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2)
+    untied = estimate_num_params(**cfg)
+    tied = estimate_num_params(**cfg, tie_embeddings=True)
+    assert untied - tied == 50 * 48
 
 
 def test_estimate_num_params_ignores_extra_kwargs():
@@ -127,7 +116,7 @@ def test_estimate_active_params_equals_total_for_dense():
     assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(**cfg)
 
 
-def test_estimate_active_params_drops_inactive_experts_and_heads():
+def test_estimate_active_params_drops_inactive_experts():
     cfg = dict(
         vocab_size=100,
         d_model=64,
@@ -136,14 +125,12 @@ def test_estimate_active_params_drops_inactive_experts_and_heads():
         n_experts=8,
         d_expert=16,
         n_active=2,
-        n_lmheads=3,
     )
     total = estimate_num_params(**cfg)
     active = estimate_num_params(**cfg, active_only=True)
-    # active drops (n_experts - n_active) experts per layer and the extra MTP heads
+    # active drops (n_experts - n_active) experts per layer
     expert_drop = (8 - 2) * 3 * 16 * 64 * 2
-    head_drop = (3 - 1) * 100 * 64
-    assert active == total - expert_drop - head_drop
+    assert active == total - expert_drop
     assert active < total
 
 

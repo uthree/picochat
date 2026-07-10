@@ -1,9 +1,8 @@
-"""LightningModule scaffolding shared by GPT (pretraining, MTP) and SFTModule
+"""LightningModule scaffolding shared by GPT (pretraining) and SFTModule
 (supervised fine-tuning): Muon/AdamW optimizer wiring, the warmup+cosine LR
 schedule applied by hand under manual optimization, and greedy KV-cache
-generation. Both subclasses differ only in how they compute the loss (MTP's
-multi-head, memory-optimized backward vs. a single next-token cross-entropy),
-so that part stays in each class.
+generation. Both subclasses differ only in how they build the batch into a
+next-token cross-entropy loss, so that part stays in each class.
 """
 
 import math
@@ -101,7 +100,7 @@ class LMTrainerMixin:
             if isinstance(m, nn.Embedding)
             for p in m.parameters()
         }
-        head_ids = {id(p) for head in self.model.lmheads for p in head.parameters()}
+        head_ids = {id(p) for p in self.model.lmhead.parameters()}
         muon, adam_decay, adam_no_decay = [], [], []
         for p in self.model.parameters():
             if not p.requires_grad:

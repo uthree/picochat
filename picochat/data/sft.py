@@ -8,8 +8,8 @@ exactly with turn boundaries -- a message's content is encoded with
 encode_ordinary, so it can never resolve to a special token even if it
 contains text like "<s>". Only assistant turns contribute to the loss: every
 other position's label is set to the tokenizer's `<pad>` id, the same id GPT
-already treats as ignore_index in its cross-entropy loss (see
-GPT._head_loss), so no separate -100 convention is needed. Reasoning traces
+already treats as ignore_index in its cross-entropy loss (see GPT._loss), so
+no separate -100 convention is needed. Reasoning traces
 (<think>...</think>) are just ordinary assistant content -- nothing here
 special-cases them.
 """

@@ -24,7 +24,6 @@ def test_muon_param_split_covers_everything_once():
         n_layers=2,
         n_experts=4,
         d_expert=16,
-        n_lmheads=2,
     )
     gpt = GPT(lm, pad_idx=0)
     muon_group, adam_decay, adam_no_decay = gpt._muon_param_groups()
@@ -38,10 +37,9 @@ def test_muon_param_split_covers_everything_once():
         assert id(w) in muon_ids
     # only matrix-shaped params reach Muon
     assert all(p.ndim >= 2 for p in muon_group["params"])
-    # embedding (no decay) and every lm head (decay) go to the embedded AdamW
+    # embedding (no decay) and the lm head (decay) go to the embedded AdamW
     assert id(lm.embed.weight) in no_decay_ids
-    for head in lm.lmheads:
-        assert id(head.weight) in decay_ids
+    assert id(lm.lmhead.weight) in decay_ids
     # each trainable param lands in exactly one group
     all_ids = {id(p) for p in lm.parameters() if p.requires_grad}
     assert muon_ids | decay_ids | no_decay_ids == all_ids

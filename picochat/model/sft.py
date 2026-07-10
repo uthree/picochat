@@ -1,13 +1,12 @@
 """SFT (supervised fine-tuning) LightningModule.
 
-Kept separate from GPT (pretraining) rather than folded into it: GPT's manual
-optimization is built around MTP's multi-head, memory-optimized two-stage
-backward over a single packed token stream (input == target, shifted
-internally). SFT instead trains one ordinary next-token head against
-pre-computed (input_ids, labels) pairs from picochat.data.sft, where labels
-already carry the loss mask (see picochat.data.sft.encode_conversation) --
-mixing that shape into GPT's MTP-specific plumbing would complicate both.
-Optimizer/LR-schedule/generation code is shared via LMTrainerMixin instead.
+Kept separate from GPT (pretraining) rather than folded into it: GPT trains on
+a single packed token stream (input == target, shifted internally), while SFT
+trains against pre-computed (input_ids, labels) pairs from picochat.data.sft,
+where labels already carry the loss mask (see
+picochat.data.sft.encode_conversation). The two build their loss from different
+batch shapes; optimizer/LR-schedule/generation code is shared via
+LMTrainerMixin instead.
 """
 
 import lightning as L
@@ -65,10 +64,10 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         self._forward = torch.compile(self.model) if self.compile else self.model
 
     def _loss(self, input_ids: Tensor, labels: Tensor) -> Tensor:
-        # Single next-token head (lmheads[0]): position i's logits predict
-        # token i+1, so compare against labels shifted left by one -- labels
-        # is already input-aligned (see picochat.data.sft), not pre-shifted.
-        logits = self._forward(input_ids)[0][:, :-1]
+        # Next-token prediction: position i's logits predict token i+1, so
+        # compare against labels shifted left by one -- labels is already
+        # input-aligned (see picochat.data.sft), not pre-shifted.
+        logits = self._forward(input_ids)[:, :-1]
         targets = labels[:, 1:]
         return F.cross_entropy(
             rearrange(logits, "b l v -> (b l) v"),

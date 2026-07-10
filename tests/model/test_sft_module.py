@@ -10,7 +10,7 @@ PAD_ID = 0
 
 
 def _tiny_lm(**over) -> TransformerLM:
-    cfg = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2, n_lmheads=1)
+    cfg = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     cfg.update(over)
     return TransformerLM(**cfg)
 
@@ -75,7 +75,7 @@ def test_loss_shifts_labels_by_one():
     x = torch.randint(1, 40, (1, 6))
     loss_shifted = module._loss(x, x.clone())
 
-    logits = lm(x)[0][:, :-1]
+    logits = lm(x)[:, :-1]
     targets = x[:, 1:]
     import torch.nn.functional as F
     from einops import rearrange

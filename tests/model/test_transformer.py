@@ -69,16 +69,14 @@ def test_transformer_lm_logits_shape():
     )
     tokens = torch.randint(0, vocab_size, (2, 5))
     logits = lm(tokens)
-    # forward returns one logits tensor per lm head (a single head by default)
-    assert len(logits) == 1
-    assert logits[0].shape == (2, 5, vocab_size)
+    assert logits.shape == (2, 5, vocab_size)
 
 
 def test_transformer_lm_incremental_matches_full():
     vocab_size = 40
     lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2).eval()
     tokens = torch.randint(0, vocab_size, (1, 5))
-    full = lm(tokens)[0]
+    full = lm(tokens)
 
     _, cache, pos = lm.decode(tokens[:, :4])
     step, _, _ = lm.decode(tokens[:, 4:5], cache, pos)
@@ -135,7 +133,8 @@ def _actual_params(lm) -> int:
         dict(vocab_size=50, d_model=32, n_heads=4, n_layers=3),  # dense
         dict(vocab_size=50, d_model=64, n_heads=8, n_layers=3,
              n_experts=4, d_expert=16),  # MoE
-        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_lmheads=3),  # MTP
+        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2,
+             tie_embeddings=True),  # tied embeddings
     ],
 )
 def test_estimate_num_params_matches_actual(cfg):
