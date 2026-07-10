@@ -97,7 +97,9 @@ def load_pretrained(checkpoint: str, vocab_size: int, overrides: dict | None = N
     # trainer scaffolding around it; strip the prefix to load into a bare lm.
     prefix = "model."
     state = {
-        k[len(prefix):]: v for k, v in ckpt["state_dict"].items() if k.startswith(prefix)
+        k[len(prefix) :]: v
+        for k, v in ckpt["state_dict"].items()
+        if k.startswith(prefix)
     }
     lm.load_state_dict(state)
     return lm, model_config
@@ -113,8 +115,12 @@ def main():
         help="pretrained checkpoint to fine-tune (overrides config's init_from)",
     )
     p.add_argument("--accelerator", type=str, default="auto")
-    p.add_argument("--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'")
-    p.add_argument("--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'")
+    p.add_argument(
+        "--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'"
+    )
+    p.add_argument(
+        "--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'"
+    )
     args = p.parse_args()
 
     with open(args.config) as f:

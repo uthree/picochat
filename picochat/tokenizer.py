@@ -20,7 +20,9 @@ PATTERN = (
 # next to the tokenizer they are baked into -- so training, preprocessing and
 # inference all reference one definition and can never drift.
 PAD_TOKEN = "<|pad|>"  # loss ignore-index / packing filler
-BOS_TOKEN = "<|begin_of_text|>"  # start of a document (pretraining) / conversation (SFT)
+BOS_TOKEN = (
+    "<|begin_of_text|>"  # start of a document (pretraining) / conversation (SFT)
+)
 EOS_TOKEN = "<|end_of_text|>"  # end of a document / conversation
 IM_START = "<|im_start|>"  # ChatML: start of a turn (followed by "{role}\n")
 IM_END = "<|im_end|>"  # ChatML: end of a turn (the chat stop token)

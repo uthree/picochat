@@ -50,7 +50,7 @@ def test_moe_bias_identical_with_and_without_checkpoint():
         model = model.train()
         out = model(x)
         out.sum().backward()
-        return [l.moe.expert_bias.clone() for l in model.layers]
+        return [layer.moe.expert_bias.clone() for layer in model.layers]
 
     off = run(copy.deepcopy(base))
     on_model = copy.deepcopy(base)
@@ -90,7 +90,12 @@ def test_moe_decode_matches_full_forward():
     # the (dropping) full forward drops nothing here and matches decode exactly.
     torch.manual_seed(0)
     m = Transformer(
-        d_model=32, n_heads=4, n_layers=3, n_experts=2, d_expert=16, n_active=2,
+        d_model=32,
+        n_heads=4,
+        n_layers=3,
+        n_experts=2,
+        d_expert=16,
+        n_active=2,
         global_attn_ratio=1,
     ).eval()
     x = torch.randn(1, 6, 32)

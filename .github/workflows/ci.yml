@@ -1,0 +1,33 @@
+# Lint with ruff and run the pytest suite on CPU-only torch (the CUDA wheels
+# are multi-GB and nothing in tests/ needs a GPU).
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff check picochat scripts tests
+      - run: uvx ruff format --check picochat scripts tests
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - name: Install with CPU torch
+        run: |
+          uv venv
+          UV_TORCH_BACKEND=cpu uv pip install -e . pytest
+      # --no-sync: syncing would re-resolve from the lock and pull CUDA torch
+      - run: uv run --no-sync pytest -q

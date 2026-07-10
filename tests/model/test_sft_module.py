@@ -70,7 +70,9 @@ def test_loss_shifts_labels_by_one():
     # is input_ids[i+1] after the internal shift, not input_ids[i].
     torch.manual_seed(0)
     lm = _tiny_lm()
-    module = SFTModule(lm, pad_idx=PAD_ID, compile=False).eval()  # fixed (no) dropout masks
+    module = SFTModule(
+        lm, pad_idx=PAD_ID, compile=False
+    ).eval()  # fixed (no) dropout masks
     x = torch.randint(1, 40, (1, 6))
     loss_shifted = module._loss(x, x.clone())
 

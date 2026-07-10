@@ -78,7 +78,11 @@ def eval_dataset(
 
 
 def eval_config(
-    path: Path, limit: int, tokenizer_override: str | None, batch_size: int, num_threads: int
+    path: Path,
+    limit: int,
+    tokenizer_override: str | None,
+    batch_size: int,
+    num_threads: int,
 ) -> None:
     with open(path) as f:
         cfg = yaml.safe_load(f)
@@ -86,10 +90,14 @@ def eval_config(
     enc = load_tokenizer(tokenizer_path)
     specs = [spec_from_entry(e) for e in cfg["data"]]
 
-    print(f"\n=== {path} (tokenizer={tokenizer_path}, vocab={enc.n_vocab}, n={limit}) ===")
+    print(
+        f"\n=== {path} (tokenizer={tokenizer_path}, vocab={enc.n_vocab}, n={limit}) ==="
+    )
     rows = []
     for spec in specs:
-        n_docs, n_bytes, n_tokens = eval_dataset(spec, enc, limit, batch_size, num_threads)
+        n_docs, n_bytes, n_tokens = eval_dataset(
+            spec, enc, limit, batch_size, num_threads
+        )
         label = spec.path + (f"/{spec.name}" if spec.name else "")
         rows.append((label, n_docs, n_bytes, n_tokens))
 
@@ -126,9 +134,14 @@ def main():
         help=f"docs per dataset, from the start (default: {DEFAULT_LIMIT})",
     )
     p.add_argument(
-        "--tokenizer", type=str, default=None, help="override the config's tokenizer path"
+        "--tokenizer",
+        type=str,
+        default=None,
+        help="override the config's tokenizer path",
     )
-    p.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="docs per encode batch")
+    p.add_argument(
+        "--batch-size", type=int, default=BATCH_SIZE, help="docs per encode batch"
+    )
     p.add_argument(
         "--num-threads",
         type=int,

@@ -47,7 +47,9 @@ def test_encode_conversation_masks_non_assistant_turns(tokenizer, pad_id):
         {"role": "user", "content": "what is the capital of France"},
         {"role": "assistant", "content": "the capital of France is Paris"},
     ]
-    input_ids, labels = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
+    input_ids, labels = encode_conversation(
+        messages, tokenizer, max_length=64, pad_id=pad_id
+    )
 
     assert len(input_ids) == len(labels) <= 64
     # every masked-out label is pad_id; every non-pad label matches its input token
@@ -57,8 +59,10 @@ def test_encode_conversation_masks_non_assistant_turns(tokenizer, pad_id):
     assert any(lab != pad_id for lab in labels)
     # the user turn's tokens are all masked: decode the assistant-only labels
     # and check the user text never leaks into the trainable label span
-    trainable = [t for t, l in zip(input_ids, labels) if l != pad_id]
-    assert "France" not in tokenizer.decode(trainable) or "Paris" in tokenizer.decode(trainable)
+    trainable = [t for t, lab in zip(input_ids, labels) if lab != pad_id]
+    assert "France" not in tokenizer.decode(trainable) or "Paris" in tokenizer.decode(
+        trainable
+    )
 
 
 def test_encode_conversation_renders_chatml(tokenizer, pad_id):
@@ -68,7 +72,9 @@ def test_encode_conversation_renders_chatml(tokenizer, pad_id):
         {"role": "user", "content": "hello world"},
         {"role": "assistant", "content": "the quick brown fox"},
     ]
-    input_ids, _ = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
+    input_ids, _ = encode_conversation(
+        messages, tokenizer, max_length=64, pad_id=pad_id
+    )
     assert tokenizer.decode(input_ids) == (
         "<|begin_of_text|>"
         "<|im_start|>user\nhello world<|im_end|>\n"
@@ -82,7 +88,9 @@ def test_encode_conversation_only_assistant_body_is_trainable(tokenizer, pad_id)
         {"role": "user", "content": "hello world"},
         {"role": "assistant", "content": "the quick brown fox"},
     ]
-    input_ids, labels = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
+    input_ids, labels = encode_conversation(
+        messages, tokenizer, max_length=64, pad_id=pad_id
+    )
     im_start = tokenizer.encode_single_token("<|im_start|>")
     im_end = tokenizer.encode_single_token("<|im_end|>")
 
@@ -131,7 +139,9 @@ def test_render_chat_prompt_is_prefix_of_training_encoding(tokenizer, pad_id):
         {"role": "user", "content": "what is the capital of France"},
         {"role": "assistant", "content": "the capital of France is Paris"},
     ]
-    input_ids, labels = encode_conversation(messages, tokenizer, max_length=128, pad_id=pad_id)
+    input_ids, labels = encode_conversation(
+        messages, tokenizer, max_length=128, pad_id=pad_id
+    )
     prompt = render_chat_prompt(messages[:1], tokenizer)
     assert input_ids[: len(prompt)] == prompt
     assert all(label == pad_id for label in labels[: len(prompt)])
@@ -141,7 +151,9 @@ def test_render_chat_prompt_is_prefix_of_training_encoding(tokenizer, pad_id):
 def test_encode_conversation_returns_unpadded_length(tokenizer, pad_id):
     # no padding: packing into fixed-length rows happens in pack_examples
     messages = [{"role": "assistant", "content": "hi"}]
-    input_ids, labels = encode_conversation(messages, tokenizer, max_length=32, pad_id=pad_id)
+    input_ids, labels = encode_conversation(
+        messages, tokenizer, max_length=32, pad_id=pad_id
+    )
     eos = tokenizer.encode_single_token(EOS_TOKEN)
     assert len(input_ids) == len(labels) < 32
     assert input_ids[-1] == eos
@@ -218,7 +230,9 @@ def test_pack_examples_keeps_every_token():
             assert (pad_docs == real.max() + 1).all()
 
 
-def test_encode_conversation_returns_none_when_truncated_before_assistant(tokenizer, pad_id):
+def test_encode_conversation_returns_none_when_truncated_before_assistant(
+    tokenizer, pad_id
+):
     messages = [
         {"role": "user", "content": "the quick brown fox jumps over the lazy dog " * 5},
         {"role": "assistant", "content": "the capital of France is Paris"},
@@ -276,7 +290,10 @@ def test_sft_dataset_packs_conversations_into_fixed_length_rows(tokenizer, pad_i
 def test_sft_dataset_drops_conversations_with_no_trainable_span(tokenizer, pad_id):
     conversations = [
         [
-            {"role": "user", "content": "the quick brown fox jumps over the lazy dog " * 5},
+            {
+                "role": "user",
+                "content": "the quick brown fox jumps over the lazy dog " * 5,
+            },
             {"role": "assistant", "content": "the capital of France is Paris"},
         ],
     ]

@@ -33,7 +33,9 @@ def test_train_dataloader_respects_sample_weights():
     from torch.utils.data import ConcatDataset
 
     ds = ConcatDataset([small, large])
-    dm = PretrainDataModule(ds, None, batch_size=64, num_workers=0, train_group_weights=[1.0, 1.0])
+    dm = PretrainDataModule(
+        ds, None, batch_size=64, num_workers=0, train_group_weights=[1.0, 1.0]
+    )
 
     loader = dm.train_dataloader()
     sampler = loader.sampler

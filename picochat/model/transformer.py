@@ -92,9 +92,7 @@ def _packed_attention_mask(
             device=doc_ids.device,
         )
     idx = torch.arange(doc_ids.shape[-1], device=doc_ids.device)
-    mask = (idx[:, None] >= idx[None, :]) & (
-        doc_ids[:, :, None] == doc_ids[:, None, :]
-    )
+    mask = (idx[:, None] >= idx[None, :]) & (doc_ids[:, :, None] == doc_ids[:, None, :])
     if window_size is not None:
         mask &= idx[None, :] > idx[:, None] - window_size
     return mask[:, None]  # (b, 1, l, l): broadcasts over heads
@@ -184,8 +182,8 @@ class MixtureOfExperts(nn.Module):
         )
 
     def forward(self, x: Tensor, no_drop: bool = False) -> Tensor:
-        b, l, d = x.shape
-        n_tokens = b * l
+        b, t, d = x.shape
+        n_tokens = b * t
         tokens = rms_norm(x).reshape(n_tokens, d)
 
         # Route every token to its top-n_active experts (DeepSeek-V3 style). The
@@ -261,7 +259,7 @@ class MixtureOfExperts(nn.Module):
 
         contrib = expert_out[dest] * (pair_weight.unsqueeze(-1) * keep_f)
         out = tokens.new_zeros(n_tokens, d).index_add(0, pair_token, contrib)
-        return out.reshape(b, l, d)
+        return out.reshape(b, t, d)
 
     @torch.no_grad()
     def apply_bias_update(self) -> None:
