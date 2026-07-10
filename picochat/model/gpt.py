@@ -194,9 +194,15 @@ class GPT(LMTrainerMixin, L.LightningModule):
         self.automatic_optimization = False
         # `compile=None` -> auto (compile iff the environment supports it). The
         # compiled handle shares parameters with self.model, which stays
-        # uncompiled, so state_dict keys stay clean and decode() runs eager.
+        # uncompiled, so decode() runs eager. Stored via object.__setattr__ so
+        # nn.Module.__setattr__ doesn't register it as a submodule: registered,
+        # it would duplicate every weight in state_dict under `_forward.*`
+        # (or `_forward._orig_mod.*` when compiled), making checkpoints
+        # loadable only under the exact same compile setting.
         self.compile = can_compile() if compile is None else compile
-        self._forward = torch.compile(self.model) if self.compile else self.model
+        object.__setattr__(
+            self, "_forward", torch.compile(self.model) if self.compile else self.model
+        )
 
     def _loss(self, x: Tensor) -> Tensor:
         # Next-token prediction: position i's logits predict token i+1, so

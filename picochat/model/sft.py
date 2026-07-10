@@ -60,8 +60,12 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         # Manual optimization: mirrors GPT so the two share the same LR
         # schedule / gradient-accumulation step (see LMTrainerMixin._optimizer_step).
         self.automatic_optimization = False
+        # object.__setattr__: keep the forward handle out of _modules so it
+        # doesn't duplicate weights in state_dict (see GPT.__init__).
         self.compile = can_compile() if compile is None else compile
-        self._forward = torch.compile(self.model) if self.compile else self.model
+        object.__setattr__(
+            self, "_forward", torch.compile(self.model) if self.compile else self.model
+        )
 
     def _loss(
         self, input_ids: Tensor, labels: Tensor, doc_ids: Tensor | None = None

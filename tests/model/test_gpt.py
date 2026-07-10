@@ -184,7 +184,8 @@ def test_gpt_without_bos_idx_passes_no_masks(gpt_module):
         seen["masks"] = masks
         return gpt_module.model(x, doc_ids, masks)
 
-    # bypass nn.Module.__setattr__: _forward is registered as a submodule
+    # object.__setattr__ mirrors how __init__ stores _forward (kept out of
+    # nn.Module's submodule registry, see GPT.__init__)
     object.__setattr__(gpt_module, "_forward", spy)
     gpt_module._loss(torch.randint(1, 40, (2, 6)))
     assert seen["masks"] is None
@@ -204,6 +205,23 @@ def test_gpt_doc_mask_blocks_cross_document_loss_leak():
     perturbed[:, 1:4] = torch.tensor([20, 21, 22])
     out = lm(perturbed, (perturbed == bos).cumsum(-1))
     assert torch.allclose(base[:, 4:], out[:, 4:], atol=1e-5)
+
+
+def test_gpt_state_dict_only_contains_model_weights(gpt_module):
+    # the _forward handle (self.model, or its torch.compile wrapper) must not
+    # be registered as a submodule: it would duplicate every weight under
+    # `_forward.*` / `_forward._orig_mod.*` and tie checkpoints to the
+    # compile setting they were saved with
+    assert all(k.startswith("model.") for k in gpt_module.state_dict())
+
+
+def test_gpt_checkpoint_loads_across_compile_settings():
+    # regression: a GPU-trained (compiled) checkpoint must load into an
+    # uncompiled module -- exactly what scripts/base_chat.py does
+    cfg = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    compiled = GPT(TransformerLM(**cfg), pad_idx=0, compile=True)
+    eager = GPT(TransformerLM(**cfg), pad_idx=0, compile=False)
+    eager.load_state_dict(compiled.state_dict())  # must not raise
 
 
 def test_gpt_trainer_fast_dev_run(gpt_module):
