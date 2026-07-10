@@ -9,13 +9,16 @@ cue) and the reply streams into the log until the model emits `<|im_end|>`
     /reset               clear the conversation (keeps the system prompt)
     /system <text>       set the system prompt and reset the conversation
     /set <key> <value>   temperature, top_k, top_p, max_new_tokens
-    /theme <name>        switch UI theme (ansi-dark/ansi-light use the
-                         terminal's own ANSI palette instead of true color)
+    /theme <name>        switch UI theme (default ansi-dark uses the
+                         terminal's own ANSI palette; others use true color)
     /help                list commands
     /quit                exit (also Ctrl+Q); Esc stops a running generation
 
-    python scripts/base_chat.py --checkpoint weights/sft-stage1/last.ckpt \\
-        --system "You are a helpful assistant." --theme ansi-dark
+Tab (or the right arrow) accepts the inline command completion; the status
+bar shows the sampling settings and how full the model's context window is.
+
+    python scripts/chat.py --checkpoint weights/sft-stage1/last.ckpt \\
+        --system "You are a helpful assistant."
 
 Like base_eval.py, the architecture is rebuilt from the checkpoint's embedded
 model_config. A base (pretrain-only) checkpoint has never seen ChatML turns,
@@ -29,7 +32,9 @@ import torch
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult, InvalidThemeError
+from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.suggester import SuggestFromList
 from textual.theme import BUILTIN_THEMES
 from textual.widgets import Input, Static
 from textual.worker import get_current_worker
@@ -38,13 +43,33 @@ from picochat.data.sft import render_chat_prompt
 from picochat.generate import SamplingConfig, generate
 from picochat.model.gpt import load_gpt_checkpoint
 
+DEFAULT_THEME = "ansi-dark"
+
 HELP = """\
 /reset               clear the conversation (keeps the system prompt)
 /system <text>       set the system prompt and reset the conversation
 /set <key> <value>   temperature, top_k, top_p, max_new_tokens
 /theme <name>        switch UI theme (ansi-dark/ansi-light -> ANSI palette)
 /help                list commands
-/quit                exit (also Ctrl+Q); Esc stops a running generation"""
+/quit                exit (also Ctrl+Q); Esc stops a running generation
+Tab or right arrow accepts the inline command completion"""
+
+# Inline completions for the input: commands plus their common arguments.
+SUGGESTIONS = [
+    "/reset",
+    "/system ",
+    "/help",
+    "/quit",
+    *(f"/set {key} " for key in ("temperature", "top_k", "top_p", "max_new_tokens")),
+    *(f"/theme {name}" for name in BUILTIN_THEMES),
+]
+
+
+class CommandInput(Input):
+    """Input whose Tab key also accepts the inline completion suggestion
+    (stock Input only accepts on the right-arrow key)."""
+
+    BINDINGS = [Binding("tab", "cursor_right", "complete", show=False)]
 
 
 class ChatApp(App):
@@ -72,7 +97,7 @@ class ChatApp(App):
         system: str | None = None,
         banner: str | None = None,
         max_seq_len: int = 4096,
-        theme: str | None = None,
+        theme: str | None = DEFAULT_THEME,
     ):
         super().__init__()
         self.model = model
@@ -90,11 +115,21 @@ class ChatApp(App):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="log")
         yield Static(id="status")
-        yield Input(placeholder="message picochat (/help for commands)")
+        yield CommandInput(
+            placeholder="message picochat (/help for commands)",
+            suggester=SuggestFromList(SUGGESTIONS),
+        )
 
     def on_mount(self) -> None:
-        if self._theme_name:
-            self.theme = self._theme_name
+        try:
+            self.theme = self._theme_name or DEFAULT_THEME
+        except InvalidThemeError:
+            # Don't die over a typo: fall back and show what is available.
+            self.theme = DEFAULT_THEME
+            self._notice(
+                f"unknown theme '{self._theme_name}' -- using {DEFAULT_THEME} "
+                f"(choices: {', '.join(BUILTIN_THEMES)})"
+            )
         if self.banner:
             self._add_widget(Static(Text(self.banner), classes="notice"))
         if self.system:
@@ -103,8 +138,12 @@ class ChatApp(App):
         self.query_one(Input).focus()
 
     def _refresh_status(self) -> None:
+        used = len(self._build_prompt()[0])
+        context = f"context={used}/{self.max_seq_len} ({used / self.max_seq_len:.0%})"
         busy = "  •  generating... (Esc stops)" if self._generating else ""
-        self.query_one("#status", Static).update(self.sampling.describe() + busy)
+        self.query_one("#status", Static).update(
+            f"{self.sampling.describe()}  {context}{busy}"
+        )
 
     def _add_widget(self, widget: Static) -> Static:
         log = self.query_one("#log", VerticalScroll)
@@ -144,6 +183,7 @@ class ChatApp(App):
         if cmd == "/reset":
             self.messages.clear()
             self._notice("conversation cleared")
+            self._refresh_status()
         elif cmd == "/system":
             self.system = arg or None
             self.messages.clear()
@@ -151,6 +191,7 @@ class ChatApp(App):
                 f"system prompt set: {arg}" if arg else "system prompt removed"
             )
             self._notice("conversation cleared")
+            self._refresh_status()
         elif cmd == "/set":
             key, _, raw = arg.partition(" ")
             try:
@@ -273,9 +314,10 @@ def main():
     p.add_argument(
         "--theme",
         type=str,
-        default=None,
-        help="UI theme; ansi-dark/ansi-light render with the terminal's own "
-        f"ANSI palette instead of true color (choices: {', '.join(BUILTIN_THEMES)})",
+        default=DEFAULT_THEME,
+        help="UI theme; the default ansi-dark (and ansi-light) render with "
+        "the terminal's own ANSI palette, the rest use true color "
+        f"(choices: {', '.join(BUILTIN_THEMES)})",
     )
     p.add_argument(
         "--system",
@@ -284,11 +326,6 @@ def main():
         help="optional system prompt, prepended as a ChatML system turn",
     )
     args = p.parse_args()
-
-    if args.theme and args.theme not in BUILTIN_THEMES:
-        raise SystemExit(
-            f"unknown theme '{args.theme}'. choices: {', '.join(BUILTIN_THEMES)}"
-        )
 
     if args.device:
         device = torch.device(args.device)

@@ -56,17 +56,18 @@ uv run scripts/sft_train.py --config configs/sft_train/stage1.yml
 
 ### 6. Chat
 An interactive chat TUI (built on [textual](https://textual.textualize.io/)):
-streaming replies, multi-turn history, and slash commands --
+streaming replies, multi-turn history, Tab-completed slash commands --
 `/reset` (clear the conversation), `/system <text>`,
 `/set temperature|top_k|top_p|max_new_tokens <value>`, `/theme <name>`,
-`/help`, `/quit`; Esc stops a running generation.
+`/help`, `/quit`; Esc stops a running generation. The status bar shows the
+sampling settings and context-window usage.
 ```bash
-uv run scripts/base_chat.py --checkpoint weights/sft-stage1/last.ckpt \
+uv run scripts/chat.py --checkpoint weights/sft-stage1/last.ckpt \
     --system "You are a helpful assistant."
 ```
-The UI renders in true color by default; pass `--theme ansi-dark` (or
-`ansi-light`, or switch live with `/theme`) to use the terminal's own
-16-color ANSI palette instead.
+By default the UI renders with the terminal's own 16-color ANSI palette
+(`ansi-dark`); pass `--theme <name>` or switch live with `/theme` for a
+true-color theme (nord, gruvbox, tokyo-night, ...).
 
 ### 7. Evaluate
 Multiple-choice benchmarks (hellaswag, arc_easy, arc_challenge, openbookqa,

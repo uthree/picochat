@@ -10,7 +10,7 @@ Every answer choice is scored by its completion log-likelihood and the
 prediction is the argmax (see picochat/eval.py for tasks and metrics). The
 same items back both renderings, so acc/acc_norm are comparable before and
 after SFT. Datasets download from the HF hub on first use; --limit N keeps a
-quick smoke run cheap. Like base_chat.py, the architecture is rebuilt from
+quick smoke run cheap. Like chat.py, the architecture is rebuilt from
 the model_config embedded in the checkpoint itself.
 """
 

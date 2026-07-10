@@ -217,7 +217,7 @@ def test_gpt_state_dict_only_contains_model_weights(gpt_module):
 
 def test_gpt_checkpoint_loads_across_compile_settings():
     # regression: a GPU-trained (compiled) checkpoint must load into an
-    # uncompiled module -- exactly what scripts/base_chat.py does
+    # uncompiled module -- exactly what scripts/chat.py does
     cfg = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     compiled = GPT(TransformerLM(**cfg), pad_idx=0, compile=True)
     eager = GPT(TransformerLM(**cfg), pad_idx=0, compile=False)

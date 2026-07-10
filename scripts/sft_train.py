@@ -6,7 +6,7 @@ from a YAML recipe.
 Unlike base_train.py (continual pretraining, optional init_from), SFT always
 fine-tunes an existing pretrained checkpoint: init_from is required, and the
 architecture is rebuilt from that checkpoint's own `model_config`
-hyperparameter (see scripts/base_chat.py for the same pattern). An optional
+hyperparameter (see scripts/chat.py for the same pattern). An optional
 `model:` section in this config can override a couple of fields on top of
 that (see MODEL_OVERRIDES) -- e.g. to extend context length.
 """
@@ -79,7 +79,7 @@ MODEL_OVERRIDES = ("rope_base", "max_seq_len")
 
 def load_pretrained(checkpoint: str, vocab_size: int, overrides: dict | None = None):
     """Rebuild the TransformerLM architecture from a checkpoint's own
-    `model_config` hyperparameter (see scripts/base_chat.py), apply `overrides`
+    `model_config` hyperparameter (see scripts/chat.py), apply `overrides`
     on top, and load the checkpoint's weights. Returns (TransformerLM, model_config).
     """
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)

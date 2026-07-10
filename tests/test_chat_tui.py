@@ -8,7 +8,7 @@ from textual.widgets import Input, Static
 
 from picochat.generate import SamplingConfig
 from picochat.tokenizer import IM_END
-from scripts.base_chat import ChatApp
+from scripts.chat import ChatApp
 from tests.test_generate import ByteTokenizer, ScriptedModel
 
 
@@ -132,12 +132,21 @@ def test_prompt_trimming_drops_oldest_turns():
     asyncio.run(go())
 
 
+def test_theme_defaults_to_ansi_dark():
+    async def go():
+        app = make_app()
+        async with app.run_test():
+            assert app.theme == "ansi-dark"
+
+    asyncio.run(go())
+
+
 def test_theme_flag_and_command():
     async def go():
         # --theme equivalent: applied on mount
-        app = make_app(theme="ansi-dark")
+        app = make_app(theme="nord")
         async with app.run_test() as pilot:
-            assert app.theme == "ansi-dark"
+            assert app.theme == "nord"
             # /theme switches at runtime
             await submit(app, pilot, "/theme ansi-light")
             assert app.theme == "ansi-light"
@@ -146,6 +155,49 @@ def test_theme_flag_and_command():
             assert app.theme == "ansi-light"
             notices = [str(w.content) for w in app.query(".notice").results(Static)]
             assert any("unknown theme" in n for n in notices)
+
+    asyncio.run(go())
+
+
+def test_invalid_theme_flag_falls_back_with_notice():
+    async def go():
+        # --theme with a typo must not abort: fall back to the default and
+        # list what is available
+        app = make_app(theme="not-a-theme")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.theme == "ansi-dark"
+            notices = [str(w.content) for w in app.query(".notice").results(Static)]
+            assert any("unknown theme" in n and "ansi-light" in n for n in notices)
+
+    asyncio.run(go())
+
+
+def test_status_shows_context_usage():
+    async def go():
+        app = make_app(max_seq_len=100)
+        async with app.run_test() as pilot:
+            status = str(app.query_one("#status", Static).content)
+            assert "context=" in status and "/100" in status
+            before = int(status.split("context=")[1].split("/")[0])
+            await submit(app, pilot, "hello")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            status = str(app.query_one("#status", Static).content)
+            after = int(status.split("context=")[1].split("/")[0])
+            assert after > before  # the exchange consumed context window
+
+    asyncio.run(go())
+
+
+def test_tab_accepts_command_completion():
+    async def go():
+        app = make_app()
+        async with app.run_test() as pilot:
+            await pilot.press("/", "r", "e", "s")
+            await pilot.pause(0.1)  # let the suggester deliver its suggestion
+            await pilot.press("tab")
+            assert app.query_one(Input).value == "/reset"
 
     asyncio.run(go())
 

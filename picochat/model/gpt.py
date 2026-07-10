@@ -271,7 +271,7 @@ def load_gpt_checkpoint(
 
     The architecture is rebuilt from the checkpoint's own `model_config`
     hyperparameter (the build_lm() recipe GPT.__init__ saves), so the caller
-    never has to pass matching flags by hand. Used by scripts/base_chat.py
+    never has to pass matching flags by hand. Used by scripts/chat.py
     and scripts/base_eval.py; requires a checkpoint produced by the current
     scripts/base_train.py or sft_train.py."""
     from picochat.tokenizer import load_tokenizer

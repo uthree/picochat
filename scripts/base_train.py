@@ -169,7 +169,7 @@ def main():
     overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
     lm = build_lm(size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
     # Recipe for rebuilding this exact architecture later (see GPT.model_config);
-    # saved into the checkpoint so scripts/base_chat.py doesn't need it
+    # saved into the checkpoint so scripts/chat.py doesn't need it
     # repeated on the command line.
     model_config = dict(
         size=size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides
