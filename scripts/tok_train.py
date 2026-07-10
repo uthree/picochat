@@ -15,9 +15,7 @@ from picochat.data.pretrain import PRESETS, DatasetSpec, Mixture, iter_mixture
 from picochat.tokenizer import train_tokenizer
 
 # Two reserved slots were repurposed for the ChatML turn delimiters, keeping
-# the total (and thus the vocab size) unchanged; an existing tokenizer.json
-# can be migrated in place with scripts/tok_patch_chatml.py instead of
-# retraining.
+# the total (and thus the vocab size) unchanged.
 NUM_RESERVED_SPECIAL_TOKENS = 14
 SPECIAL_TOKENS = [
     "<pad>",  # padding
