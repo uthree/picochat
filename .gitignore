@@ -221,4 +221,6 @@ weights/
 
 # training artifacts
 lightning_logs/
-data/*.bin
+# preprocessed corpora: shard dirs (data/<name>/00000.bin) and SFT tensors
+# (data/sft/*.pt) both live under data/
+data/
