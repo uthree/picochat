@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -84,33 +86,42 @@ def test_transformer_lm_incremental_matches_full():
 
 
 # ---------------------------------------------------------------------------
-# Weight init: every weight ~ normal(0, init_std), uniformly (no depth/residual
-# scaling) so a checkpoint expanded via load_state_dict_expand into a larger
-# config sees statistically identical random init in the untouched region
-# regardless of which layer it lands in.
+# Weight init: GPT-2 style. Every weight ~ normal(0, init_std), then the
+# residual-path output projections (attention proj_o, FFN proj_down) are scaled
+# down by 1/sqrt(2*n_layers) so the residual variance stays constant with depth.
 # ---------------------------------------------------------------------------
-def test_init_uses_configured_std_uniformly():
+def test_init_non_residual_weights_use_init_std():
     torch.manual_seed(0)
-    init_std = 0.01
+    init_std = 0.02
     lm = TransformerLM(
         vocab_size=2000, d_model=64, n_heads=8, n_layers=6, init_std=init_std
     )
-    # A layer-0 residual projection and a layer-5 one must share the same std
-    # -- there's no more 1/sqrt(2*n_layers) depth scaling.
-    proj_o_0 = lm.transformer.layers[0].attn.proj_o.weight
-    proj_o_5 = lm.transformer.layers[5].attn.proj_o.weight
-    proj_down_0 = lm.transformer.layers[0].ffn.proj_down.weight
-    for w in (proj_o_0, proj_o_5, proj_down_0, lm.embed.weight):
+    # the embedding and the q projection are not residual outputs -> plain init_std
+    proj_q_0 = lm.transformer.layers[0].attn.proj_q.weight
+    for w in (proj_q_0, lm.embed.weight):
         assert w.std().item() == pytest.approx(init_std, rel=0.15)
 
 
-def test_init_default_std_is_smaller_than_gpt2_style():
-    # 0.01 (well under GPT-2's canonical 0.02) since checkpoints get expanded
-    # into larger configs via load_state_dict_expand, and a smaller std keeps
-    # the freshly-random region closer in scale to the loaded region.
+def test_init_residual_projections_are_depth_scaled():
+    torch.manual_seed(0)
+    init_std = 0.02
+    n_layers = 6
+    lm = TransformerLM(
+        vocab_size=2000, d_model=64, n_heads=8, n_layers=n_layers, init_std=init_std
+    )
+    scaled = init_std / math.sqrt(2 * n_layers)
+    # proj_o / proj_down write into the residual stream -> scaled-down std,
+    # identically at every depth (the scale is 1/sqrt(2*n_layers), not per-layer).
+    proj_o_0 = lm.transformer.layers[0].attn.proj_o.weight
+    proj_o_5 = lm.transformer.layers[5].attn.proj_o.weight
+    proj_down_0 = lm.transformer.layers[0].ffn.proj_down.weight
+    for w in (proj_o_0, proj_o_5, proj_down_0):
+        assert w.std().item() == pytest.approx(scaled, rel=0.15)
+
+
+def test_init_default_std_is_gpt2_canonical():
     lm = TransformerLM(vocab_size=100, d_model=32, n_heads=4, n_layers=2)
-    assert lm.init_std == pytest.approx(0.01)
-    assert lm.init_std < 0.02
+    assert lm.init_std == pytest.approx(0.02)
 
 
 def test_init_biases_are_zero():
