@@ -165,10 +165,11 @@ class GPT(LMTrainerMixin, L.LightningModule):
         self.save_hyperparameters("model_config")
         self.model = transformer_lm
         self.pad_idx = pad_idx
-        # The packed pretraining stream is <s>doc1</s><s>doc2</s>...; when
-        # bos_idx is set, _loss derives per-token document ids from the <s>
-        # markers so attention never crosses a document boundary
-        # (MosaicBERT-style sequence packing). None -> plain causal attention.
+        # The packed pretraining stream is a run of <|begin_of_text|>doc
+        # <|end_of_text|> documents; when bos_idx is set, _loss derives
+        # per-token document ids from the <|begin_of_text|> markers so
+        # attention never crosses a document boundary (MosaicBERT-style
+        # sequence packing). None -> plain causal attention.
         self.bos_idx = bos_idx
         # During validation, log a generated continuation for batches with
         # batch_idx <= sample_batches (decode is slow, so only the first few).
@@ -209,9 +210,9 @@ class GPT(LMTrainerMixin, L.LightningModule):
         # compare the logits against the input shifted left by one.
         masks = None
         if self.bos_idx is not None:
-            # Every <s> starts a new document, so a running count of them
+            # Every <|begin_of_text|> starts a new document, so a running count of them
             # numbers the documents packed into this window; tokens before the
-            # first <s> (a document cut mid-way by the window) form doc 0.
+            # first <|begin_of_text|> (a document cut mid-way by the window) form doc 0.
             # The attention masks are built here, outside the compiled
             # forward, and passed in as inputs -- see Transformer.packed_masks.
             doc_ids = (x == self.bos_idx).cumsum(-1)

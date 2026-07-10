@@ -11,7 +11,13 @@ from picochat.data.sft import (
     render_chat_prompt,
     resolve_spec,
 )
-from picochat.tokenizer import load_tokenizer, train_tokenizer
+from picochat.tokenizer import (
+    EOS_TOKEN,
+    PAD_TOKEN,
+    SPECIAL_TOKENS,
+    load_tokenizer,
+    train_tokenizer,
+)
 
 CORPUS = [
     "hello world",
@@ -20,16 +26,6 @@ CORPUS = [
     "the capital of France is Paris",
     "let me think about this",
 ] * 25
-
-SPECIAL_TOKENS = [
-    "<pad>",
-    "<s>",
-    "</s>",
-    "<think>",
-    "</think>",
-    "<|im_start|>",
-    "<|im_end|>",
-]
 
 
 @pytest.fixture
@@ -43,7 +39,7 @@ def tokenizer(tmp_path):
 
 @pytest.fixture
 def pad_id(tokenizer):
-    return tokenizer.encode_single_token("<pad>")
+    return tokenizer.encode_single_token(PAD_TOKEN)
 
 
 def test_encode_conversation_masks_non_assistant_turns(tokenizer, pad_id):
@@ -74,10 +70,10 @@ def test_encode_conversation_renders_chatml(tokenizer, pad_id):
     ]
     input_ids, _ = encode_conversation(messages, tokenizer, max_length=64, pad_id=pad_id)
     assert tokenizer.decode(input_ids) == (
-        "<s>"
+        "<|begin_of_text|>"
         "<|im_start|>user\nhello world<|im_end|>\n"
         "<|im_start|>assistant\nthe quick brown fox<|im_end|>\n"
-        "</s>"
+        "<|end_of_text|>"
     )
 
 
@@ -120,7 +116,7 @@ def test_render_chat_prompt_ends_with_assistant_cue(tokenizer):
         {"role": "user", "content": "hello world"},
     ]
     assert tokenizer.decode(render_chat_prompt(messages, tokenizer)) == (
-        "<s>"
+        "<|begin_of_text|>"
         "<|im_start|>system\nthe capital of France is Paris<|im_end|>\n"
         "<|im_start|>user\nhello world<|im_end|>\n"
         "<|im_start|>assistant\n"
@@ -146,7 +142,7 @@ def test_encode_conversation_returns_unpadded_length(tokenizer, pad_id):
     # no padding: packing into fixed-length rows happens in pack_examples
     messages = [{"role": "assistant", "content": "hi"}]
     input_ids, labels = encode_conversation(messages, tokenizer, max_length=32, pad_id=pad_id)
-    eos = tokenizer.encode_single_token("</s>")
+    eos = tokenizer.encode_single_token(EOS_TOKEN)
     assert len(input_ids) == len(labels) < 32
     assert input_ids[-1] == eos
 

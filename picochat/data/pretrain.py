@@ -9,9 +9,10 @@ padding, split across fixed-size shard files (00000.bin, 00001.bin, ...) in
 one directory so no single file grows with the corpus. Slicing a block_size+1
 window and returning it lets GPT._loss shift by one internally to compute the
 next-token prediction loss (sequence length block_size+1 -> effective context
-block_size). A window usually spans several <s>-delimited documents; GPT._loss
-derives per-token document ids from the <s> markers so attention never crosses
-a document boundary (sequence packing, see Transformer.forward).
+block_size). A window usually spans several documents delimited by
+<|begin_of_text|>; GPT._loss derives per-token document ids from those markers
+so attention never crosses a document boundary (sequence packing, see
+Transformer.forward).
 """
 
 from dataclasses import dataclass, field

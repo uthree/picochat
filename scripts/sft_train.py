@@ -24,7 +24,7 @@ from picochat.data.pretrain import PretrainDataModule
 from picochat.data.sft import SFTTensorDataset
 from picochat.model.gpt import build_lm
 from picochat.model.sft import SFTModule
-from picochat.tokenizer import load_tokenizer
+from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
 
 def resolve_num_devices(devices: str) -> int:
@@ -132,7 +132,7 @@ def main():
 
     tokenizer = load_tokenizer(tokenizer_path)
     vocab_size = tokenizer.n_vocab
-    pad_idx = tokenizer.encode_single_token("<pad>")
+    pad_idx = tokenizer.encode_single_token(PAD_TOKEN)
 
     # --- data ---
     batch_size = trainer_cfg.get("batch_size", 2)

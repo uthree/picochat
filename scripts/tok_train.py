@@ -12,23 +12,7 @@ from pathlib import Path
 import yaml
 
 from picochat.data.pretrain import PRESETS, DatasetSpec, Mixture, iter_mixture
-from picochat.tokenizer import train_tokenizer
-
-# Two reserved slots were repurposed for the ChatML turn delimiters, keeping
-# the total (and thus the vocab size) unchanged.
-NUM_RESERVED_SPECIAL_TOKENS = 14
-SPECIAL_TOKENS = [
-    "<pad>",  # padding
-    "<mask>",  # mask (not used in causal language model)
-    "<unk>",  # unknown word (Not used with the BPE tokenizer.)
-    "<sep>",  # separator for multiple sentences.
-    "<think>",  # start thinking (for Chain of Tought)
-    "</think>",  # Stop thinking
-    "<s>",  # start of a document (pretraining) / conversation (SFT)
-    "</s>",  # end of a document / conversation
-    "<|im_start|>",  # ChatML: start of a turn (followed by "{role}\n")
-    "<|im_end|>",  # ChatML: end of a turn (the chat stop token)
-] + [f"<reserved_token_{n}>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
+from picochat.tokenizer import SPECIAL_TOKENS, train_tokenizer
 
 
 def spec_from_entry(entry: dict) -> DatasetSpec:

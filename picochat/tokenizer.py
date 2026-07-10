@@ -16,6 +16,30 @@ PATTERN = (
     r"|\s+"  # whitespace
 )
 
+# Special tokens, ChatML-style `<|...|>` notation throughout. Defined here --
+# next to the tokenizer they are baked into -- so training, preprocessing and
+# inference all reference one definition and can never drift.
+PAD_TOKEN = "<|pad|>"  # loss ignore-index / packing filler
+BOS_TOKEN = "<|begin_of_text|>"  # start of a document (pretraining) / conversation (SFT)
+EOS_TOKEN = "<|end_of_text|>"  # end of a document / conversation
+IM_START = "<|im_start|>"  # ChatML: start of a turn (followed by "{role}\n")
+IM_END = "<|im_end|>"  # ChatML: end of a turn (the chat stop token)
+
+NUM_RESERVED_SPECIAL_TOKENS = 17
+SPECIAL_TOKENS = [
+    PAD_TOKEN,
+    BOS_TOKEN,
+    EOS_TOKEN,
+    IM_START,
+    IM_END,
+    # Reasoning-trace delimiters, deliberately NOT pipe-style: `<think>` is
+    # the de-facto spelling of Qwen3 / DeepSeek-R1. Unused by the current
+    # code (assistant content is encoded with encode_ordinary), reserved for
+    # reasoning training.
+    "<think>",
+    "</think>",
+] + [f"<|reserved_token_{n}|>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
+
 
 def save_tokenizer(enc: tiktoken.Encoding, path: os.PathLike):
     data = {

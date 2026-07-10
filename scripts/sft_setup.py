@@ -2,7 +2,7 @@
 tensors ready for picochat.data.sft.SFTTensorDataset.
 
 Every conversation is tokenized via picochat.data.sft.encode_conversation
-(ChatML rendering, <pad>-based loss masking -- see that module), and
+(ChatML rendering, <|pad|>-based loss masking -- see that module), and
 the surviving conversations are packed several-per-sequence into fixed-length
 rows (MosaicBERT-style sequence packing, picochat.data.sft.pack_examples)
 saved as a single {input_ids, labels, doc_ids, pad_id} tensor bundle in one
@@ -35,7 +35,7 @@ from picochat.data.sft import (
     pack_examples,
     resolve_spec,
 )
-from picochat.tokenizer import load_tokenizer
+from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
 # Used by the ad-hoc single-dataset mode; config mode reads the path from the
 # recipe's `tokenizer:` field instead.
@@ -45,7 +45,7 @@ DEFAULT_MAX_LENGTH = 2048
 
 def load_enc_and_pad_id(tokenizer_path: str):
     enc = load_tokenizer(tokenizer_path)
-    return enc, enc.encode_single_token("<pad>")
+    return enc, enc.encode_single_token(PAD_TOKEN)
 
 
 def spec_from_entry(entry: dict) -> ChatDatasetSpec:

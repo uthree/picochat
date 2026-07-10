@@ -23,7 +23,7 @@ from torch.utils.data import ConcatDataset
 
 from picochat.data.pretrain import PackedDataset, PretrainDataModule
 from picochat.model.gpt import GPT, build_lm
-from picochat.tokenizer import load_tokenizer
+from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
 MODEL_OVERRIDES = (
@@ -121,8 +121,8 @@ def main():
 
     tokenizer = load_tokenizer(tokenizer_path)
     vocab_size = tokenizer.n_vocab
-    pad_idx = tokenizer.encode_single_token("<pad>")
-    bos_idx = tokenizer.encode_single_token("<s>")
+    pad_idx = tokenizer.encode_single_token(PAD_TOKEN)
+    bos_idx = tokenizer.encode_single_token(BOS_TOKEN)
 
     # --- data ---
     block_size = data_cfg.get("block_size", 1024)
@@ -191,8 +191,8 @@ def main():
     gpt = GPT(
         lm,
         pad_idx=pad_idx,
-        # Derive per-token document ids from <s> so attention never crosses
-        # document boundaries within a packed window (see GPT._loss).
+        # Derive per-token document ids from <|begin_of_text|> so attention
+        # never crosses document boundaries in a packed window (see GPT._loss).
         bos_idx=bos_idx,
         lr=lr,
         weight_decay=optim_cfg.get("weight_decay", 0.1),

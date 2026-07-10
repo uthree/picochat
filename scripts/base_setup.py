@@ -1,10 +1,10 @@
 """Tokenize HF datasets and convert them into packed, sharded token binaries.
 
-Each document is encoded and wrapped in <s> ... </s>, and everything is
-concatenated into a single continuous token stream split across fixed-size
+Each document is encoded and wrapped in <|begin_of_text|>...<|end_of_text|>,
+and everything is concatenated into a continuous token stream split across
 shard files (00000.bin, 00001.bin, ...) under one output directory per
 dataset, so no single file grows with the corpus:
-<s>doc1</s><s>doc2</s><s>doc3</s>...<s>docN</s>
+<|begin_of_text|>doc1<|end_of_text|><|begin_of_text|>doc2<|end_of_text|>...
 Only one encode batch is ever held in memory. No padding is added; the
 training side (PackedDataset) slices a block_size+1 window at read time.
 Tokens are stored as uint32 (DTYPE), which fits vocab up to ~4.29B.
@@ -40,10 +40,8 @@ from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
     iter_texts,
     resolve_spec,
 )
-from picochat.tokenizer import load_tokenizer
+from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, load_tokenizer
 
-BOS_TOKEN = "<s>"
-EOS_TOKEN = "</s>"
 # Used by the ad-hoc single-dataset mode; config mode reads the path from the
 # recipe's `tokenizer:` field instead.
 DEFAULT_TOKENIZER = "weights/tokenizer.json"

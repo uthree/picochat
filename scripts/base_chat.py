@@ -4,7 +4,7 @@ Loads a model + tokenizer from a checkpoint, then runs a multi-turn ChatML
 conversation: each stdin line becomes a user turn, the full history is
 rendered via picochat.data.sft.render_chat_prompt (ending in the
 `<|im_start|>assistant\\n` cue) and the reply streams to stdout until the
-model emits `<|im_end|>` (or `</s>`/the token budget). Pass --system to
+model emits `<|im_end|>` (or `<|end_of_text|>`/the token budget). Pass --system to
 prepend a system turn; --no-history makes every exchange independent.
 
     python scripts/base_chat.py --checkpoint weights/sft/last.ckpt \\
@@ -25,9 +25,9 @@ from typing import Iterator
 import torch
 from tiktoken import Encoding
 
-from picochat.data.sft import IM_END, render_chat_prompt
+from picochat.data.sft import render_chat_prompt
 from picochat.model.gpt import GPT, build_lm
-from picochat.tokenizer import load_tokenizer
+from picochat.tokenizer import EOS_TOKEN, IM_END, load_tokenizer
 
 
 def load_model(
@@ -80,12 +80,12 @@ def generate(
     temperature: float,
     top_k: int | None,
 ) -> Iterator[int]:
-    # <|im_end|> ends the assistant turn (the ChatML stop token); </s> ends
-    # the whole document -- a well-trained SFT model emits the former, but
-    # stop on either.
+    # <|im_end|> ends the assistant turn (the ChatML stop token);
+    # <|end_of_text|> ends the whole document -- a well-trained SFT model
+    # emits the former, but stop on either.
     stop_ids = {
         tokenizer.encode_single_token(IM_END),
-        tokenizer.encode_single_token("</s>"),
+        tokenizer.encode_single_token(EOS_TOKEN),
     }
 
     x = torch.tensor([prompt_ids], dtype=torch.long, device=device)

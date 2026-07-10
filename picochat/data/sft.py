@@ -5,10 +5,11 @@ tensors for SFT training.
 Conversations are rendered in ChatML, the de-facto standard chat format of
 modern open-weight models (Qwen, SmolLM, ...):
 
-    <s><|im_start|>{role}\\n{content}<|im_end|>\\n ... </s>
+    <|begin_of_text|><|im_start|>{role}\\n{content}<|im_end|>\\n ... <|end_of_text|>
 
-`<s>`/`</s>` stay document-level delimiters, exactly as in the pretraining
-corpus (one per conversation, not per turn), while `<|im_start|>`/`<|im_end|>`
+`<|begin_of_text|>`/`<|end_of_text|>` stay document-level delimiters, exactly
+as in the pretraining corpus (one per conversation, not per turn), while
+`<|im_start|>`/`<|im_end|>`
 delimit turns; `<|im_end|>` is the chat stop token at inference. Turns are
 tokenized turn-by-turn (not as one joined string) so token spans line up
 exactly with turn boundaries -- role and content are encoded with
@@ -16,7 +17,7 @@ encode_ordinary, so they can never resolve to a special token even if they
 contain text like "<|im_end|>". Only assistant turns contribute to the loss,
 and within them only the content plus the closing `<|im_end|>` (the model
 must learn to emit it to stop): every other position's label is set to the
-tokenizer's `<pad>` id, the same id the loss already treats as ignore_index
+tokenizer's `<|pad|>` id, the same id the loss already treats as ignore_index
 (see SFTModule._loss), so no separate -100 convention is needed. Reasoning
 traces (<think>...</think>) are just ordinary assistant content -- nothing
 here special-cases them.
@@ -37,6 +38,8 @@ import torch
 from datasets import load_dataset
 from torch import Tensor
 from torch.utils.data import Dataset
+
+from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, IM_END, IM_START
 
 
 @dataclass
@@ -87,12 +90,6 @@ def resolve_spec(preset: str | None, dataset: str | None) -> ChatDatasetSpec:
     raise SystemExit("either --preset or --dataset is required")
 
 
-# ChatML turn delimiters (see the module docstring). Kept in one place so the
-# training encoder below and the inference prompt builder can never drift.
-IM_START = "<|im_start|>"
-IM_END = "<|im_end|>"
-
-
 def render_turn(
     role: str, content: str, tokenizer: tiktoken.Encoding
 ) -> tuple[list[int], list[int], list[int]]:
@@ -113,12 +110,13 @@ def render_chat_prompt(
     messages: list[dict],
     tokenizer: tiktoken.Encoding,
 ) -> list[int]:
-    """Token ids of a conversation prompt ready for generation: `<s>`, every
-    turn so far, then the bare assistant header `<|im_start|>assistant\\n` to
+    """Token ids of a conversation prompt ready for generation:
+    `<|begin_of_text|>`, every turn so far, then the bare assistant header
+    `<|im_start|>assistant\\n` to
     cue the reply. The model continues with the assistant body and stops at
     `<|im_end|>` -- the exact spans encode_conversation trains. An optional
     system prompt is just a leading {"role": "system", ...} message."""
-    ids = [tokenizer.encode_single_token("<s>")]
+    ids = [tokenizer.encode_single_token(BOS_TOKEN)]
     for msg in messages:
         header, body, tail = render_turn(msg["role"], msg["content"], tokenizer)
         ids.extend(header + body + tail)
@@ -139,13 +137,14 @@ def encode_conversation(
 
     Only assistant turn *bodies* (content + `<|im_end|>`) are trainable; turn
     headers (`<|im_start|>{role}\\n`), the inter-turn newline and the
-    document-level `<s>`/`</s>` get `pad_id` labels -- at inference the header
-    is part of the generation prompt and decoding stops at `<|im_end|>`, so
+    document-level `<|begin_of_text|>`/`<|end_of_text|>` get `pad_id` labels
+    -- at inference the header is part of the generation prompt and decoding
+    stops at `<|im_end|>`, so
     none of them are the model's to produce. Returns None if truncation left
     no assistant turn to train on.
     """
-    bos = tokenizer.encode_single_token("<s>")
-    eos = tokenizer.encode_single_token("</s>")
+    bos = tokenizer.encode_single_token(BOS_TOKEN)
+    eos = tokenizer.encode_single_token(EOS_TOKEN)
     input_ids: list[int] = [bos]
     labels: list[int] = [pad_id]
     for msg in messages:
