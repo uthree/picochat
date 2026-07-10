@@ -22,7 +22,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
 from picochat.data.pretrain import PackedDataset, PretrainDataModule
-from picochat.model.gpt import GPT, build_lm, load_state_dict_expand
+from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
@@ -104,16 +104,6 @@ def main():
         default=None,
         help="checkpoint to warm-start from (overrides config's init_from)",
     )
-    p.add_argument(
-        "--init-expand",
-        action="store_true",
-        help=(
-            "when init_from's model is smaller than the configured size, "
-            "expand its weights into the larger tensors (low-index corner) "
-            "instead of requiring an exact shape match (also settable via "
-            "config's init_expand)"
-        ),
-    )
     p.add_argument("--accelerator", type=str, default="auto")
     p.add_argument("--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'")
     p.add_argument("--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'")
@@ -129,7 +119,6 @@ def main():
     tokenizer_path = cfg.get("tokenizer", "weights/tokenizer.json")
     output_dir = cfg.get("output_dir", "weights")
     init_from = args.init_from or cfg.get("init_from")
-    init_expand = args.init_expand or cfg.get("init_expand", False)
 
     tokenizer = load_tokenizer(tokenizer_path)
     vocab_size = tokenizer.n_vocab
@@ -141,8 +130,8 @@ def main():
     # in a later stage's config to extend context length via continual learning
     # (init_from): RoPE's sin/cos tables are non-persistent buffers rebuilt from
     # these at construction time, not part of the checkpoint, so changing them
-    # doesn't affect any learned tensor's shape and init_from's plain
-    # load_state_dict (no init_expand needed) still applies cleanly.
+    # doesn't affect any learned tensor's shape and init_from's load_state_dict
+    # still applies cleanly.
     max_seq_len = model_cfg.pop("max_seq_len", 4096)
     assert block_size < max_seq_len, "block_size+1 <= max_seq_len required"
     batch_size = trainer_cfg.get("batch_size", 2)
@@ -234,17 +223,8 @@ def main():
         if init_from:
             ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
             state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-            if init_expand:
-                stats = load_state_dict_expand(gpt, state)
-                print(
-                    f"warm-started weights from {init_from} (expand mode: "
-                    f"{stats['matched']} matched, {stats['expanded']} expanded, "
-                    f"{stats['skipped']} left at random init)",
-                    flush=True,
-                )
-            else:
-                gpt.load_state_dict(state)
-                print(f"warm-started weights from {init_from}", flush=True)
+            gpt.load_state_dict(state)
+            print(f"warm-started weights from {init_from}", flush=True)
 
     val_check_interval = trainer_cfg.get("val_check_interval", 500)
     ckpt_cb = ModelCheckpoint(

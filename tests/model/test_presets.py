@@ -1,4 +1,3 @@
-import torch.nn as nn
 import pytest
 import torch
 
@@ -8,7 +7,6 @@ from picochat.model.gpt import (
     build_lm,
     estimate_num_params,
     estimate_preset_params,
-    load_state_dict_expand,
 )
 
 
@@ -141,70 +139,3 @@ def test_estimate_preset_active_params_smaller_than_total():
         if "n_experts" in MODEL_PRESETS[size]:
             # every preset is a MoE model, so active is a strict subset
             assert 0 < active < total
-
-
-# ---------------------------------------------------------------------------
-# load_state_dict_expand
-# ---------------------------------------------------------------------------
-def test_expand_load_matrix_copies_top_left_and_keeps_rest_random():
-    small = nn.Linear(4, 3, bias=False)
-    big = nn.Linear(6, 5, bias=False)
-    torch.manual_seed(0)
-    with torch.no_grad():
-        small.weight.copy_(torch.arange(12, dtype=torch.float32).reshape(3, 4))
-        big.weight.copy_(torch.full((5, 6), -1.0))  # sentinel "random init"
-
-    stats = load_state_dict_expand(big, small.state_dict())
-
-    assert stats == {"matched": 0, "expanded": 1, "skipped": 0}
-    # top-left block came from the checkpoint
-    assert torch.equal(big.weight[:3, :4], small.weight)
-    # everything outside the top-left block is untouched (still the sentinel)
-    assert torch.all(big.weight[3:, :] == -1.0)
-    assert torch.all(big.weight[:, 4:] == -1.0)
-
-
-def test_expand_load_missing_key_left_at_random_init():
-    src = nn.Sequential(nn.Linear(2, 2, bias=False))
-    dst = nn.Sequential(nn.Linear(2, 2, bias=False), nn.Linear(2, 2, bias=False))
-    with torch.no_grad():
-        dst[1].weight.fill_(-1.0)
-
-    stats = load_state_dict_expand(dst, src.state_dict())
-
-    assert stats["skipped"] == 1  # "1.weight" has no counterpart in src
-    assert torch.all(dst[1].weight == -1.0)  # untouched
-
-
-def test_expand_load_same_shape_matches_exactly():
-    lm_small = build_lm("pico", vocab_size=32, max_seq_len=64, d_model=16, n_layers=1, n_heads=2, n_kv_heads=1)
-    lm_other = build_lm("pico", vocab_size=32, max_seq_len=64, d_model=16, n_layers=1, n_heads=2, n_kv_heads=1)
-
-    stats = load_state_dict_expand(lm_other, lm_small.state_dict())
-
-    assert stats["skipped"] == 0
-    assert stats["expanded"] == 0
-    assert stats["matched"] > 0
-    for (k1, v1), (k2, v2) in zip(
-        lm_small.state_dict().items(), lm_other.state_dict().items()
-    ):
-        assert k1 == k2
-        assert torch.equal(v1, v2)
-
-
-def test_expand_load_grows_transformer_lm_d_model():
-    torch.manual_seed(0)
-    small = build_lm(
-        "pico", vocab_size=32, max_seq_len=64, d_model=16, n_layers=1, n_heads=2, n_kv_heads=1
-    )
-    big = build_lm(
-        "pico", vocab_size=32, max_seq_len=64, d_model=32, n_layers=1, n_heads=4, n_kv_heads=1
-    )
-
-    stats = load_state_dict_expand(big, small.state_dict())
-
-    assert stats["expanded"] > 0
-    # the embedding's low-index corner was copied from the small checkpoint
-    assert torch.equal(
-        big.embed.weight[:, :16], small.embed.weight
-    )
