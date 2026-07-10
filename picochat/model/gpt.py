@@ -1,4 +1,5 @@
 import lightning as L
+import tiktoken
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -34,6 +35,7 @@ __all__ = [
     "can_compile",
     "estimate_preset_params",
     "GPT",
+    "load_gpt_checkpoint",
 ]
 
 
@@ -260,3 +262,38 @@ class GPT(LMTrainerMixin, L.LightningModule):
             f"**reference**\n\n{self._decode_text(reference)}"
         )
         writer.add_text(f"val_sample/{batch_idx}", text, self.global_step)
+
+
+def load_gpt_checkpoint(
+    checkpoint: str, tokenizer_path: str, device: torch.device | str = "cpu"
+) -> tuple[GPT, tiktoken.Encoding]:
+    """Load a GPT + tokenizer for inference from a Lightning checkpoint.
+
+    The architecture is rebuilt from the checkpoint's own `model_config`
+    hyperparameter (the build_lm() recipe GPT.__init__ saves), so the caller
+    never has to pass matching flags by hand. Used by scripts/base_chat.py
+    and scripts/base_eval.py; requires a checkpoint produced by the current
+    scripts/base_train.py or sft_train.py."""
+    from picochat.tokenizer import load_tokenizer
+
+    tokenizer = load_tokenizer(tokenizer_path)
+
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
+        raise ValueError(f"{checkpoint} doesn't look like a Lightning checkpoint")
+    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
+    if model_config is None:
+        raise ValueError(
+            f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
+            "GPT.__init__ saving it, so its architecture can't be rebuilt. "
+            "Retrain to produce a checkpoint with model_config."
+        )
+
+    print(f"using model_config from checkpoint: {model_config}", flush=True)
+    lm = build_lm(**{**model_config, "vocab_size": tokenizer.n_vocab})
+
+    gpt = GPT(lm, compile=False, tokenizer=tokenizer, model_config=model_config)
+    gpt.load_state_dict(ckpt["state_dict"])
+    gpt.eval()
+    gpt.to(device)
+    return gpt, tokenizer

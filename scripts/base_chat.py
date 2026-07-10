@@ -26,34 +26,8 @@ import torch
 from tiktoken import Encoding
 
 from picochat.data.sft import render_chat_prompt
-from picochat.model.gpt import GPT, build_lm
-from picochat.tokenizer import EOS_TOKEN, IM_END, load_tokenizer
-
-
-def load_model(
-    checkpoint: str, tokenizer_path: str, device: torch.device
-) -> tuple[GPT, Encoding]:
-    tokenizer = load_tokenizer(tokenizer_path)
-
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
-        raise ValueError(f"{checkpoint} doesn't look like a Lightning checkpoint")
-    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
-    if model_config is None:
-        raise ValueError(
-            f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
-            "GPT.__init__ saving it, so its architecture can't be rebuilt. "
-            "Retrain to produce a checkpoint with model_config."
-        )
-
-    print(f"using model_config from checkpoint: {model_config}", flush=True)
-    lm = build_lm(**{**model_config, "vocab_size": tokenizer.n_vocab})
-
-    gpt = GPT(lm, compile=False, tokenizer=tokenizer)
-    gpt.load_state_dict(ckpt["state_dict"])
-    gpt.eval()
-    gpt.to(device)
-    return gpt, tokenizer
+from picochat.model.gpt import GPT, load_gpt_checkpoint
+from picochat.tokenizer import EOS_TOKEN, IM_END
 
 
 def _sample(
@@ -134,7 +108,7 @@ def main():
         device = torch.device("cpu")
 
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
-    gpt, tokenizer = load_model(args.checkpoint, args.tokenizer, device)
+    gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device)
     print("", flush=True)
     with open("assets/logo_ascii.txt") as f:  # show ascii art logo
         print(f.read())
