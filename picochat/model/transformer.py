@@ -64,8 +64,8 @@ class SwiGLU(nn.Module):
         self.p_dropout = p_dropout
         if d_hidden is None:
             d_hidden = d_model * 3
-        self.proj_up = nn.Linear(d_model, d_hidden)
-        self.proj_gate = nn.Linear(d_model, d_hidden)
+        self.proj_up = nn.Linear(d_model, d_hidden, bias=False)
+        self.proj_gate = nn.Linear(d_model, d_hidden, bias=False)
         self.proj_down = nn.Linear(d_hidden, d_model, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -657,8 +657,8 @@ def estimate_num_params(
     # Attention: q/o are square (d_head*n_heads == d_model), k/v project to
     # kv_dim. All bias-free.
     attn = 2 * d_model * d_model + 2 * d_model * kv_dim
-    # SwiGLU: up/gate carry a bias, down is bias-free.
-    ffn = 3 * d_model * ffn_hidden + 2 * ffn_hidden
+    # SwiGLU: up/gate/down, all bias-free.
+    ffn = 3 * d_model * ffn_hidden
     layer_params = attn + ffn
     if n_experts is not None:
         # router (always fully active) + per-expert up/gate/down; only n_active

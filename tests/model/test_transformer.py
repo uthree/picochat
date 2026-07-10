@@ -124,11 +124,11 @@ def test_init_default_std_is_gpt2_canonical():
     assert lm.init_std == pytest.approx(0.02)
 
 
-def test_init_biases_are_zero():
+def test_all_linears_are_bias_free():
     lm = TransformerLM(vocab_size=100, d_model=32, n_heads=4, n_layers=2)
-    for m in lm.modules():
-        if isinstance(m, torch.nn.Linear) and m.bias is not None:
-            assert torch.all(m.bias == 0)
+    linears = [m for m in lm.modules() if isinstance(m, torch.nn.Linear)]
+    assert linears  # sanity: there are Linear layers
+    assert all(m.bias is None for m in linears)
 
 
 # ---------------------------------------------------------------------------
