@@ -59,7 +59,7 @@ def _actual_params(lm) -> int:
             vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_experts=4, d_expert=16
         ),
         dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, d_ffn=128, n_experts=4),
-        dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2, tie_embeddings=True),
+        dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2, d_ffn=96),  # d_ffn set
     ],
 )
 def test_estimate_num_params_matches_actual(cfg):
@@ -68,13 +68,13 @@ def test_estimate_num_params_matches_actual(cfg):
     assert estimate_num_params(**cfg) == _actual_params(lm)
 
 
-def test_estimate_num_params_tie_embeddings_saves_one_head():
-    # tie_embeddings shares the lm head with the embedding, so the tied count is
-    # exactly one head's worth (vocab * d_model) smaller than the untied count.
+def test_estimate_num_params_counts_untied_head():
+    # the lm head is a separate (untied) projection, so it and the embedding
+    # each contribute vocab * d_model.
     cfg = dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2)
-    untied = estimate_num_params(**cfg)
-    tied = estimate_num_params(**cfg, tie_embeddings=True)
-    assert untied - tied == 50 * 48
+    lm = TransformerLM(**cfg)
+    assert lm.lmhead.weight is not lm.embed.weight
+    assert estimate_num_params(**cfg) == _actual_params(lm)
 
 
 def test_estimate_num_params_ignores_extra_kwargs():

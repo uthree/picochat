@@ -47,7 +47,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=4,
-        tie_embeddings=True,
     ),
     "small": dict(
         d_model=768,
@@ -57,7 +56,6 @@ MODEL_PRESETS: dict[str, dict] = {
         vocab_size=64000,
         window_size=128,
         global_attn_ratio=4,
-        tie_embeddings=True,
     ),
     "base": dict(
         d_model=1024,

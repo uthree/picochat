@@ -144,8 +144,7 @@ def _actual_params(lm) -> int:
         dict(vocab_size=50, d_model=32, n_heads=4, n_layers=3),  # dense
         dict(vocab_size=50, d_model=64, n_heads=8, n_layers=3,
              n_experts=4, d_expert=16),  # MoE
-        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2,
-             tie_embeddings=True),  # tied embeddings
+        dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, n_kv_heads=2),  # GQA
     ],
 )
 def test_estimate_num_params_matches_actual(cfg):

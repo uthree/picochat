@@ -544,21 +544,13 @@ class TransformerLM(nn.Module):
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
-        tie_embeddings: bool = False,
     ):
         super().__init__()
         self.n_layers = n_layers
         self.init_std = init_std
-        self.tie_embeddings = tie_embeddings
 
         self.embed = nn.Embedding(vocab_size, d_model)
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
-        if tie_embeddings:
-            # Share the lm head's weight with the embedding. Assigning after
-            # construction drops the head's own Parameter and replaces it with
-            # the same tensor object as self.embed.weight, so the two stay in
-            # sync through training/optimization/checkpointing for free.
-            self.lmhead.weight = self.embed.weight
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -623,7 +615,6 @@ def estimate_num_params(
     d_expert: int | None = None,
     n_active: int = 2,
     active_only: bool = False,
-    tie_embeddings: bool = False,
     **_ignored,
 ) -> int:
     """Estimate a TransformerLM's parameter count from its hyperparameters,
@@ -667,8 +658,6 @@ def estimate_num_params(
         layer_params += n_experts * d_model + 3 * experts * expert_hidden * d_model
 
     embed = vocab_size * d_model
-    # The lm head is one Linear. With tie_embeddings it shares embed's weight
-    # (already counted in `embed`), so it adds nothing; untied it adds its own.
-    lmhead = 0 if tie_embeddings else vocab_size * d_model
+    lmhead = vocab_size * d_model  # separate (untied) output projection
     layers = n_layers * layer_params
     return embed + lmhead + layers
