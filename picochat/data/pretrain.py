@@ -155,17 +155,23 @@ def iter_mixture(
         yield from iter_texts(spec, streaming=streaming, max_chars=int(total_chars * w))
 
 
-def holdout_splits(split: str, val_fraction: float) -> tuple[str, str]:
+def holdout_splits(split: str, val_fraction: float, total_examples: int) -> tuple[str, str]:
     """Carve a validation slice out of a split that has no dedicated one of
-    its own (e.g. Wikipedia only ships "train"), via HF's percentage slicing
-    (`"train[10%:]"`) -- exact, non-overlapping, and no data download needed
-    to compute (see scripts/base_setup.py's expand_val_fraction). Returns
-    (train_split, val_split): the first `val_fraction` of `split` becomes
+    its own (e.g. Wikipedia only ships "train"), via HF's absolute-index
+    slicing (`"train[123:]"`) -- exact and non-overlapping. Percentage
+    slicing (`"train[1%:]"`) would avoid needing `total_examples` at all, but
+    this project's pinned `datasets` version only parses whole-number
+    percentages (`datasets.arrow_reader._SUB_SPEC_RE`), too coarse for the
+    sub-1% val_fraction values used on multi-million-row datasets like
+    Wikipedia -- see scripts/base_setup.py's expand_val_fraction, which
+    resolves `total_examples` via load_dataset_builder. Returns (train_split,
+    val_split): the first `val_fraction` of `split` (by row count) becomes
     validation, the remainder training.
     """
     assert 0 < val_fraction < 1, val_fraction
-    pct = val_fraction * 100
-    return f"{split}[{pct:g}%:]", f"{split}[:{pct:g}%]"
+    n_val = max(1, round(total_examples * val_fraction))
+    assert n_val < total_examples, (n_val, total_examples)
+    return f"{split}[{n_val}:]", f"{split}[:{n_val}]"
 
 
 def resolve_spec(preset: str | None, dataset: str | None) -> DatasetSpec:

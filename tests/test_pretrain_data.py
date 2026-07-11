@@ -213,20 +213,42 @@ def test_packed_dataset_missing_path_raises(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_holdout_splits_partitions_by_percentage():
-    train_split, val_split = holdout_splits("train", 0.01)
-    assert train_split == "train[1%:]"
-    assert val_split == "train[:1%]"
+def test_holdout_splits_partitions_by_absolute_count():
+    # absolute-index slicing, not percentage: this project's pinned `datasets`
+    # version only parses whole-number percentages (see holdout_splits'
+    # docstring), too coarse for the sub-1% fractions used on huge datasets
+    train_split, val_split = holdout_splits("train", 0.01, total_examples=1000)
+    assert train_split == "train[10:]"
+    assert val_split == "train[:10]"
+
+
+def test_holdout_splits_rounds_up_to_at_least_one_example():
+    train_split, val_split = holdout_splits("train", 0.001, total_examples=100)
+    assert val_split == "train[:1]"
+    assert train_split == "train[1:]"
 
 
 def test_holdout_splits_preserves_base_split_name():
-    train_split, val_split = holdout_splits("web_samples_v2", 0.002)
+    train_split, val_split = holdout_splits(
+        "web_samples_v2", 0.002, total_examples=10000
+    )
     assert train_split.startswith("web_samples_v2[")
     assert val_split.startswith("web_samples_v2[:")
 
 
 def test_holdout_splits_rejects_out_of_range_fraction():
     with pytest.raises(AssertionError):
-        holdout_splits("train", 0.0)
+        holdout_splits("train", 0.0, total_examples=100)
     with pytest.raises(AssertionError):
-        holdout_splits("train", 1.0)
+        holdout_splits("train", 1.0, total_examples=100)
+
+
+def test_holdout_splits_produces_split_strings_datasets_can_parse():
+    # regression guard for the exact bug this was built to catch: percentage
+    # slicing silently producing a string (e.g. "train[0.1%:]") that looks
+    # valid but datasets.arrow_reader rejects at load_dataset() time
+    from datasets.arrow_reader import _SUB_SPEC_RE
+
+    train_split, val_split = holdout_splits("train", 0.0005, total_examples=6_407_814)
+    assert _SUB_SPEC_RE.match(train_split)
+    assert _SUB_SPEC_RE.match(val_split)

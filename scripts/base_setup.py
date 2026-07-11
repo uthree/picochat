@@ -28,7 +28,7 @@ from typing import Iterator
 
 import numpy as np
 import yaml
-from datasets import get_dataset_split_names
+from datasets import get_dataset_split_names, load_dataset_builder
 from tqdm import tqdm
 
 from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
@@ -130,6 +130,20 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
     return spec
 
 
+def _split_example_count(spec: DatasetSpec) -> int:
+    """Look up `spec.split`'s row count from the Hub's dataset info (metadata
+    only, no data download) -- what holdout_splits needs to turn a
+    `val_fraction` into an exact absolute-index slice."""
+    try:
+        info = load_dataset_builder(spec.path, spec.name).info
+        return info.splits[spec.split].num_examples
+    except Exception as e:
+        raise SystemExit(
+            f"couldn't resolve example count for {spec.path} (name={spec.name!r}, "
+            f"split={spec.split!r}) to compute val_fraction: {type(e).__name__}: {e}"
+        ) from e
+
+
 def expand_val_fraction(entries: list[dict]) -> list[dict]:
     """Expand a `val_fraction`/`val_output` entry into a plain train + val pair
     (see picochat.data.pretrain.holdout_splits), so the rest of the pipeline
@@ -151,8 +165,9 @@ def expand_val_fraction(entries: list[dict]) -> list[dict]:
         base = {
             k: v for k, v in entry.items() if k not in ("val_fraction", "val_output")
         }
+        spec = spec_from_entry(entry)
         train_split, val_split = holdout_splits(
-            entry.get("split", "train"), entry["val_fraction"]
+            spec.split, entry["val_fraction"], _split_example_count(spec)
         )
         expanded.append({**base, "split": train_split})
         expanded.append({**base, "output": entry["val_output"], "split": val_split})
