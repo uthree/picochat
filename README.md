@@ -69,7 +69,18 @@ By default the UI renders with the terminal's own 16-color ANSI palette
 (`ansi-dark`); pass `--theme <name>` or switch live with `/theme` for a
 true-color theme (nord, gruvbox, tokyo-night, ...).
 
-### 7. Evaluate
+### 7. Serve an OpenAI-compatible API
+`GET /v1/models` and `POST /v1/chat/completions` (streaming or not), for
+tools that speak the OpenAI Chat Completions format (e.g. OpenCode's
+`@ai-sdk/openai-compatible` provider):
+```bash
+uv run scripts/api.py --checkpoint weights/sft-stage1/last.ckpt --port 8000
+```
+Requests are served one at a time (see `picochat/api.py`); `--temperature`/
+`--top-k`/`--top-p`/`--max-new-tokens` set the defaults, and a request may
+override any of them.
+
+### 8. Evaluate
 Multiple-choice benchmarks (hellaswag, arc_easy, arc_challenge, openbookqa,
 winogrande, boolq) scored by completion log-likelihood:
 ```bash
