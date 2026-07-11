@@ -208,6 +208,11 @@ def main():
         optimizer=optim_cfg.get("optimizer", "muon"),
         muon_lr=muon_lr,
         muon_momentum=optim_cfg.get("muon_momentum", 0.95),
+        # Independent from weight_decay: torch.optim.Muon's decay is decoupled
+        # like AdamW's, but muon_lr runs an order of magnitude+ above lr, so
+        # reusing weight_decay as-is would over-decay Muon's params (see
+        # LMTrainerMixin._init_trainer).
+        muon_weight_decay=optim_cfg.get("muon_weight_decay", 0.01),
         # GPT uses manual optimization (see GPT.__init__), so gradient clipping
         # and accumulation are owned by the module, not the Trainer.
         grad_clip=trainer_cfg.get("grad_clip", 1.0),

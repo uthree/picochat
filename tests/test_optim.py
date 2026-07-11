@@ -48,6 +48,13 @@ def test_configure_optimizers_builds_torch_muon_and_adamw():
     muon_opt, adam_opt = gpt.configure_optimizers()
     assert isinstance(muon_opt, torch.optim.Muon)
     assert isinstance(adam_opt, torch.optim.AdamW)
+    # muon_weight_decay is independent of weight_decay (see
+    # LMTrainerMixin._init_trainer): reusing weight_decay for Muon would
+    # over-decay it since muon_lr sits an order of magnitude+ above lr, so
+    # torch.optim.Muon's own decoupled decay (param *= 1 - lr * weight_decay)
+    # would otherwise be that much stronger than AdamW's.
+    assert muon_opt.param_groups[0]["weight_decay"] == gpt.muon_weight_decay
+    assert gpt.muon_weight_decay != gpt.weight_decay
     # the pair covers the whole model
     n_opt = sum(
         p.numel()

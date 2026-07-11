@@ -49,6 +49,7 @@ class LMTrainerMixin:
         grad_clip: float | None,
         accumulate: int,
         tokenizer=None,
+        muon_weight_decay: float = 0.01,
     ) -> None:
         self.lr = lr
         self.weight_decay = weight_decay
@@ -58,6 +59,12 @@ class LMTrainerMixin:
         self.optimizer_name = optimizer
         self.muon_lr = muon_lr
         self.muon_momentum = muon_momentum
+        # Separate from `weight_decay`: torch.optim.Muon's decay is decoupled
+        # (param *= 1 - lr * weight_decay) exactly like AdamW's, but muon_lr is
+        # tuned an order of magnitude (or more) above `lr` -- reusing
+        # `weight_decay` as-is would make Muon's *effective* decay that many
+        # times stronger than AdamW's for no reason. Kept independently tunable.
+        self.muon_weight_decay = muon_weight_decay
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.min_lr_ratio = min_lr_ratio
@@ -134,7 +141,7 @@ class LMTrainerMixin:
                     muon_params,
                     lr=self.muon_lr,
                     momentum=self.muon_momentum,
-                    weight_decay=self.weight_decay,
+                    weight_decay=self.muon_weight_decay,
                 ),
                 torch.optim.AdamW(adam_groups, lr=self.lr, betas=self.betas),
             ]
