@@ -1,9 +1,10 @@
 import lightning as L
+import pytest
 import torch
 from lightning.pytorch.utilities.model_helpers import is_overridden
 from torch.utils.data import Dataset
 
-from picochat.data.pretrain import PretrainDataModule
+from picochat.data.pretrain import PretrainDataModule, holdout_splits
 
 
 class _RandomTokenDataset(Dataset):
@@ -205,3 +206,27 @@ def test_packed_dataset_missing_path_raises(tmp_path):
     (tmp_path / "empty").mkdir()
     with pytest.raises(FileNotFoundError):
         PackedDataset(str(tmp_path / "empty"), block_size=4)
+
+
+# ---------------------------------------------------------------------------
+# holdout_splits: carving a validation slice out of a train-only split
+# ---------------------------------------------------------------------------
+
+
+def test_holdout_splits_partitions_by_percentage():
+    train_split, val_split = holdout_splits("train", 0.01)
+    assert train_split == "train[1%:]"
+    assert val_split == "train[:1%]"
+
+
+def test_holdout_splits_preserves_base_split_name():
+    train_split, val_split = holdout_splits("web_samples_v2", 0.002)
+    assert train_split.startswith("web_samples_v2[")
+    assert val_split.startswith("web_samples_v2[:")
+
+
+def test_holdout_splits_rejects_out_of_range_fraction():
+    with pytest.raises(AssertionError):
+        holdout_splits("train", 0.0)
+    with pytest.raises(AssertionError):
+        holdout_splits("train", 1.0)

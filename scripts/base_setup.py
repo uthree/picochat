@@ -37,6 +37,7 @@ from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
     PRESETS,
     DatasetSpec,
     ShardWriter,
+    holdout_splits,
     iter_texts,
     resolve_spec,
 )
@@ -129,6 +130,35 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
     return spec
 
 
+def expand_val_fraction(entries: list[dict]) -> list[dict]:
+    """Expand a `val_fraction`/`val_output` entry into a plain train + val pair
+    (see picochat.data.pretrain.holdout_splits), so the rest of the pipeline
+    never has to know about held-out splits. For datasets with no dedicated
+    validation split (e.g. Wikipedia, cosmopedia -- only "train"), this is
+    how a val set is carved out instead of falling back to a different
+    dataset's split, which would leave that dataset's slice of the training
+    mixture unrepresented in validation loss:
+        - {preset: wikipedia-en, output: wikipedia-en, val_output: wikipedia-en.val, val_fraction: 0.002}
+    Entries without `val_fraction` pass through unchanged.
+    """
+    expanded: list[dict] = []
+    for entry in entries:
+        if "val_fraction" not in entry:
+            expanded.append(entry)
+            continue
+        if "val_output" not in entry:
+            raise SystemExit(f"'val_fraction' entry needs 'val_output': {entry}")
+        base = {
+            k: v for k, v in entry.items() if k not in ("val_fraction", "val_output")
+        }
+        train_split, val_split = holdout_splits(
+            entry.get("split", "train"), entry["val_fraction"]
+        )
+        expanded.append({**base, "split": train_split})
+        expanded.append({**base, "output": entry["val_output"], "split": val_split})
+    return expanded
+
+
 def process(
     spec: DatasetSpec,
     output: Path,
@@ -192,14 +222,16 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int) -> None:
     just ordinary entries pointing at a validation split, e.g.:
         - {preset: tinystories, output: tinystories.bin}
         - {preset: tinystories, output: tinystories.val.bin, split: validation}
-    Every dataset/split is validated up front; an invalid one stops the script.
+    For datasets with no dedicated validation split, `val_fraction` carves one
+    out of `split` instead (see expand_val_fraction). Every dataset/split is
+    validated up front; an invalid one stops the script.
     """
     output_dir = Path(cfg.get("output_dir", ""))
     streaming = cfg.get("streaming", False)
     batch_size = cfg.get("batch_size", BATCH_SIZE)
     num_threads = cfg.get("num_threads")
     shard_tokens = cfg.get("shard_tokens", DEFAULT_SHARD_TOKENS)
-    entries = cfg["datasets"]
+    entries = expand_val_fraction(cfg["datasets"])
     for entry in entries:
         if "output" not in entry:
             raise SystemExit(f"dataset entry needs 'output': {entry}")

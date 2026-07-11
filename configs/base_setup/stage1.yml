@@ -5,4 +5,11 @@ streaming: false # small datasets: download once, then iterate from local cache
 datasets:
     - { preset: tinystories, output: tinystories }
     - { preset: tinystories, output: tinystories.val, split: validation }
-    - { preset: children-stories, output: children-stories }
+    # children-stories has no dedicated split on the Hub; carve 1% of train
+    # off for validation instead (see scripts/base_setup.py expand_val_fraction)
+    - {
+          preset: children-stories,
+          output: children-stories,
+          val_output: children-stories.val,
+          val_fraction: 0.01,
+      }

@@ -155,6 +155,19 @@ def iter_mixture(
         yield from iter_texts(spec, streaming=streaming, max_chars=int(total_chars * w))
 
 
+def holdout_splits(split: str, val_fraction: float) -> tuple[str, str]:
+    """Carve a validation slice out of a split that has no dedicated one of
+    its own (e.g. Wikipedia only ships "train"), via HF's percentage slicing
+    (`"train[10%:]"`) -- exact, non-overlapping, and no data download needed
+    to compute (see scripts/base_setup.py's expand_val_fraction). Returns
+    (train_split, val_split): the first `val_fraction` of `split` becomes
+    validation, the remainder training.
+    """
+    assert 0 < val_fraction < 1, val_fraction
+    pct = val_fraction * 100
+    return f"{split}[{pct:g}%:]", f"{split}[:{pct:g}%]"
+
+
 def resolve_spec(preset: str | None, dataset: str | None) -> DatasetSpec:
     """Resolve a DatasetSpec from CLI arguments.
 
@@ -303,7 +316,9 @@ class GroupWeightedIndexSampler(Sampler[int]):
     neither problem.
     """
 
-    def __init__(self, group_sizes: list[int], group_weights: list[float], num_samples: int):
+    def __init__(
+        self, group_sizes: list[int], group_weights: list[float], num_samples: int
+    ):
         self.num_samples = num_samples
         self.group_weights = torch.as_tensor(group_weights, dtype=torch.double)
         sizes = torch.as_tensor(group_sizes, dtype=torch.long)
@@ -318,7 +333,9 @@ class GroupWeightedIndexSampler(Sampler[int]):
         while remaining > 0:
             n = min(_SAMPLE_CHUNK, remaining)
             group_ids = torch.multinomial(self.group_weights, n, replacement=True)
-            local = (torch.rand(n, dtype=torch.double) * self.group_sizes[group_ids]).long()
+            local = (
+                torch.rand(n, dtype=torch.double) * self.group_sizes[group_ids]
+            ).long()
             idx = self.group_offsets[group_ids] + local
             yield from idx.tolist()
             remaining -= n
@@ -413,7 +430,9 @@ class PretrainDataModule(L.LightningDataModule):
         # torch.randperm(len(train_ds)) up front, which OOMs on a large corpus
         # for the same reason the weighted path did. UniformIndexSampler draws
         # the same uniform indices lazily in bounded-size chunks.
-        sampler = UniformIndexSampler(len(self.train_ds), num_samples=len(self.train_ds))
+        sampler = UniformIndexSampler(
+            len(self.train_ds), num_samples=len(self.train_ds)
+        )
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
