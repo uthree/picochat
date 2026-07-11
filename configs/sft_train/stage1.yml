@@ -13,8 +13,15 @@ init_from: weights/stage3/last.ckpt # architecture is rebuilt from this checkpoi
 
 data:
     data_dir: data/sft # joined with each dataset path/val_path filename below
+    # weight = each source's total sampling mass regardless of its row count
+    # (see scripts/sft_train.py make_dataset), not a per-example weight --
+    # tune these to taste. smoltalk-multilingual spreads 1.0 across 8
+    # languages; magpie-ja/aya-ko get less because they're single-language.
     datasets:
-        - { path: smoltalk.pt, weight: 1.0 }
+        - { path: smoltalk.pt, weight: 1.0 } # en
+        - { path: smoltalk-multilingual.pt, weight: 1.0 } # es/fr/it/pt/de/ar/ru/zh
+        - { path: magpie-ja.pt, weight: 0.5 } # ja
+        - { path: aya-ko.pt, weight: 0.2 } # ko (small, single-turn)
     val_path: smoltalk.val.pt
 
 optim:

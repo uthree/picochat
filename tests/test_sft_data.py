@@ -6,6 +6,7 @@ from picochat.data.sft import (
     ChatDatasetSpec,
     SFTDataset,
     SFTTensorDataset,
+    _aya_kor_to_messages,
     encode_conversation,
     pack_examples,
     render_chat_prompt,
@@ -239,6 +240,35 @@ def test_encode_conversation_returns_none_when_truncated_before_assistant(
     ]
     # max_length small enough that we never reach the assistant turn
     assert encode_conversation(messages, tokenizer, max_length=4, pad_id=pad_id) is None
+
+
+def test_chat_dataset_spec_to_messages_uses_messages_key():
+    spec = ChatDatasetSpec("some/repo", messages_key="turns")
+    assert spec.to_messages({"turns": [{"role": "user", "content": "hi"}]}) == [
+        {"role": "user", "content": "hi"}
+    ]
+
+
+def test_chat_dataset_spec_to_messages_prefers_format_over_messages_key():
+    spec = ChatDatasetSpec("some/repo", format=lambda row: [row["only"]])
+    assert spec.to_messages(
+        {"only": {"role": "user", "content": "hi"}, "turns": []}
+    ) == [{"role": "user", "content": "hi"}]
+
+
+def test_aya_kor_to_messages_filters_by_language_code():
+    assert (
+        _aya_kor_to_messages({"language_code": "eng", "inputs": "hi", "targets": "yo"})
+        is None
+    )
+
+
+def test_aya_kor_to_messages_renders_one_turn_conversation():
+    row = {"language_code": "kor", "inputs": "안녕하세요", "targets": "안녕하십니까"}
+    assert _aya_kor_to_messages(row) == [
+        {"role": "user", "content": "안녕하세요"},
+        {"role": "assistant", "content": "안녕하십니까"},
+    ]
 
 
 def test_resolve_spec_preset():

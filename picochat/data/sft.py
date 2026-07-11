@@ -29,9 +29,9 @@ confined to each conversation (see Transformer.forward).
 """
 
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import tiktoken
 import torch
@@ -48,10 +48,50 @@ class ChatDatasetSpec:
     name: str | None = None  # config / subset name, e.g. "all"
     split: str = "train"
     messages_key: str = "messages"  # column holding the list of {role, content}
+    # For sources that aren't already a {role, content} list (e.g. single-turn
+    # inputs/targets columns, or a language-tagged corpus to filter): maps a
+    # raw row to a messages list, or None to skip the row. Overrides
+    # messages_key. Mirrors picochat.data.pretrain.DatasetSpec.format.
+    format: Callable[[dict], list[dict] | None] | None = field(default=None, repr=False)
+
+    def to_messages(self, row: dict) -> list[dict] | None:
+        if self.format is not None:
+            return self.format(row)
+        return row[self.messages_key]
+
+
+def _aya_kor_to_messages(row: dict) -> list[dict] | None:
+    """CohereLabs/aya_dataset is single-turn instruction/response pairs across
+    65 languages in one split (inputs/targets/language_code); filter down to
+    Korean and reshape into a one-turn conversation; swapping the
+    `language_code` ("kor") covers the dataset's other 64 languages with the
+    same shape."""
+    if row["language_code"] != "kor":
+        return None
+    return [
+        {"role": "user", "content": row["inputs"]},
+        {"role": "assistant", "content": row["targets"]},
+    ]
 
 
 PRESETS: dict[str, ChatDatasetSpec] = {
     "smoltalk": ChatDatasetSpec("HuggingFaceTB/smoltalk", "all"),
+    # Smoltalk's prompts machine-translated into 8 languages (respecting
+    # local conventions), then answered natively in each target language.
+    "smoltalk-multilingual": ChatDatasetSpec(
+        "HuggingFaceTB/smoltalk2",
+        "SFT",
+        split="smoltalk_multilingual_8languages_lang_5_no_think",
+    ),  # es/fr/it/pt/de/ar/ru/zh, ~254k rows
+    # Magpie-style Japanese: CALM3-22B-Chat generates the user turns,
+    # Qwen2.5-32B-Instruct the assistant responses.
+    "magpie-ja": ChatDatasetSpec(
+        "llm-jp/magpie-sft-v1.0", messages_key="conversations"
+    ),  # ~132k rows
+    # Human-annotated Korean slice of CohereLabs/aya_dataset (see
+    # _aya_kor_to_messages) -- smaller and single-turn, but not
+    # machine-translated like most other open Korean instruction sets.
+    "aya-ko": ChatDatasetSpec("CohereLabs/aya_dataset", format=_aya_kor_to_messages),
 }
 
 
@@ -65,7 +105,7 @@ def iter_conversations(
     if limit is not None:
         ds = ds.take(limit) if streaming else ds.select(range(min(limit, len(ds))))
     for row in ds:
-        messages = row[spec.messages_key]
+        messages = spec.to_messages(row)
         if messages:
             yield messages
 

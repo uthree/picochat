@@ -1,13 +1,18 @@
-# Preprocessing recipe for scripts/sft_setup.py: tokenize smoltalk into the
-# (input_ids, labels) tensor bundles consumed by scripts/sft_train.py.
+# Preprocessing recipe for scripts/sft_setup.py: tokenize smoltalk (+
+# non-English chat data) into the (input_ids, labels) tensor bundles
+# consumed by scripts/sft_train.py.
 #
 #   python scripts/sft_setup.py --config configs/sft_setup/setup.yml
 
 tokenizer: weights/tokenizer.json
 output_dir: data/sft
 max_length: 2048
-streaming: true # smoltalk is large; stream instead of downloading everything
+streaming: true # these datasets are large; stream instead of downloading everything
 
 datasets:
     - { preset: smoltalk, output: smoltalk.pt }
     - { preset: smoltalk, output: smoltalk.val.pt, split: test, limit: 2000 }
+    # es/fr/it/pt/de/ar/ru/zh (see picochat.data.sft.PRESETS)
+    - { preset: smoltalk-multilingual, output: smoltalk-multilingual.pt }
+    - { preset: magpie-ja, output: magpie-ja.pt }
+    - { preset: aya-ko, output: aya-ko.pt }
