@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import lightning as L
 import tiktoken
 import torch
 import torch.nn.functional as F
+import yaml
 from einops import rearrange
 from torch import Tensor
 
@@ -31,6 +34,7 @@ __all__ = [
     "rms_norm",
     "rotate_half",
     "MODEL_PRESETS",
+    "load_presets",
     "build_lm",
     "can_compile",
     "estimate_preset_params",
@@ -39,63 +43,19 @@ __all__ = [
 ]
 
 
-# Scale ladder. Sized for a 128k vocab and an untied lm head (embedding + head
-# together are 256000*d_model params, which dominates the smaller presets).
-# pico is the ~0.5B-param entry point; each step up roughly doubles the active
-# parameter count. medium/large are sparse (MoE): total >> active.
-MODEL_PRESETS: dict[str, dict] = {
-    "pico": dict(  # ~0.5B params (dense)
-        d_model=1024,
-        n_layers=20,
-        n_heads=16,
-        n_kv_heads=4,
-        vocab_size=128000,
-        window_size=128,
-        global_attn_ratio=4,
-    ),
-    "small": dict(  # ~1.0B params (dense)
-        d_model=1536,
-        n_layers=24,
-        n_heads=24,
-        n_kv_heads=4,
-        vocab_size=128000,
-        window_size=128,
-        global_attn_ratio=4,
-    ),
-    "base": dict(  # ~1.9B params (dense)
-        d_model=2048,
-        n_layers=28,
-        n_heads=32,
-        n_kv_heads=8,
-        vocab_size=128000,
-        window_size=256,
-        global_attn_ratio=6,
-    ),
-    "medium": dict(  # ~7.5B total / ~2.6B active (MoE)
-        d_model=2048,
-        n_layers=28,
-        n_heads=32,
-        n_kv_heads=8,
-        vocab_size=128000,
-        window_size=256,
-        global_attn_ratio=6,
-        n_experts=32,
-        n_active=4,
-        d_expert=1024,
-    ),
-    "large": dict(  # ~23B total / ~4.9B active (MoE)
-        d_model=2560,
-        n_layers=32,
-        n_heads=20,
-        n_kv_heads=4,
-        vocab_size=128000,
-        window_size=512,
-        global_attn_ratio=6,
-        n_experts=64,
-        n_active=6,
-        d_expert=1280,
-    ),
-}
+# Scale ladder: pico (~0.5B, the entry point) up to large (~23B MoE), kept in
+# configs/presets.yml so the hyperparameters live with the other recipes (see
+# that file for the sizing rationale).
+PRESETS_FILE = Path(__file__).resolve().parents[2] / "configs" / "presets.yml"
+
+
+def load_presets(path: str | Path = PRESETS_FILE) -> dict[str, dict]:
+    """Load the {size: hyperparameters} scale ladder consumed by build_lm."""
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+MODEL_PRESETS: dict[str, dict] = load_presets()
 
 
 def build_lm(

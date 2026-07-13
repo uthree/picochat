@@ -11,8 +11,18 @@ from picochat.model.gpt import (
 
 
 # ---------------------------------------------------------------------------
-# scale-ladder presets
+# scale-ladder presets (loaded from configs/presets.yml)
 # ---------------------------------------------------------------------------
+def test_presets_load_from_yaml_with_required_keys():
+    # the ladder lives in configs/presets.yml; a malformed edit there (missing
+    # key, non-integer value) must fail loudly here rather than at train time
+    assert list(MODEL_PRESETS) == ["pico", "small", "base", "medium", "large"]
+    required = {"d_model", "n_layers", "n_heads", "n_kv_heads", "vocab_size"}
+    for size, cfg in MODEL_PRESETS.items():
+        assert required <= cfg.keys(), f"{size} is missing {required - cfg.keys()}"
+        assert all(isinstance(v, int) for v in cfg.values()), size
+
+
 def test_build_lm_unknown_size_raises():
     with pytest.raises(ValueError):
         build_lm("gigantic", vocab_size=32)

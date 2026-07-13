@@ -123,6 +123,6 @@ several improvements:
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
   chat format
 
-Presets (`picochat/model/gpt.py`): `pico` ≈0.5B, `small` ≈1.0B and `base`
+Presets (`configs/presets.yml`): `pico` ≈0.5B, `small` ≈1.0B and `base`
 ≈1.9B parameters (dense); `medium` ≈7.5B total / 2.6B active and `large`
 ≈23B total / 4.9B active (MoE).

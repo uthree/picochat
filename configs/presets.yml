@@ -1,0 +1,58 @@
+# Model scale ladder, loaded by picochat.model.gpt (MODEL_PRESETS /
+# build_lm / estimate_preset_params).
+#
+# Sized for a 128k vocab and an untied lm head (embedding + head together are
+# 256000*d_model params, which dominates the smaller presets). pico is the
+# ~0.5B-param entry point; each step up roughly doubles the active parameter
+# count. medium/large are sparse (MoE): total >> active.
+
+pico: # ~0.5B params (dense)
+    d_model: 1024
+    n_layers: 20
+    n_heads: 16
+    n_kv_heads: 4
+    vocab_size: 128000
+    window_size: 128
+    global_attn_ratio: 4
+
+small: # ~1.0B params (dense)
+    d_model: 1536
+    n_layers: 24
+    n_heads: 24
+    n_kv_heads: 4
+    vocab_size: 128000
+    window_size: 128
+    global_attn_ratio: 4
+
+base: # ~1.9B params (dense)
+    d_model: 2048
+    n_layers: 28
+    n_heads: 32
+    n_kv_heads: 8
+    vocab_size: 128000
+    window_size: 256
+    global_attn_ratio: 6
+
+medium: # ~7.5B total / ~2.6B active (MoE)
+    d_model: 2048
+    n_layers: 28
+    n_heads: 32
+    n_kv_heads: 8
+    vocab_size: 128000
+    window_size: 256
+    global_attn_ratio: 6
+    n_experts: 32
+    n_active: 4
+    d_expert: 1024
+
+large: # ~23B total / ~4.9B active (MoE)
+    d_model: 2560
+    n_layers: 32
+    n_heads: 20
+    n_kv_heads: 4
+    vocab_size: 128000
+    window_size: 512
+    global_attn_ratio: 6
+    n_experts: 64
+    n_active: 6
+    d_expert: 1280
