@@ -3,7 +3,7 @@
 Each document is encoded and wrapped in <|begin_of_text|>...<|end_of_text|>,
 then whole documents are packed into fixed-length rows of block_size+1 tokens
 (MosaicBERT-style sequence packing, greedy best-fit -- see
-picochat.data.pretrain.pack_docs; documents longer than one row are split into
+picochat.data.base.pack_docs; documents longer than one row are split into
 row-sized chunks, each continuation prefixed with <|begin_of_text|>). The rows
 are split across shard files (00000.bin, 00001.bin, ...) under one output
 directory per dataset, so no single file grows with the corpus, plus a
@@ -38,7 +38,7 @@ import yaml
 from datasets import get_dataset_split_names, load_dataset_builder
 from tqdm import tqdm
 
-from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
+from picochat.data.base import (  # DTYPE: uint32; shared with the reader
     DEFAULT_SHARD_TOKENS,
     DTYPE,
     PRESETS,
@@ -115,7 +115,7 @@ def load_enc(tokenizer_path: str):
 def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `datasets:` entry into a DatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.pretrain, or an inline
+    Either {preset: <name>} referencing picochat.data.base, or an inline
     {path, name, split, text_key}. An optional `split` overrides the preset's.
     """
     if "preset" in entry:
@@ -156,7 +156,7 @@ def _split_example_count(spec: DatasetSpec) -> int:
 
 def expand_val_fraction(entries: list[dict]) -> list[dict]:
     """Expand a `val_fraction`/`val_output` entry into a plain train + val pair
-    (see picochat.data.pretrain.holdout_splits), so the rest of the pipeline
+    (see picochat.data.base.holdout_splits), so the rest of the pipeline
     never has to know about held-out splits. For datasets with no dedicated
     validation split (e.g. Wikipedia, cosmopedia -- only "train"), this is
     how a val set is carved out instead of falling back to a different

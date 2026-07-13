@@ -11,14 +11,14 @@ from pathlib import Path
 
 import yaml
 
-from picochat.data.pretrain import PRESETS, DatasetSpec, Mixture, iter_mixture
+from picochat.data.base import PRESETS, DatasetSpec, Mixture, iter_mixture
 from picochat.tokenizer import SPECIAL_TOKENS, train_tokenizer
 
 
 def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `data:` entry into a DatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.pretrain, or an inline
+    Either {preset: <name>} referencing picochat.data.base, or an inline
     {path, name, split, text_key}.
     """
     if "preset" in entry:

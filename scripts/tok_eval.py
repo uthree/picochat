@@ -20,7 +20,7 @@ from typing import Iterator
 from tqdm import tqdm
 import yaml
 
-from picochat.data.pretrain import PRESETS, DatasetSpec, iter_texts
+from picochat.data.base import PRESETS, DatasetSpec, iter_texts
 from picochat.tokenizer import load_tokenizer
 
 BATCH_SIZE = 1024

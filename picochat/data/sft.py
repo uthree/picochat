@@ -51,7 +51,7 @@ class ChatDatasetSpec:
     # For sources that aren't already a {role, content} list (e.g. single-turn
     # inputs/targets columns, or a language-tagged corpus to filter): maps a
     # raw row to a messages list, or None to skip the row. Overrides
-    # messages_key. Mirrors picochat.data.pretrain.DatasetSpec.format.
+    # messages_key. Mirrors picochat.data.base.DatasetSpec.format.
     format: Callable[[dict], list[dict] | None] | None = field(default=None, repr=False)
 
     def to_messages(self, row: dict) -> list[dict] | None:

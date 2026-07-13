@@ -4,7 +4,7 @@ import torch
 from lightning.pytorch.utilities.model_helpers import is_overridden
 from torch.utils.data import Dataset
 
-from picochat.data.pretrain import PretrainDataModule, holdout_splits
+from picochat.data.base import PretrainDataModule, holdout_splits
 
 
 class _RandomTokenDataset(Dataset):
@@ -54,7 +54,7 @@ def test_train_dataloader_unweighted_uses_chunked_uniform_sampler():
     # Without weights the loader must not fall back to DataLoader(shuffle=True):
     # its RandomSampler materializes a full randperm(len) up front, which OOMs
     # on a large corpus. It should use the lazy, in-range UniformIndexSampler.
-    from picochat.data.pretrain import UniformIndexSampler
+    from picochat.data.base import UniformIndexSampler
 
     ds = _RandomTokenDataset(40, 6, n=32)
     dm = PretrainDataModule(ds, None, batch_size=4, num_workers=0)
@@ -98,7 +98,7 @@ def test_no_val_dataset_hides_val_dataloader_hook():
 # ---------------------------------------------------------------------------
 import numpy as np  # noqa: E402
 
-from picochat.data.pretrain import (  # noqa: E402
+from picochat.data.base import (  # noqa: E402
     DTYPE,
     PackedDataset,
     ShardWriter,

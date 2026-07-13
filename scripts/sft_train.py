@@ -20,7 +20,7 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
-from picochat.data.pretrain import PretrainDataModule
+from picochat.data.base import PretrainDataModule
 from picochat.data.sft import SFTTensorDataset
 from picochat.model.gpt import build_lm
 from picochat.model.sft import SFTModule

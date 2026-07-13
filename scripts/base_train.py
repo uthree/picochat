@@ -21,7 +21,7 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
-from picochat.data.pretrain import PackedDataset, PretrainDataModule
+from picochat.data.base import PackedDataset, PretrainDataModule
 from picochat.model.gpt import GPT, build_lm
 from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 
