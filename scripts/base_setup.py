@@ -1,18 +1,25 @@
 """Tokenize HF datasets and convert them into packed, sharded token binaries.
 
 Each document is encoded and wrapped in <|begin_of_text|>...<|end_of_text|>,
-and everything is concatenated into a continuous token stream split across
-shard files (00000.bin, 00001.bin, ...) under one output directory per
-dataset, so no single file grows with the corpus:
-<|begin_of_text|>doc1<|end_of_text|><|begin_of_text|>doc2<|end_of_text|>...
-Only one encode batch is ever held in memory. No padding is added; the
-training side (PackedDataset) slices a block_size+1 window at read time.
+then whole documents are packed into fixed-length rows of block_size+1 tokens
+(MosaicBERT-style sequence packing, greedy best-fit -- see
+picochat.data.pretrain.pack_docs; documents longer than one row are split into
+row-sized chunks, each continuation prefixed with <|begin_of_text|>). The rows
+are split across shard files (00000.bin, 00001.bin, ...) under one output
+directory per dataset, so no single file grows with the corpus, plus a
+meta.json recording the block_size; the training side (PackedDataset) reads
+one row per sample and rejects a mismatched block_size. Row leftovers are
+padded with <|pad|>, whose targets the training loss already ignores. Packing
+happens one encode batch at a time, so only one batch is ever held in memory.
 Tokens are stored as uint32 (DTYPE), which fits vocab up to ~4.29B.
+
+`block_size` must match the training config's data.block_size, so it is a
+required setting here (config `block_size:` / ad-hoc `--block-size`).
 
 Two ways to run:
 
   # one dataset, ad-hoc (output is a shard directory)
-  python scripts/base_setup.py -p tinystories -o data/tinystories
+  python scripts/base_setup.py -p tinystories -o data/tinystories --block-size 512
 
   # many datasets from a recipe (configs/base_setup/*.yml)
   python scripts/base_setup.py --config configs/base_setup/stage1.yml
@@ -39,9 +46,11 @@ from picochat.data.pretrain import (  # DTYPE: uint32; shared with the reader
     ShardWriter,
     holdout_splits,
     iter_texts,
+    pack_docs,
     resolve_spec,
+    write_meta,
 )
-from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, load_tokenizer
+from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, load_tokenizer
 
 # Used by the ad-hoc single-dataset mode; config mode reads the path from the
 # recipe's `tokenizer:` field instead.
@@ -91,15 +100,16 @@ def validate_specs(specs: list[DatasetSpec]) -> list[str]:
 
 
 def load_enc(tokenizer_path: str):
-    """Load the tokenizer and return (encoding, bos_id, eos_id), checking vocab
-    fits DTYPE."""
+    """Load the tokenizer and return (encoding, bos_id, eos_id, pad_id),
+    checking vocab fits DTYPE."""
     enc = load_tokenizer(tokenizer_path)
     bos_id = enc._special_tokens[BOS_TOKEN]
     eos_id = enc._special_tokens[EOS_TOKEN]
+    pad_id = enc._special_tokens[PAD_TOKEN]
     assert enc.n_vocab <= np.iinfo(DTYPE).max + 1, (
         f"vocab {enc.n_vocab} does not fit in {DTYPE}"
     )
-    return enc, bos_id, eos_id
+    return enc, bos_id, eos_id, pad_id
 
 
 def spec_from_entry(entry: dict) -> DatasetSpec:
@@ -180,40 +190,45 @@ def process(
     enc,
     bos_id: int,
     eos_id: int,
+    pad_id: int,
+    block_size: int,
     streaming: bool = False,
     limit: int | None = None,
     batch_size: int = BATCH_SIZE,
     num_threads: int | None = None,
     shard_tokens: int = DEFAULT_SHARD_TOKENS,
 ) -> tuple[int, int]:
-    """Encode every document of `spec` into shard files under the `output`
-    directory. Returns (n_docs, n_tokens).
+    """Encode every document of `spec` and pack them into fixed-length rows of
+    block_size+1 tokens in shard files under the `output` directory (see
+    pack_docs). Returns (n_docs, n_tokens) where n_tokens counts the real
+    (non-padding) tokens written.
 
     Documents are encoded in parallel batches (tiktoken releases the GIL), which
     is far faster than one-at-a-time for short docs like TinyStories. Each batch
-    is flushed to the ShardWriter as soon as it's encoded, so peak memory stays
-    O(batch) no matter how large the corpus is.
+    is packed and flushed to the ShardWriter as soon as it's encoded, so peak
+    memory stays O(batch) no matter how large the corpus is; packing efficiency
+    only pays for it at the last few rows of each batch.
     """
+    row_len = block_size + 1
+    # Rows must never straddle a shard boundary, so round the shard capacity
+    # down to a whole number of rows.
+    shard_tokens = max(row_len, shard_tokens // row_len * row_len)
     num_threads = num_threads or (os.cpu_count() or 8)
     texts = iter_texts(spec, streaming=streaming, limit=limit)
-    n_docs = n_tokens = 0
+    n_docs = n_tokens = n_rows = 0
     start = time.time()
     writer = ShardWriter(output, shard_tokens)
-    bos = np.asarray([bos_id], dtype=DTYPE)
-    eos = np.asarray([eos_id], dtype=DTYPE)
+    write_meta(output, block_size)
     bar = tqdm()
     try:
         for batch in _batched(texts, batch_size):
             encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
-            parts: list[np.ndarray] = []
-            for ids in encoded:
-                parts.append(bos)
-                parts.append(np.asarray(ids, dtype=DTYPE))
-                parts.append(eos)
-            tokens = np.concatenate(parts)
-            writer.write(tokens)
+            docs = [[bos_id, *ids, eos_id] for ids in encoded]
+            rows = pack_docs(docs, block_size, pad_id, bos_id)
+            writer.write(rows.reshape(-1))
             n_docs += len(batch)
-            n_tokens += int(tokens.size)
+            n_rows += len(rows)
+            n_tokens += int((rows != pad_id).sum())
             rate = n_tokens / (time.time() - start)
             bar.set_description(
                 f"{output.name}: {n_docs:,} docs | {n_tokens:,} tokens | {rate:,.0f} tok/s"
@@ -223,14 +238,16 @@ def process(
         bar.close()
         writer.close()
     size_mb = sum(f.stat().st_size for f in output.glob("*.bin")) / 1e6
+    efficiency = n_tokens / max(1, n_rows * row_len)  # real tokens vs padding
     print(
         f"done: {n_docs:,} docs, {n_tokens:,} tokens -> {output}/ "
-        f"({writer.n_shards} shard(s), {size_mb:.1f} MB)"
+        f"({n_rows:,} packed rows, {efficiency:.1%} packing efficiency, "
+        f"{writer.n_shards} shard(s), {size_mb:.1f} MB)"
     )
     return n_docs, n_tokens
 
 
-def run_config(cfg: dict, enc, bos_id: int, eos_id: int) -> None:
+def run_config(cfg: dict, enc, bos_id: int, eos_id: int, pad_id: int) -> None:
     """Process every dataset listed in a preprocess recipe.
 
     Each entry picks its own `split` (default train), so validation bins are
@@ -246,6 +263,12 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int) -> None:
     batch_size = cfg.get("batch_size", BATCH_SIZE)
     num_threads = cfg.get("num_threads")
     shard_tokens = cfg.get("shard_tokens", DEFAULT_SHARD_TOKENS)
+    if "block_size" not in cfg:
+        raise SystemExit(
+            "config needs 'block_size' (rows are packed to block_size+1 tokens; "
+            "must match the training config's data.block_size)"
+        )
+    block_size = cfg["block_size"]
     entries = expand_val_fraction(cfg["datasets"])
     for entry in entries:
         if "output" not in entry:
@@ -275,6 +298,8 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int) -> None:
             enc,
             bos_id,
             eos_id,
+            pad_id,
+            block_size,
             streaming=entry_streaming,
             limit=limit,
             batch_size=batch_size,
@@ -297,6 +322,13 @@ def main():
         type=int,
         default=DEFAULT_SHARD_TOKENS,
         help="max tokens per shard file (default: 2**28 = 1 GiB of uint32)",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        help="pack rows of block_size+1 tokens; must match the training "
+        "config's data.block_size (required unless --config supplies it)",
     )
     parser.add_argument("-p", "--preset", type=str, default=None)
     parser.add_argument("-d", "--dataset", type=str, default=None)
@@ -325,13 +357,18 @@ def main():
             raise SystemExit(
                 f"{args.config} needs a 'tokenizer:' field (path to tokenizer.json)"
             )
-        enc, bos_id, eos_id = load_enc(cfg["tokenizer"])
-        run_config(cfg, enc, bos_id, eos_id)
+        enc, bos_id, eos_id, pad_id = load_enc(cfg["tokenizer"])
+        run_config(cfg, enc, bos_id, eos_id, pad_id)
         return
 
     if not args.output:
         raise SystemExit("either --config, or --output with --preset/--dataset")
-    enc, bos_id, eos_id = load_enc(DEFAULT_TOKENIZER)
+    if args.block_size is None:
+        raise SystemExit(
+            "--block-size is required (must match the training config's "
+            "data.block_size)"
+        )
+    enc, bos_id, eos_id, pad_id = load_enc(DEFAULT_TOKENIZER)
     spec = resolve_spec(args.preset, args.dataset)
     if args.split is not None:
         spec.split = args.split
@@ -346,6 +383,8 @@ def main():
         enc,
         bos_id,
         eos_id,
+        pad_id,
+        args.block_size,
         streaming=args.streaming,
         limit=args.limit,
         batch_size=args.batch_size,

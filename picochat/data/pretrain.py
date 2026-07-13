@@ -1,20 +1,23 @@
-"""Pretraining data: HF dataset sources plus the sharded token binaries built
+"""Pretraining data: HF dataset sources plus the packed token binaries built
 from them.
 
 DatasetSpec/PRESETS/Mixture describe *where* pretraining text comes from and
 how to stream it; both tokenizer training (scripts/tok_train.py) and
-preprocessing (scripts/base_setup.py) read from them. ShardWriter/PackedDataset
-then turn that text into a continuous token stream concatenated without
-padding, split across fixed-size shard files (00000.bin, 00001.bin, ...) in
-one directory so no single file grows with the corpus. Slicing a block_size+1
-window and returning it lets GPT._loss shift by one internally to compute the
-next-token prediction loss (sequence length block_size+1 -> effective context
-block_size). A window usually spans several documents delimited by
-<|begin_of_text|>; GPT._loss derives per-token document ids from those markers
-so attention never crosses a document boundary (sequence packing, see
+preprocessing (scripts/base_setup.py) read from them. pack_docs then packs
+whole <|begin_of_text|>doc<|end_of_text|> documents into fixed-length rows of
+block_size+1 tokens (MosaicBERT-style sequence packing, same greedy best-fit
+as SFT's pack_examples), and ShardWriter splits the rows across fixed-size
+shard files (00000.bin, 00001.bin, ...) in one directory so no single file
+grows with the corpus; meta.json records the block_size the rows were packed
+with. PackedDataset returns one row per item, and the block_size+1 length lets
+GPT._loss shift by one internally to compute the next-token prediction loss
+(effective context block_size). A row usually holds several documents, each
+starting with <|begin_of_text|>; GPT._loss derives per-token document ids from
+those markers so attention never crosses a document boundary (see
 Transformer.forward).
 """
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
@@ -25,6 +28,8 @@ import torch
 from datasets import load_dataset
 from torch import Tensor
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
+
+from picochat.data.packing import pack_bins
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
 # Writer and reader share this so the two never diverge.
@@ -235,49 +240,98 @@ class ShardWriter:
             self._file = None
 
 
+# Sidecar written next to the shards; records the block_size the rows were
+# packed with so PackedDataset can reject a mismatched training config.
+META_FILE = "meta.json"
+
+
+def write_meta(out_dir: str | Path, block_size: int) -> None:
+    (Path(out_dir) / META_FILE).write_text(json.dumps({"block_size": block_size}))
+
+
+def read_meta(shard_dir: str | Path) -> dict:
+    path = Path(shard_dir) / META_FILE
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"no {META_FILE} in {shard_dir} -- the corpus predates the "
+            "packed-row format; re-run scripts/base_setup.py"
+        )
+    return json.loads(path.read_text())
+
+
+def pack_docs(
+    docs: list[list[int]], block_size: int, pad_id: int, bos_id: int
+) -> np.ndarray:
+    """Pack whole documents (each already <|begin_of_text|>...<|end_of_text|>)
+    into fixed-length rows of block_size+1 tokens, several documents per row
+    (MosaicBERT-style sequence packing; greedy best-fit via pack_bins). Room
+    that nothing fits into is padded with pad_id. Returns (n_rows,
+    block_size+1) in DTYPE.
+
+    A document longer than one row is split into row-sized chunks first, each
+    continuation chunk prefixed with bos_id: GPT._loss derives document ids
+    from the <|begin_of_text|> markers, so the prefix makes a continuation its
+    own document instead of silently merging with whatever precedes it in the
+    row it lands in.
+    """
+    row_len = block_size + 1
+    chunks: list[list[int]] = []
+    for doc in docs:
+        chunks.append(doc[:row_len])
+        for i in range(row_len, len(doc), row_len - 1):
+            chunks.append([bos_id, *doc[i : i + row_len - 1]])
+    bins = pack_bins([len(c) for c in chunks], row_len)
+    rows = np.full((len(bins), row_len), pad_id, dtype=DTYPE)
+    for r, packed in enumerate(bins):
+        pos = 0
+        for idx in packed:
+            chunk = chunks[idx]
+            rows[r, pos : pos + len(chunk)] = chunk
+            pos += len(chunk)
+    return rows
+
+
 class PackedDataset(Dataset):
-    def __init__(self, path: str, block_size: int = 1024, random: bool = True):
+    def __init__(self, path: str, block_size: int = 1024):
         """
         Args:
-            path: token binary produced by base_setup.py -- a directory of
-                *.bin shards. A single .bin file (or a bare `foo` resolving to
-                a legacy `foo.bin`) is also accepted for pre-sharding corpora.
-            block_size: effective context length. Each sample is block_size+1 tokens.
-            random: True for random offsets, False for non-overlapping contiguous
-                blocks.
+            path: corpus produced by base_setup.py -- a directory of *.bin
+                shards holding packed rows, plus a meta.json recording the
+                block_size they were packed with.
+            block_size: effective context length; must match the corpus's
+                meta.json. Each sample is one packed row of block_size+1 tokens.
         """
         self.block_size = block_size
-        self.random = random
         p = Path(path)
-        if p.is_dir():
-            shard_paths = sorted(p.glob("*.bin"))
-            if not shard_paths:
-                raise FileNotFoundError(f"no .bin shards in directory {path}")
-        elif p.is_file():
-            shard_paths = [p]
-        elif Path(str(p) + ".bin").is_file():  # legacy single-file layout
-            shard_paths = [Path(str(p) + ".bin")]
-        else:
-            raise FileNotFoundError(f"no token binary at {path}")
+        if not p.is_dir():
+            raise FileNotFoundError(f"no shard directory at {path}")
+        meta = read_meta(p)
+        if meta["block_size"] != block_size:
+            raise ValueError(
+                f"{path} was packed with block_size {meta['block_size']} but "
+                f"the training config asks for {block_size}; re-run "
+                "scripts/base_setup.py with the matching block_size"
+            )
+        shard_paths = sorted(p.glob("*.bin"))
+        if not shard_paths:
+            raise FileNotFoundError(f"no .bin shards in directory {path}")
         self.paths = [str(q) for q in shard_paths]
+        row_len = block_size + 1
         itemsize = np.dtype(DTYPE).itemsize
-        shard_tokens = [q.stat().st_size // itemsize for q in shard_paths]
-        self.n_tokens = int(sum(shard_tokens))
-        # Samples never cross a shard boundary: shards are separate files, and
-        # at ~GiB size the block_size-1 windows lost per boundary are
-        # negligible. A shard shorter than one sample contributes nothing.
-        if random:
-            counts = [max(0, n - block_size) for n in shard_tokens]
-        else:
-            counts = [n // (block_size + 1) for n in shard_tokens]
+        counts = []
+        for q in shard_paths:
+            n = q.stat().st_size // itemsize
+            assert n % row_len == 0, (
+                f"{q} holds {n} tokens, not a multiple of block_size+1 "
+                f"({row_len}); the shards don't match {META_FILE} -- re-run "
+                "scripts/base_setup.py"
+            )
+            counts.append(n // row_len)
+        self.n_tokens = int(sum(counts)) * row_len
         self._cum_counts = np.cumsum(counts)
         # Memmaps are opened lazily per DataLoader worker process: one opened
         # in __init__ would share its file descriptor across the worker fork.
         self._mmaps: list[np.memmap | None] = [None] * len(self.paths)
-        assert len(self) > 0, (
-            f"corpus at {path} ({self.n_tokens} tokens) has no shard with a "
-            f"full block_size+1 ({block_size + 1}) sample"
-        )
 
     def _shard(self, i: int) -> np.memmap:
         if self._mmaps[i] is None:
@@ -290,14 +344,14 @@ class PackedDataset(Dataset):
     def __getitem__(self, idx: int) -> Tensor:
         shard = int(np.searchsorted(self._cum_counts, idx, side="right"))
         local = int(idx - (self._cum_counts[shard - 1] if shard else 0))
-        start = local if self.random else local * (self.block_size + 1)
+        start = local * (self.block_size + 1)
         chunk = self._shard(shard)[start : start + self.block_size + 1]
         return torch.from_numpy(chunk.astype(np.int64))
 
 
 # Number of indices a chunked sampler draws per iteration. Bounds peak memory:
 # both samplers below are asked for num_samples == len(train_ds) == the whole
-# token count (billions for a large corpus). Producing all of them at once --
+# row count (millions for a large corpus). Producing all of them at once --
 # num_samples-sized tensors plus a num_samples-long Python list from .tolist()
 # -- costs tens of GB before the first batch is even yielded, which is what
 # exhausts host memory and gets the process OOM-killed. Drawing in fixed-size
@@ -352,11 +406,11 @@ class UniformIndexSampler(Sampler[int]):
 
     Used for the unweighted train path in place of DataLoader(shuffle=True),
     whose RandomSampler materializes a full `torch.randperm(len)` (then
-    `.tolist()`) up front. `len` is the whole token count for a large corpus,
+    `.tolist()`) up front. `len` is the whole row count for a large corpus,
     so that eager permutation exhausts host memory exactly like the weighted
     sampler did (see _SAMPLE_CHUNK / GroupWeightedIndexSampler). Sampling with
-    replacement is fine here: examples are random-offset windows into a token
-    stream, and training stops at max_steps well before num_samples is drawn.
+    replacement is fine here: training stops at max_steps well before
+    num_samples is drawn.
     """
 
     def __init__(self, dataset_len: int, num_samples: int):

@@ -27,7 +27,9 @@ uv run scripts/tok_eval.py
 ```
 
 ### 3. Preprocess the pretraining data
-Each stage's datasets are tokenized into sharded token binaries under `data/`:
+Each stage's datasets are tokenized, packed into fixed-length rows
+(MosaicBERT-style sequence packing; each config's `block_size` must match its
+training config) and written as sharded token binaries under `data/`:
 ```bash
 uv run scripts/base_setup.py --config configs/base_setup/stage1.yml
 uv run scripts/base_setup.py --config configs/base_setup/stage2.yml
@@ -114,6 +116,7 @@ several improvements:
   [DeepSeek-V3-style](https://arxiv.org/abs/2412.19437) sigmoid gating
   (`medium`/`large` presets)
 - [MosaicBERT-style sequence packing](https://arxiv.org/abs/2312.17482):
+  documents are greedy best-fit packed into fixed-length sequences, and
   attention never crosses document boundaries
 - [Muon](https://kellerjordan.github.io/posts/muon/) optimizer for the hidden
   matrices, AdamW for embeddings/heads

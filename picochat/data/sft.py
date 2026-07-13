@@ -28,7 +28,6 @@ sequence packing, see pack_examples); the per-token doc_ids let attention be
 confined to each conversation (see Transformer.forward).
 """
 
-import bisect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
@@ -39,6 +38,7 @@ from datasets import load_dataset
 from torch import Tensor
 from torch.utils.data import Dataset
 
+from picochat.data.packing import pack_bins
 from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, IM_END, IM_START
 
 
@@ -214,11 +214,9 @@ def pack_examples(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Pack variable-length (input_ids, labels) examples into fixed-length
     sequences, several examples per sequence, instead of padding each one to
-    max_length on its own (MosaicBERT-style sequence packing).
-
-    Greedy best-fit packing over a length histogram: seed each bin with the
-    longest unplaced example, then keep filling it with the largest example
-    that still fits. Room that nothing fits into is padded with pad_id.
+    max_length on its own (MosaicBERT-style sequence packing, see
+    picochat.data.packing.pack_bins for the bin-assignment algorithm). Room
+    that nothing fits into is padded with pad_id.
 
     Returns (input_ids, labels, doc_ids), each (n_bins, max_length) int64.
     doc_ids numbers the examples within a bin, with the padding tail getting
@@ -228,31 +226,7 @@ def pack_examples(
     last token, which the document mask hides (at a sequence start it was
     never a target to begin with).
     """
-    by_len: dict[int, list[int]] = {}
-    for i, (ids, _) in enumerate(examples):
-        assert 0 < len(ids) <= max_length
-        by_len.setdefault(len(ids), []).append(i)
-    lengths = sorted(by_len)  # ascending, for bisect
-
-    def pop_largest_at_most(room: int) -> int | None:
-        j = bisect.bisect_right(lengths, room) - 1
-        if j < 0:
-            return None
-        length = lengths[j]
-        idx = by_len[length].pop()
-        if not by_len[length]:
-            del by_len[length]
-            lengths.pop(j)
-        return idx
-
-    bins: list[list[int]] = []
-    while lengths:
-        room = max_length
-        packed: list[int] = []
-        while (idx := pop_largest_at_most(room)) is not None:
-            packed.append(idx)
-            room -= len(examples[idx][0])
-        bins.append(packed)
+    bins = pack_bins([len(ids) for ids, _ in examples], max_length)
 
     input_ids = torch.full((len(bins), max_length), pad_id, dtype=torch.long)
     labels = torch.full_like(input_ids, pad_id)

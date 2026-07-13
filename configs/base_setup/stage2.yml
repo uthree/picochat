@@ -1,6 +1,9 @@
 tokenizer: weights/tokenizer.json
 output_dir: data
 streaming: false # small datasets: download once, then iterate from local cache
+# Rows are packed to block_size+1 tokens; must match
+# configs/base_train/stage2.yml's data.block_size.
+block_size: 1024
 
 datasets:
     # None of these five have a dedicated Hub split, so each carves its own

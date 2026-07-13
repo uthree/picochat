@@ -67,7 +67,7 @@ def resolve_datasets(datasets, data_dir: str) -> tuple[list[str], list[float]]:
     return paths, weights
 
 
-def make_dataset(bins, block_size: int, random: bool, weights=None):
+def make_dataset(bins, block_size: int, weights=None):
     """Build a (Concat)PackedDataset from a single path or a list of paths.
 
     Returns (dataset, group_weights). group_weights is None unless `weights`
@@ -78,7 +78,7 @@ def make_dataset(bins, block_size: int, random: bool, weights=None):
     """
     if isinstance(bins, str):
         bins = [bins]
-    parts = [PackedDataset(b, block_size=block_size, random=random) for b in bins]
+    parts = [PackedDataset(b, block_size=block_size) for b in bins]
     if len(parts) == 1:
         if weights is not None:
             raise ValueError("train_weights requires more than one train_bin entry")
@@ -145,14 +145,13 @@ def main():
     train_ds, train_group_weights = make_dataset(
         train_bins,
         block_size,
-        random=True,
         weights=train_weights if len(train_bins) > 1 else None,
     )
     val_ds = None
     monitor = None
     if data_cfg.get("val_bin"):
         val_ds, _ = make_dataset(
-            resolve_bins(data_cfg["val_bin"], data_dir), block_size, random=False
+            resolve_bins(data_cfg["val_bin"], data_dir), block_size
         )
         monitor = "val_loss"
 

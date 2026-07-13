@@ -222,5 +222,6 @@ weights/
 # training artifacts
 lightning_logs/
 # preprocessed corpora: shard dirs (data/<name>/00000.bin) and SFT tensors
-# (data/sft/*.pt) both live under data/
-data/
+# (data/sft/*.pt) both live under the repo-root data/ (anchored so the
+# picochat/data package stays tracked)
+/data/
