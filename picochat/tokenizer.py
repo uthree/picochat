@@ -27,7 +27,7 @@ EOS_TOKEN = "<|end_of_text|>"  # end of a document / conversation
 IM_START = "<|im_start|>"  # ChatML: start of a turn (followed by "{role}\n")
 IM_END = "<|im_end|>"  # ChatML: end of a turn (the chat stop token)
 
-NUM_RESERVED_SPECIAL_TOKENS = 17
+NUM_RESERVED_SPECIAL_TOKENS = 16
 SPECIAL_TOKENS = [
     PAD_TOKEN,
     BOS_TOKEN,
