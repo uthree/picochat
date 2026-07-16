@@ -12,7 +12,7 @@ streaming: true # these datasets are large; stream instead of downloading everyt
 datasets:
     - { preset: smoltalk, output: smoltalk.pt }
     - { preset: smoltalk, output: smoltalk.val.pt, split: test, limit: 2000 }
-    # es/fr/it/pt/de/ar/ru/zh (see picochat.data.sft.PRESETS)
+    # es/fr/it/pt/de/ar/ru/zh (see picochat.dataset.CHAT_PRESETS)
     - { preset: smoltalk-multilingual, output: smoltalk-multilingual.pt }
     - { preset: magpie-ja, output: magpie-ja.pt }
     - { preset: aya-ko, output: aya-ko.pt }

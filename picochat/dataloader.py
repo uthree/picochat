@@ -1,35 +1,76 @@
-"""Pretraining data: HF dataset sources plus the packed token binaries built
-from them.
+"""Tokenized training data: packing, on-disk formats, Datasets, samplers and
+the LightningDataModule (nanochat's dataloader.py analogue; the raw HF
+sources live in picochat.dataset).
 
-DatasetSpec/PRESETS/Mixture describe *where* pretraining text comes from and
-how to stream it; both tokenizer training (scripts/tok_train.py) and
-preprocessing (scripts/base_setup.py) read from them. pack_docs then packs
-whole <|begin_of_text|>doc<|end_of_text|> documents into fixed-length rows of
-block_size+1 tokens (MosaicBERT-style sequence packing, same greedy best-fit
-as SFT's pack_examples), and ShardWriter splits the rows across fixed-size
-shard files (00000.bin, 00001.bin, ...) in one directory so no single file
-grows with the corpus; meta.json records the block_size the rows were packed
-with. PackedDataset returns one row per item, and the block_size+1 length lets
-GPT._loss shift by one internally to compute the next-token prediction loss
-(effective context block_size). A row usually holds several documents, each
-starting with <|begin_of_text|>; GPT._loss derives per-token document ids from
-those markers so attention never crosses a document boundary (see
-Transformer.forward).
+Everything here packs variable-length token sequences into fixed-length rows
+instead of padding each one on its own (MosaicBERT-style sequence packing,
+https://arxiv.org/abs/2312.17482; greedy best-fit via pack_bins):
+
+- Pretraining: pack_docs packs whole <|begin_of_text|>doc<|end_of_text|>
+  documents into rows of block_size+1 tokens, and ShardWriter splits the rows
+  across fixed-size shard files (00000.bin, 00001.bin, ...) in one directory
+  so no single file grows with the corpus; meta.json records the block_size
+  the rows were packed with. PackedDataset returns one row per item, and the
+  block_size+1 length lets GPT._loss shift by one internally to compute the
+  next-token prediction loss (effective context block_size). A row usually
+  holds several documents, each starting with <|begin_of_text|>; GPT._loss
+  derives per-token document ids from those markers so attention never
+  crosses a document boundary (see Transformer.forward).
+
+- SFT: pack_examples packs (input_ids, labels) conversations encoded by
+  picochat.tokenizer.encode_conversation into fixed-length rows plus explicit
+  per-token doc_ids; SFTDataset builds them in memory, SFTTensorDataset reads
+  the .pt bundle scripts/sft_setup.py writes.
 """
 
+import bisect
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
 
 import lightning as L
 import numpy as np
+import tiktoken
 import torch
-from datasets import load_dataset
 from torch import Tensor
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
-from picochat.data.packing import pack_bins
+from picochat.tokenizer import encode_conversation
+
+
+def pack_bins(lengths: list[int], max_length: int) -> list[list[int]]:
+    """Assign items of the given lengths to bins of capacity max_length.
+
+    Greedy best-fit over a length histogram: seed each bin with the longest
+    unplaced item, then keep filling it with the largest item that still fits.
+    Returns one list of item indices per bin; every index appears exactly once.
+    """
+    by_len: dict[int, list[int]] = {}
+    for i, n in enumerate(lengths):
+        assert 0 < n <= max_length
+        by_len.setdefault(n, []).append(i)
+    sizes = sorted(by_len)  # ascending, for bisect
+
+    def pop_largest_at_most(room: int) -> int | None:
+        j = bisect.bisect_right(sizes, room) - 1
+        if j < 0:
+            return None
+        n = sizes[j]
+        idx = by_len[n].pop()
+        if not by_len[n]:
+            del by_len[n]
+            sizes.pop(j)
+        return idx
+
+    bins: list[list[int]] = []
+    while sizes:
+        room = max_length
+        packed: list[int] = []
+        while (idx := pop_largest_at_most(room)) is not None:
+            packed.append(idx)
+            room -= lengths[idx]
+        bins.append(packed)
+    return bins
+
 
 # 32-bit token ids: leaves headroom for vocab beyond 65535 (e.g. up to 128k).
 # Writer and reader share this so the two never diverge.
@@ -37,166 +78,6 @@ DTYPE = np.uint32
 
 # Default shard size: 2**28 uint32 tokens = 1 GiB per shard file.
 DEFAULT_SHARD_TOKENS = 256 * 2**20
-
-
-@dataclass
-class DatasetSpec:
-    path: str  # HF Hub repo id, e.g. "roneneldan/TinyStories"
-    name: str | None = None  # config / subset name, e.g. "20231101.en"
-    split: str = "train"
-    text_key: str = "text"  # column that holds the text
-    # Use this to format several columns into one text (e.g. GSM8K question + answer).
-    format: Callable[[dict], str] | None = field(default=None, repr=False)
-
-    def to_text(self, row: dict) -> str:
-        if self.format is not None:
-            return self.format(row)
-        return row[self.text_key]
-
-
-# Presets for commonly used datasets, referenced via --preset.
-PRESETS: dict[str, DatasetSpec] = {
-    # --- Sanity checks (smallest first) ---
-    "wikitext": DatasetSpec("Salesforce/wikitext", "wikitext-2-raw-v1"),  # ~4MB
-    # --- Easy / early curriculum: simple vocabulary, basic content ---
-    # Synthetic children's stories with a tiny vocabulary (kindergarten level).
-    "tinystories": DatasetSpec("roneneldan/TinyStories"),  # ~2GB
-    "tinystories-ja": DatasetSpec("kai271/TinyStories-Japanese"),  # ~8MB
-    # Children's stories, a bit richer than TinyStories but still simple.
-    "children-stories": DatasetSpec("ajibawa-2023/Children-Stories-Collection"),
-    # Grade-school math word problems (question + worked answer).
-    "gsm8k": DatasetSpec(
-        "openai/gsm8k",
-        "main",
-        format=lambda r: f"{r['question']}\n{r['answer']}",
-    ),
-    # --- Educational / textbook (Phi-style: high pedagogical value) ---
-    # Synthetic textbooks/blogposts/stories generated by Mixtral (Phi-inspired).
-    "cosmopedia": DatasetSpec("HuggingFaceTB/cosmopedia", "web_samples_v2"),
-    # 420k synthetic "textbook" documents, inspired by phi-1.5.
-    "tiny-textbooks": DatasetSpec("nampdn-ai/tiny-textbooks", text_key="textbook"),
-    # 147k synthetic textbooks ordered simple -> complex (curriculum-structured).
-    "tiny-orca-textbooks": DatasetSpec(
-        "nampdn-ai/tiny-orca-textbooks", text_key="textbook"
-    ),
-    # "Textbooks Are All You Need"-style long-form textbooks (markdown body).
-    "textbooks": DatasetSpec("open-phi/textbooks", text_key="markdown"),
-    # Web pages filtered for educational value, scored toward grade/middle-school
-    # knowledge (English / Japanese). Closest open analogue to Phi's filtering.
-    "fineweb-edu": DatasetSpec("HuggingFaceFW/fineweb-edu", "sample-10BT"),
-    "fineweb-edu-ja": DatasetSpec("hotchpotch/fineweb-2-edu-japanese", "sample_10BT"),
-    # --- General knowledge / broad web (hardest, most diverse) ---
-    "wikipedia-en": DatasetSpec("wikimedia/wikipedia", "20231101.en"),
-    "wikipedia-ja": DatasetSpec("wikimedia/wikipedia", "20231101.ja"),
-    "wikipedia-de": DatasetSpec("wikimedia/wikipedia", "20231101.de"),
-    "wikipedia-es": DatasetSpec("wikimedia/wikipedia", "20231101.es"),
-    "wikipedia-fr": DatasetSpec("wikimedia/wikipedia", "20231101.fr"),
-    "wikipedia-it": DatasetSpec("wikimedia/wikipedia", "20231101.it"),
-    "wikipedia-ko": DatasetSpec("wikimedia/wikipedia", "20231101.ko"),
-    "wikipedia-zh": DatasetSpec("wikimedia/wikipedia", "20231101.zh"),
-    "wikipedia-ar": DatasetSpec("wikimedia/wikipedia", "20231101.ar"),
-    "wikipedia-ru": DatasetSpec("wikimedia/wikipedia", "20231101.ru"),
-    "wikipedia-el": DatasetSpec("wikimedia/wikipedia", "20231101.el"),
-    "wikipedia-la": DatasetSpec("wikimedia/wikipedia", "20231101.la"),
-    "wikipedia-ms": DatasetSpec("wikimedia/wikipedia", "20231101.ms"),
-    "fineweb-ja": DatasetSpec("HuggingFaceFW/fineweb-2", "jpn_Jpan"),
-    # --- Programming
-    "tiny-codes": DatasetSpec("nampdn-ai/tiny-codes", text_key="response"),
-    "github-code": DatasetSpec("codeparrot/github-code", text_key="code"),
-    # --- Literature and Novels
-    # 青空文庫 (aozora bunko)
-    "aozorabunko-clean": DatasetSpec("globis-university/aozorabunko-clean"),
-    # 小説家になろう (shosetuka ni narou)
-    "RyokoAI_Syosetu711K": DatasetSpec("botp/RyokoAI_Syosetu711K"),
-}
-
-
-@dataclass
-class Mixture:
-    """A corpus that mixes several sources by a character-count budget.
-
-    BPE is frequency-based, so ordering does not matter. `weights` allocates the
-    number of characters read from each source, which effectively determines how
-    much of the vocabulary each language gets (byte balancing).
-    """
-
-    specs: list[DatasetSpec]
-    weights: list[float]
-
-
-def iter_texts(
-    spec: DatasetSpec,
-    streaming: bool = True,
-    limit: int | None = None,
-    max_chars: int | None = None,
-) -> Iterator[str]:
-    """Yield non-empty texts one at a time from the dataset described by `spec`.
-
-    When max_chars is set, stop once the cumulative character count reaches it
-    (used for byte balancing).
-    """
-    ds = load_dataset(spec.path, spec.name, split=spec.split, streaming=streaming)
-    if limit is not None:
-        ds = ds.take(limit) if streaming else ds.select(range(min(limit, len(ds))))
-    n_chars = 0
-    for row in ds:
-        text = spec.to_text(row)
-        if text and text.strip():
-            yield text
-            if max_chars is not None:
-                n_chars += len(text)
-                if n_chars >= max_chars:
-                    return
-
-
-def iter_mixture(
-    mix: Mixture,
-    total_chars: int,
-    streaming: bool = True,
-) -> Iterator[str]:
-    """Read each source of the Mixture up to its weighted character budget and
-    concatenate them."""
-    for spec, w in zip(mix.specs, mix.weights):
-        yield from iter_texts(spec, streaming=streaming, max_chars=int(total_chars * w))
-
-
-def holdout_splits(split: str, val_fraction: float, total_examples: int) -> tuple[str, str]:
-    """Carve a validation slice out of a split that has no dedicated one of
-    its own (e.g. Wikipedia only ships "train"), via HF's absolute-index
-    slicing (`"train[123:]"`) -- exact and non-overlapping. Percentage
-    slicing (`"train[1%:]"`) would avoid needing `total_examples` at all, but
-    this project's pinned `datasets` version only parses whole-number
-    percentages (`datasets.arrow_reader._SUB_SPEC_RE`), too coarse for the
-    sub-1% val_fraction values used on multi-million-row datasets like
-    Wikipedia -- see scripts/base_setup.py's expand_val_fraction, which
-    resolves `total_examples` via load_dataset_builder. Returns (train_split,
-    val_split): the first `val_fraction` of `split` (by row count) becomes
-    validation, the remainder training.
-    """
-    assert 0 < val_fraction < 1, val_fraction
-    n_val = max(1, round(total_examples * val_fraction))
-    assert n_val < total_examples, (n_val, total_examples)
-    return f"{split}[{n_val}:]", f"{split}[:{n_val}]"
-
-
-def resolve_spec(preset: str | None, dataset: str | None) -> DatasetSpec:
-    """Resolve a DatasetSpec from CLI arguments.
-
-    Either --preset <name> or --dataset "path[:name[:split[:text_key]]]".
-    """
-    if preset is not None:
-        if preset not in PRESETS:
-            raise SystemExit(
-                f"unknown preset '{preset}'. choices: {', '.join(PRESETS)}"
-            )
-        return PRESETS[preset]
-    if dataset is not None:
-        path, *rest = dataset.split(":")
-        name = rest[0] if len(rest) > 0 and rest[0] else None
-        split = rest[1] if len(rest) > 1 and rest[1] else "train"
-        text_key = rest[2] if len(rest) > 2 and rest[2] else "text"
-        return DatasetSpec(path, name, split, text_key)
-    raise SystemExit("either --preset or --dataset is required")
 
 
 class ShardWriter:
@@ -511,3 +392,107 @@ class PretrainDataModule(L.LightningDataModule):
             persistent_workers=self.num_workers > 0,
             pin_memory=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# SFT chat data: packed (input_ids, labels, doc_ids) tensors for SFT training.
+# The ChatML rendering/loss-masking itself lives with the tokenizer (see
+# picochat.tokenizer.encode_conversation).
+# ---------------------------------------------------------------------------
+
+
+def pack_examples(
+    examples: list[tuple[list[int], list[int]]],
+    max_length: int,
+    pad_id: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Pack variable-length (input_ids, labels) examples into fixed-length
+    sequences, several examples per sequence, instead of padding each one to
+    max_length on its own (MosaicBERT-style sequence packing, see pack_bins
+    for the bin-assignment algorithm). Room that nothing fits into is padded
+    with pad_id.
+
+    Returns (input_ids, labels, doc_ids), each (n_bins, max_length) int64.
+    doc_ids numbers the examples within a bin, with the padding tail getting
+    its own final id, so attention can be confined to one example (see
+    Transformer.forward). Each example's first-token label is forced to pad_id:
+    after the loss shift it would be predicted from the *previous* example's
+    last token, which the document mask hides (at a sequence start it was
+    never a target to begin with).
+    """
+    bins = pack_bins([len(ids) for ids, _ in examples], max_length)
+
+    input_ids = torch.full((len(bins), max_length), pad_id, dtype=torch.long)
+    labels = torch.full_like(input_ids, pad_id)
+    doc_ids = torch.zeros_like(input_ids)
+    for b, packed in enumerate(bins):
+        pos = 0
+        for d, idx in enumerate(packed):
+            ids, labs = examples[idx]
+            end = pos + len(ids)
+            input_ids[b, pos:end] = torch.tensor(ids)
+            labels[b, pos:end] = torch.tensor(labs)
+            labels[b, pos] = pad_id  # never a cross-example target (see above)
+            doc_ids[b, pos:end] = d
+            pos = end
+        doc_ids[b, pos:] = len(packed)  # padding tail: its own document
+    return input_ids, labels, doc_ids
+
+
+class SFTDataset(Dataset):
+    """Pre-tokenizes and packs every conversation once at construction time
+    (SFT corpora fit in memory, unlike pretraining's token-stream shards) into
+    fixed-length (input_ids, labels, doc_ids) sequences, several conversations
+    per sequence (see pack_examples)."""
+
+    def __init__(
+        self,
+        conversations: list[list[dict]],
+        tokenizer: tiktoken.Encoding,
+        max_length: int,
+        pad_id: int,
+    ):
+        self.pad_id = pad_id
+        examples = [
+            encoded
+            for messages in conversations
+            if (encoded := encode_conversation(messages, tokenizer, max_length, pad_id))
+            is not None
+        ]
+        self.input_ids, self.labels, self.doc_ids = pack_examples(
+            examples, max_length, pad_id
+        )
+
+    def __len__(self) -> int:
+        return len(self.input_ids)
+
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+        return {
+            "input_ids": self.input_ids[idx],
+            "labels": self.labels[idx],
+            "doc_ids": self.doc_ids[idx],
+        }
+
+
+class SFTTensorDataset(Dataset):
+    """Reads a (input_ids, labels, doc_ids) tensor bundle written by
+    scripts/sft_setup.py's `process()` -- the on-disk counterpart of
+    SFTDataset, for training runs that shouldn't re-tokenize on every launch.
+    """
+
+    def __init__(self, path: str | Path):
+        bundle = torch.load(path, map_location="cpu")
+        self.input_ids = bundle["input_ids"]
+        self.labels = bundle["labels"]
+        self.doc_ids = bundle["doc_ids"]
+        self.pad_id = bundle["pad_id"]
+
+    def __len__(self) -> int:
+        return len(self.input_ids)
+
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+        return {
+            "input_ids": self.input_ids[idx],
+            "labels": self.labels[idx],
+            "doc_ids": self.doc_ids[idx],
+        }

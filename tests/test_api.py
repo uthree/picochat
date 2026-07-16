@@ -3,7 +3,7 @@ import json
 from fastapi.testclient import TestClient
 
 from picochat.api import create_app
-from picochat.generate import SamplingConfig
+from picochat.engine import SamplingConfig
 from picochat.tokenizer import IM_END
 from tests.test_generate import ByteTokenizer, ScriptedModel
 

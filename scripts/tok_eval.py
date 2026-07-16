@@ -20,7 +20,7 @@ from typing import Iterator
 from tqdm import tqdm
 import yaml
 
-from picochat.data.base import PRESETS, DatasetSpec, iter_texts
+from picochat.dataset import TEXT_PRESETS, DatasetSpec, iter_texts
 from picochat.tokenizer import load_tokenizer
 
 BATCH_SIZE = 1024
@@ -31,9 +31,11 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `data:` entry into a DatasetSpec (mirrors tok_train.py)."""
     if "preset" in entry:
         name = entry["preset"]
-        if name not in PRESETS:
-            raise SystemExit(f"unknown preset '{name}'. choices: {', '.join(PRESETS)}")
-        return PRESETS[name]
+        if name not in TEXT_PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(TEXT_PRESETS)}"
+            )
+        return TEXT_PRESETS[name]
     if "path" in entry:
         return DatasetSpec(
             path=entry["path"],

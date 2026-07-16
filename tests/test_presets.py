@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from picochat.model.gpt import (
+from picochat.gpt import (
     MODEL_PRESETS,
     TransformerLM,
     build_lm,

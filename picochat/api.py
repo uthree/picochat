@@ -4,7 +4,7 @@ Implements the two endpoints an OpenAI-compatible client needs to talk to a
 picochat checkpoint -- GET /v1/models and POST /v1/chat/completions, either
 streamed as server-sent events or returned as one JSON response -- which is
 enough for tools like OpenCode's `@ai-sdk/openai-compatible` provider.
-Request `messages` are plain ChatML turns: picochat.data.sft.render_chat_prompt
+Request `messages` are plain ChatML turns: picochat.tokenizer.render_chat_prompt
 already expects exactly this {"role", "content"} shape, so no translation
 layer is needed beyond Pydantic's request parsing.
 
@@ -31,8 +31,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from tiktoken import Encoding
 
-from picochat.data.sft import render_chat_prompt
-from picochat.generate import SamplingConfig, generate
+from picochat.engine import SamplingConfig, generate
+from picochat.tokenizer import render_chat_prompt
 
 
 class ChatMessage(BaseModel):

@@ -3,7 +3,7 @@ import copy
 import pytest
 import torch
 
-from picochat.model.gpt import MixtureOfExperts, Transformer
+from picochat.gpt import MixtureOfExperts, Transformer
 
 
 def _moe_transformer(grad_checkpoint: bool) -> Transformer:

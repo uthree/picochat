@@ -5,7 +5,8 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from picochat.model.gpt import GPT, TransformerLM
+from picochat.gpt import TransformerLM
+from picochat.trainer import GPT
 
 
 class _RandomTokenDataset(Dataset):
@@ -177,7 +178,12 @@ def test_gpt_loss_derives_doc_ids_from_bos():
     assert seen["doc_ids"].tolist() == [[0, 1, 1, 1, 2, 2]]
 
 
-def test_gpt_without_bos_idx_passes_no_masks(gpt_module):
+def test_gpt_without_bos_idx_passes_no_masks():
+    # fused_loss=False: the spy stands in for _forward and returns logits,
+    # which is the unfused contract (fused expects hidden states -- see
+    # LMTrainerMixin._next_token_loss).
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    gpt_module = GPT(lm, pad_idx=0, fused_loss=False)
     seen = {}
 
     def spy(x, doc_ids=None, masks=None):

@@ -16,6 +16,10 @@ We use [uv](https://docs.astral.sh/uv/) for the virtual environment:
 ```bash
 uv venv --python 3.11  # initialize venv
 uv pip install -e .    # install dependencies
+
+# optional: Hub-loaded Triton kernels (Liger fused cross-entropy) for
+# lower-memory training on CUDA; everything runs without it
+uv pip install -e ".[kernels]"
 ```
 
 ### 2. Train the tokenizer
@@ -100,6 +104,40 @@ uv run scripts/base_eval.py --checkpoint weights/sft-stage1/last.ckpt --chat
 ```bash
 uv run pytest
 ```
+
+## Project layout
+A flat package, one file per concern (following
+[nanochat](https://github.com/karpathy/nanochat)):
+
+| Module | Responsibility |
+|---|---|
+| `picochat/gpt.py` | the model in one file: blocks (RMSNorm, RoPE, SwiGLU, MoE, attention) up through `TransformerLM`, plus the scale-ladder presets and `build_lm` |
+| `picochat/trainer.py` | the LightningModules that train it (`GPT` for pretraining, `SFTModule` for SFT) and the shared Muon/AdamW + LR-schedule scaffolding |
+| `picochat/engine.py` | sampling and KV-cached streaming generation |
+| `picochat/tokenizer.py` | BPE tokenizer (rustbpe training / tiktoken inference), special tokens, and the ChatML rendering built on them |
+| `picochat/dataset.py` | where raw data comes from: HF Hub sources for pretraining text and SFT conversations |
+| `picochat/dataloader.py` | sequence packing, the sharded on-disk token format, Datasets/samplers/DataModule |
+| `picochat/tasks.py` | likelihood-based multiple-choice benchmarks (hellaswag, arc, ...) |
+| `picochat/kernels.py` | optional [HF `kernels`](https://github.com/huggingface/kernels) integration with plain-PyTorch fallback (see below) |
+| `picochat/api.py` | OpenAI-compatible Chat Completions endpoints |
+| `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `base_eval`/`chat`/`api` |
+
+## Performance
+Training compiles the model with `torch.compile` (FlexAttention fuses the
+sliding-window/packed-document attention). On top of that,
+`trainer.fused_loss: true` in a stage config folds the lm-head matmul into
+[Liger's](https://github.com/linkedin/Liger-Kernel) fused cross-entropy
+kernel, loaded from the Hub via the optional
+[HF `kernels`](https://github.com/huggingface/kernels) extra
+([kernels-community/liger-kernels](https://huggingface.co/kernels-community/liger-kernels)).
+At a 128k vocab the logits tensor is the largest activation of a training
+step; never materializing it roughly halves peak memory (measured on the
+`pico` preset, batch 8 x 1024 tokens, bf16, L4 24GB: 13.1 → 6.8 GiB) at the
+cost of some step time on smaller GPUs (+20% on that L4; the chunked kernel
+re-reads the lm-head weight per chunk). Turn it on when memory-bound -- a
+bigger model, longer context, or a batch that otherwise OOMs -- and leave it
+off when raw throughput matters more. It is exactly loss-equivalent (same
+values and gradients as the plain loss; verified in `tests/test_kernels.py`).
 
 ## Model Architecture
 A decoder-only Transformer (pre-RMSNorm, no biases, untied embeddings) with

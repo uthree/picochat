@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from picochat.generate import SamplingConfig, generate, sample
+from picochat.engine import SamplingConfig, generate, sample
 from picochat.tokenizer import IM_END, SPECIAL_TOKENS
 
 
@@ -143,7 +143,7 @@ def test_generate_caps_budget_at_max_seq_len():
     # A real TransformerLM asserts if decode runs past its RoPE tables; the
     # cap must stop generation instead. vocab < 256 keeps the byte
     # tokenizer's stop-token ids unreachable, so only the cap can end it.
-    from picochat.model.gpt import TransformerLM
+    from picochat.gpt import TransformerLM
 
     torch.manual_seed(0)
     lm = TransformerLM(

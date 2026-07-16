@@ -1,22 +1,24 @@
 import pytest
 import torch
 
-from picochat.data.sft import (
-    PRESETS,
-    ChatDatasetSpec,
+from picochat.dataloader import (
     SFTDataset,
     SFTTensorDataset,
-    _aya_kor_to_messages,
-    encode_conversation,
     pack_examples,
-    render_chat_prompt,
-    resolve_spec,
+)
+from picochat.dataset import (
+    CHAT_PRESETS,
+    ChatDatasetSpec,
+    _aya_kor_to_messages,
+    resolve_chat_spec,
 )
 from picochat.tokenizer import (
     EOS_TOKEN,
     PAD_TOKEN,
     SPECIAL_TOKENS,
+    encode_conversation,
     load_tokenizer,
+    render_chat_prompt,
     train_tokenizer,
 )
 
@@ -272,27 +274,27 @@ def test_aya_kor_to_messages_renders_one_turn_conversation():
 
 
 def test_resolve_spec_preset():
-    assert resolve_spec("smoltalk", None) is PRESETS["smoltalk"]
+    assert resolve_chat_spec("smoltalk", None) is CHAT_PRESETS["smoltalk"]
 
 
 def test_resolve_spec_unknown_preset_raises():
     with pytest.raises(SystemExit):
-        resolve_spec("no-such-preset", None)
+        resolve_chat_spec("no-such-preset", None)
 
 
 def test_resolve_spec_inline_dataset():
-    spec = resolve_spec(None, "some/repo:config:val:turns")
+    spec = resolve_chat_spec(None, "some/repo:config:val:turns")
     assert spec == ChatDatasetSpec("some/repo", "config", "val", "turns")
 
 
 def test_resolve_spec_inline_dataset_defaults():
-    spec = resolve_spec(None, "some/repo")
+    spec = resolve_chat_spec(None, "some/repo")
     assert spec == ChatDatasetSpec("some/repo", None, "train", "messages")
 
 
 def test_resolve_spec_requires_preset_or_dataset():
     with pytest.raises(SystemExit):
-        resolve_spec(None, None)
+        resolve_chat_spec(None, None)
 
 
 def test_sft_dataset_packs_conversations_into_fixed_length_rows(tokenizer, pad_id):

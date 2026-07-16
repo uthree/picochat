@@ -7,7 +7,7 @@
     python scripts/base_eval.py --checkpoint weights/sft-stage1/last.ckpt --chat
 
 Every answer choice is scored by its completion log-likelihood and the
-prediction is the argmax (see picochat/eval.py for tasks and metrics). The
+prediction is the argmax (see picochat/tasks.py for tasks and metrics). The
 same items back both renderings, so acc/acc_norm are comparable before and
 after SFT. Datasets download from the HF hub on first use; --limit N keeps a
 quick smoke run cheap. Like chat.py, the architecture is rebuilt from
@@ -20,8 +20,8 @@ import json
 
 import torch
 
-from picochat.eval import TASKS, evaluate_task
-from picochat.model.gpt import load_gpt_checkpoint
+from picochat.tasks import TASKS, evaluate_task
+from picochat.trainer import load_gpt_checkpoint
 
 
 def main():

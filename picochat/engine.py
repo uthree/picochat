@@ -106,7 +106,7 @@ def generate(
     `max_seq_len` is the model's positional range (its RoPE tables): decoding
     past it asserts, so the budget is capped to stop generation early instead.
     The caller is responsible for a prompt that already fits (see
-    ChatApp._build_prompt / picochat.eval.encode_choice)."""
+    ChatApp._build_prompt / picochat.tasks.encode_choice)."""
     budget = cfg.max_new_tokens
     if max_seq_len is not None:
         budget = min(budget, max_seq_len - len(prompt_ids))

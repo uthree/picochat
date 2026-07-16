@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from picochat.model.gpt import Transformer, TransformerLM, estimate_num_params
+from picochat.gpt import Transformer, TransformerLM, estimate_num_params
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,11 @@ dependencies = [
     "uvicorn[standard]>=0.51.0",
 ]
 
+[project.optional-dependencies]
+# Hub-loaded Triton kernels (Liger fused cross-entropy; see picochat/kernels.py).
+# Optional: training falls back to the plain loss without it.
+kernels = ["kernels>=0.16.0"]
+
 
 # CUDA 12 (cu126) torch wheels; PyPI ships CUDA 13 builds for torch >= 2.12
 [tool.uv.sources]

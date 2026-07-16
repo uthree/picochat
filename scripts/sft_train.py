@@ -20,10 +20,9 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
-from picochat.data.base import PretrainDataModule
-from picochat.data.sft import SFTTensorDataset
-from picochat.model.gpt import build_lm
-from picochat.model.sft import SFTModule
+from picochat.dataloader import PretrainDataModule, SFTTensorDataset
+from picochat.gpt import build_lm
+from picochat.trainer import SFTModule
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
 
@@ -202,6 +201,9 @@ def main():
         warmup_steps=optim_cfg.get("warmup_steps", 100),
         max_steps=max_steps,
         compile=trainer_cfg.get("compile", None),
+        # Opt-in memory saver: Liger fused cross-entropy (see picochat.kernels
+        # and the matching comment in base_train.py).
+        fused_loss=trainer_cfg.get("fused_loss", False),
         tokenizer=tokenizer,
         model_config=model_config,
     )

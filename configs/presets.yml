@@ -1,4 +1,4 @@
-# Model scale ladder, loaded by picochat.model.gpt (MODEL_PRESETS /
+# Model scale ladder, loaded by picochat.gpt (MODEL_PRESETS /
 # build_lm / estimate_preset_params).
 #
 # Sized for a 128k vocab and an untied lm head (embedding + head together are

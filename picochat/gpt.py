@@ -1,13 +1,16 @@
-"""Transformer language-model architecture: the building blocks (norm, RoPE,
-SwiGLU, MoE, attention) up through TransformerLM. The GPT LightningModule that
-trains it, plus the scale-ladder presets, live in gpt.py.
+"""The picochat model, in one file (nanochat-style): the building blocks
+(norm, RoPE, SwiGLU, MoE, attention) up through TransformerLM, plus the
+scale-ladder presets and the build_lm/estimate_num_params helpers that size
+it. The LightningModules that train it live in trainer.py.
 """
 
 import math
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import yaml
 from einops import rearrange
 from torch import Tensor
 from torch.nn.attention.flex_attention import (
@@ -748,3 +751,55 @@ def estimate_num_params(
     lmhead = vocab_size * d_model  # separate (untied) output projection
     layers = n_layers * layer_params
     return embed + lmhead + layers
+
+
+# Scale ladder: pico (~0.5B, the entry point) up to large (~23B MoE), kept in
+# configs/presets.yml so the hyperparameters live with the other recipes (see
+# that file for the sizing rationale).
+PRESETS_FILE = Path(__file__).resolve().parents[1] / "configs" / "presets.yml"
+
+
+def load_presets(path: str | Path = PRESETS_FILE) -> dict[str, dict]:
+    """Load the {size: hyperparameters} scale ladder consumed by build_lm."""
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+MODEL_PRESETS: dict[str, dict] = load_presets()
+
+
+def build_lm(
+    size: str,
+    vocab_size: int | None = None,
+    max_seq_len: int = 4096,
+    **overrides,
+) -> TransformerLM:
+    """Build a TransformerLM from a preset name. vocab_size defaults to the
+    preset's recommended value; pass it explicitly (e.g. the tokenizer's actual
+    vocab) to override. Any other field can be overridden via overrides."""
+    if size not in MODEL_PRESETS:
+        raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
+    cfg = {**MODEL_PRESETS[size], **overrides}
+    if vocab_size is not None:
+        cfg["vocab_size"] = vocab_size
+    return TransformerLM(max_seq_len=max_seq_len, **cfg)
+
+
+def estimate_preset_params(
+    size: str,
+    vocab_size: int | None = None,
+    active_only: bool = False,
+    **overrides,
+) -> int:
+    """Estimate the parameter count of build_lm(size, ...) without building it.
+
+    Same preset/override resolution as build_lm, so the two always describe the
+    same model. Handy for sizing the scale ladder on a machine that can't hold
+    the larger presets in memory. active_only=True returns the per-token active
+    parameter count instead of the total (see estimate_num_params)."""
+    if size not in MODEL_PRESETS:
+        raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
+    cfg = {**MODEL_PRESETS[size], **overrides}
+    if vocab_size is not None:
+        cfg["vocab_size"] = vocab_size
+    return estimate_num_params(**cfg, active_only=active_only)

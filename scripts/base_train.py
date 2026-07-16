@@ -21,8 +21,9 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
-from picochat.data.base import PackedDataset, PretrainDataModule
-from picochat.model.gpt import GPT, build_lm
+from picochat.dataloader import PackedDataset, PretrainDataModule
+from picochat.gpt import build_lm
+from picochat.trainer import GPT
 from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
@@ -220,6 +221,12 @@ def main():
         max_steps=max_steps,
         # None -> auto (compile only where torch.compile is supported).
         compile=trainer_cfg.get("compile", None),
+        # Opt-in memory saver: fold the lm-head into a Liger fused
+        # cross-entropy kernel so the (b*l, 128k-vocab) logits are never
+        # materialized -- roughly halves peak memory at some step-time cost
+        # on smaller GPUs (see picochat.kernels). Needs `pip install
+        # picochat[kernels]`; true insists (errors if unavailable).
+        fused_loss=trainer_cfg.get("fused_loss", False),
         # Used to render generated-text samples to TensorBoard during validation.
         tokenizer=tokenizer,
         model_config=model_config,

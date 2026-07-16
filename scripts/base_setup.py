@@ -3,7 +3,7 @@
 Each document is encoded and wrapped in <|begin_of_text|>...<|end_of_text|>,
 then whole documents are packed into fixed-length rows of block_size+1 tokens
 (MosaicBERT-style sequence packing, greedy best-fit -- see
-picochat.data.base.pack_docs; documents longer than one row are split into
+picochat.dataloader.pack_docs; documents longer than one row are split into
 row-sized chunks, each continuation prefixed with <|begin_of_text|>). The rows
 are split across shard files (00000.bin, 00001.bin, ...) under one output
 directory per dataset, so no single file grows with the corpus, plus a
@@ -38,17 +38,19 @@ import yaml
 from datasets import get_dataset_split_names, load_dataset_builder
 from tqdm import tqdm
 
-from picochat.data.base import (  # DTYPE: uint32; shared with the reader
+from picochat.dataloader import (  # DTYPE: uint32; shared with the reader
     DEFAULT_SHARD_TOKENS,
     DTYPE,
-    PRESETS,
-    DatasetSpec,
     ShardWriter,
+    pack_docs,
+    write_meta,
+)
+from picochat.dataset import (
+    TEXT_PRESETS,
+    DatasetSpec,
     holdout_splits,
     iter_texts,
-    pack_docs,
-    resolve_spec,
-    write_meta,
+    resolve_text_spec,
 )
 from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, load_tokenizer
 
@@ -115,14 +117,16 @@ def load_enc(tokenizer_path: str):
 def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `datasets:` entry into a DatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.base, or an inline
+    Either {preset: <name>} referencing picochat.dataset, or an inline
     {path, name, split, text_key}. An optional `split` overrides the preset's.
     """
     if "preset" in entry:
         name = entry["preset"]
-        if name not in PRESETS:
-            raise SystemExit(f"unknown preset '{name}'. choices: {', '.join(PRESETS)}")
-        spec = PRESETS[name]
+        if name not in TEXT_PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(TEXT_PRESETS)}"
+            )
+        spec = TEXT_PRESETS[name]
     elif "path" in entry:
         spec = DatasetSpec(
             path=entry["path"],
@@ -133,7 +137,7 @@ def spec_from_entry(entry: dict) -> DatasetSpec:
     else:
         raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
     # Per-entry `split` override. Use replace() to copy the spec rather than
-    # mutate it: PRESETS entries are shared, so mutating would leak the split
+    # mutate it: TEXT_PRESETS entries are shared, so mutating would leak the split
     # into every other entry using the same preset.
     if "split" in entry:
         spec = replace(spec, split=entry["split"])
@@ -156,7 +160,7 @@ def _split_example_count(spec: DatasetSpec) -> int:
 
 def expand_val_fraction(entries: list[dict]) -> list[dict]:
     """Expand a `val_fraction`/`val_output` entry into a plain train + val pair
-    (see picochat.data.base.holdout_splits), so the rest of the pipeline
+    (see picochat.dataset.holdout_splits), so the rest of the pipeline
     never has to know about held-out splits. For datasets with no dedicated
     validation split (e.g. Wikipedia, cosmopedia -- only "train"), this is
     how a val set is carved out instead of falling back to a different
@@ -369,7 +373,7 @@ def main():
             "data.block_size)"
         )
     enc, bos_id, eos_id, pad_id = load_enc(DEFAULT_TOKENIZER)
-    spec = resolve_spec(args.preset, args.dataset)
+    spec = resolve_text_spec(args.preset, args.dataset)
     if args.split is not None:
         spec.split = args.split
     problems = validate_specs([spec])

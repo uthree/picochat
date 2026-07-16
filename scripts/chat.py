@@ -2,7 +2,7 @@
 
 Loads a model + tokenizer from a checkpoint and opens a ChatML conversation:
 each submitted line becomes a user turn, the full history is rendered via
-picochat.data.sft.render_chat_prompt (ending in the `<|im_start|>assistant\\n`
+picochat.tokenizer.render_chat_prompt (ending in the `<|im_start|>assistant\\n`
 cue) and the reply streams into the log until the model emits `<|im_end|>`
 (or `<|end_of_text|>`/the token budget). Slash commands control the session:
 
@@ -39,9 +39,9 @@ from textual.theme import BUILTIN_THEMES
 from textual.widgets import Input, Static
 from textual.worker import get_current_worker
 
-from picochat.data.sft import render_chat_prompt
-from picochat.generate import SamplingConfig, generate
-from picochat.model.gpt import load_gpt_checkpoint
+from picochat.tokenizer import render_chat_prompt
+from picochat.engine import SamplingConfig, generate
+from picochat.trainer import load_gpt_checkpoint
 
 DEFAULT_THEME = "ansi-dark"
 

@@ -1,10 +1,10 @@
 """Tokenize HF chat datasets (e.g. HuggingFaceTB/smoltalk) into packed SFT
-tensors ready for picochat.data.sft.SFTTensorDataset.
+tensors ready for picochat.dataloader.SFTTensorDataset.
 
-Every conversation is tokenized via picochat.data.sft.encode_conversation
+Every conversation is tokenized via picochat.tokenizer.encode_conversation
 (ChatML rendering, <|pad|>-based loss masking -- see that module), and
 the surviving conversations are packed several-per-sequence into fixed-length
-rows (MosaicBERT-style sequence packing, picochat.data.sft.pack_examples)
+rows (MosaicBERT-style sequence packing, picochat.dataloader.pack_examples)
 saved as a single {input_ids, labels, doc_ids, pad_id} tensor bundle in one
 .pt file. SFT corpora are small enough to fit in memory, unlike
 base_setup.py's sharded token-stream binaries for pretraining, so no shard
@@ -27,15 +27,14 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from picochat.data.sft import (
-    PRESETS,
+from picochat.dataloader import pack_examples
+from picochat.dataset import (
+    CHAT_PRESETS,
     ChatDatasetSpec,
-    encode_conversation,
     iter_conversations,
-    pack_examples,
-    resolve_spec,
+    resolve_chat_spec,
 )
-from picochat.tokenizer import PAD_TOKEN, load_tokenizer
+from picochat.tokenizer import PAD_TOKEN, encode_conversation, load_tokenizer
 
 # Used by the ad-hoc single-dataset mode; config mode reads the path from the
 # recipe's `tokenizer:` field instead.
@@ -51,14 +50,16 @@ def load_enc_and_pad_id(tokenizer_path: str):
 def spec_from_entry(entry: dict) -> ChatDatasetSpec:
     """Resolve one `datasets:` entry into a ChatDatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.sft, or an inline
+    Either {preset: <name>} referencing picochat.dataset, or an inline
     {path, name, split, messages_key}. An optional `split` overrides the preset's.
     """
     if "preset" in entry:
         name = entry["preset"]
-        if name not in PRESETS:
-            raise SystemExit(f"unknown preset '{name}'. choices: {', '.join(PRESETS)}")
-        spec = PRESETS[name]
+        if name not in CHAT_PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(CHAT_PRESETS)}"
+            )
+        spec = CHAT_PRESETS[name]
     elif "path" in entry:
         spec = ChatDatasetSpec(
             path=entry["path"],
@@ -69,7 +70,7 @@ def spec_from_entry(entry: dict) -> ChatDatasetSpec:
     else:
         raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
     # Per-entry `split` override. Use replace() to copy the spec rather than
-    # mutate it: PRESETS entries are shared, so mutating would leak the split
+    # mutate it: CHAT_PRESETS entries are shared, so mutating would leak the split
     # into every other entry using the same preset.
     if "split" in entry:
         spec = replace(spec, split=entry["split"])
@@ -87,7 +88,7 @@ def process(
 ) -> tuple[int, int]:
     """Tokenize every conversation of `spec`, pack the surviving ones into
     fixed-length sequences (several conversations per sequence, see
-    picochat.data.sft.pack_examples) and save them as a single
+    picochat.dataloader.pack_examples) and save them as a single
     {input_ids, labels, doc_ids, pad_id} bundle at `output`. Returns (n_kept,
     n_dropped); a conversation is dropped when truncation to max_length left
     no assistant turn to train on (see encode_conversation).
@@ -201,7 +202,7 @@ def main():
     if not args.output:
         raise SystemExit("either --config, or --output with --preset/--dataset")
     enc, pad_id = load_enc_and_pad_id(DEFAULT_TOKENIZER)
-    spec = resolve_spec(args.preset, args.dataset)
+    spec = resolve_chat_spec(args.preset, args.dataset)
     if args.split is not None:
         spec = replace(spec, split=args.split)
     process(

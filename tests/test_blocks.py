@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from picochat.model.gpt import SelfAttention, SwiGLU, Transformer, rms_norm, rotate_half
+from picochat.gpt import SelfAttention, SwiGLU, Transformer, rms_norm, rotate_half
 
 
 # ---------------------------------------------------------------------------

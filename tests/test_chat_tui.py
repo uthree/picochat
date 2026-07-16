@@ -6,7 +6,7 @@ import asyncio
 import torch
 from textual.widgets import Input, Static
 
-from picochat.generate import SamplingConfig
+from picochat.engine import SamplingConfig
 from picochat.tokenizer import IM_END
 from scripts.chat import ChatApp
 from tests.test_generate import ByteTokenizer, ScriptedModel
@@ -85,7 +85,7 @@ def test_multi_turn_survives_small_context_window():
     # worker (position N exceeds max_seq_len assertion). With a real model,
     # a tiny window and the default 256-token budget, several turns must
     # stream replies without overrunning the RoPE tables.
-    from picochat.model.gpt import TransformerLM
+    from picochat.gpt import TransformerLM
 
     async def go():
         torch.manual_seed(0)

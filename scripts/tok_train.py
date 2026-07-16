@@ -11,21 +11,23 @@ from pathlib import Path
 
 import yaml
 
-from picochat.data.base import PRESETS, DatasetSpec, Mixture, iter_mixture
+from picochat.dataset import TEXT_PRESETS, DatasetSpec, Mixture, iter_mixture
 from picochat.tokenizer import SPECIAL_TOKENS, train_tokenizer
 
 
 def spec_from_entry(entry: dict) -> DatasetSpec:
     """Resolve one `data:` entry into a DatasetSpec.
 
-    Either {preset: <name>} referencing picochat.data.base, or an inline
+    Either {preset: <name>} referencing picochat.dataset, or an inline
     {path, name, split, text_key}.
     """
     if "preset" in entry:
         name = entry["preset"]
-        if name not in PRESETS:
-            raise SystemExit(f"unknown preset '{name}'. choices: {', '.join(PRESETS)}")
-        return PRESETS[name]
+        if name not in TEXT_PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(TEXT_PRESETS)}"
+            )
+        return TEXT_PRESETS[name]
     if "path" in entry:
         return DatasetSpec(
             path=entry["path"],

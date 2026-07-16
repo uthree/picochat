@@ -11,7 +11,7 @@ For OpenCode, add a custom `@ai-sdk/openai-compatible` provider pointing
 options.baseURL at this server's `/v1` and use --model-id as the model key.
 
 Like scripts/chat.py, the architecture is rebuilt from the checkpoint's own
-model_config, and generation streams via picochat.generate.generate(); a base
+model_config, and generation streams via picochat.engine.generate(); a base
 (pretrain-only) checkpoint has never seen ChatML turns, so this is primarily
 for SFT checkpoints.
 """
@@ -23,8 +23,8 @@ import torch
 import uvicorn
 
 from picochat.api import create_app
-from picochat.generate import SamplingConfig
-from picochat.model.gpt import load_gpt_checkpoint
+from picochat.engine import SamplingConfig
+from picochat.trainer import load_gpt_checkpoint
 
 
 def main():

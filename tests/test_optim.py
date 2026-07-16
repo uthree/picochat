@@ -1,9 +1,10 @@
 """Optimizer wiring tests: torch.optim.Muon for hidden matrices + AdamW for
-the rest, split by LMTrainerMixin._muon_param_split (see lm_module.py)."""
+the rest, split by LMTrainerMixin._muon_param_split (see picochat/trainer.py)."""
 
 import torch
 
-from picochat.model.gpt import GPT, TransformerLM
+from picochat.gpt import TransformerLM
+from picochat.trainer import GPT
 
 
 def _moe_gpt() -> GPT:

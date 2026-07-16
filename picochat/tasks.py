@@ -28,8 +28,7 @@ import torch
 import torch.nn.functional as F
 from tiktoken import Encoding
 
-from picochat.data.sft import render_chat_prompt
-from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN
+from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, render_chat_prompt
 
 
 @dataclass(frozen=True)
