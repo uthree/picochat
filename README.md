@@ -5,7 +5,8 @@ A project inspired by [nanochat](https://github.com/karpathy/nanochat):
 training a small chat LLM from scratch on a budget of roughly $100.
 
 ## Requirements
-- Training: a CUDA GPU (CUDA 13.0 or later), PyTorch 2.12.1 or later
+- Python 3.11
+- Training: a CUDA GPU (CUDA 12.6 or later in the 12.x series), PyTorch 2.12.1 or later (cu126 wheels)
 - Tests and evaluation also run on CPU
 
 ## Usage
@@ -13,7 +14,7 @@ training a small chat LLM from scratch on a budget of roughly $100.
 ### 1. Set up the environment
 We use [uv](https://docs.astral.sh/uv/) for the virtual environment:
 ```bash
-uv venv --python 3.14  # initialize venv
+uv venv --python 3.11  # initialize venv
 uv pip install -e .    # install dependencies
 ```
 
