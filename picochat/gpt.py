@@ -300,21 +300,34 @@ class SelfAttention(nn.Module):
         self.proj_q = nn.Linear(d_model, self.d_head * n_heads, bias=False)
         self.proj_k = nn.Linear(d_model, self.d_head * self.n_kv_heads, bias=False)
         self.proj_v = nn.Linear(d_model, self.d_head * self.n_kv_heads, bias=False)
+        # Gated attention (arXiv:2505.06708, G1 variant): an input-dependent
+        # elementwise sigmoid gate on the attention output, per query head,
+        # applied before proj_o. Adds non-linearity between the value/output
+        # projections and lets a head cleanly zero its contribution, which the
+        # paper shows removes attention sinks and improves stability/quality.
+        self.proj_g = nn.Linear(d_model, self.d_head * n_heads, bias=False)
         self.proj_o = nn.Linear(self.d_head * n_heads, d_model, bias=False)
 
         sin, cos = self._rope_tables(max_seq_len)
         self.register_buffer("sin", sin, persistent=False)
         self.register_buffer("cos", cos, persistent=False)
 
-    def _project(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        # Shared q/k/v projection (with QK-norm) for both forward and decode.
+    def _project(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        # Shared q/k/v/gate projection (with QK-norm) for both forward and
+        # decode. The gate is computed from the same normalized input as q/k/v
+        # and multiplies the attention output elementwise in _output.
         x = rms_norm(x)
         query = rearrange(self.proj_q(x), "b l (h d) -> b h l d", d=self.d_head)
         key = rms_norm(rearrange(self.proj_k(x), "b l (g d) -> b g l d", d=self.d_head))
         value = rms_norm(
             rearrange(self.proj_v(x), "b l (g d) -> b g l d", d=self.d_head)
         )
-        return query, key, value
+        gate = torch.sigmoid(self.proj_g(x))  # (b, l, h*d)
+        return query, key, value, gate
+
+    def _output(self, attn: Tensor, gate: Tensor) -> Tensor:
+        # Gate the attention output elementwise, then project back to d_model.
+        return self.proj_o(rearrange(attn, "b h l d -> b l (h d)") * gate)
 
     def _window_mask(
         self,
@@ -344,7 +357,7 @@ class SelfAttention(nn.Module):
         # (a flex_attention BlockMask on CUDA, a dense bool mask elsewhere); it
         # already encodes causality, document boundaries and this layer's
         # window, so it replaces the plain causal/windowed paths below.
-        query, key, value = self._project(x)
+        query, key, value, gate = self._project(x)
         query, key = self._rope(query), self._rope(key)
         if isinstance(attn_mask, BlockMask):
             attn = flex_attention(
@@ -385,7 +398,7 @@ class SelfAttention(nn.Module):
             attn = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=mask, enable_gqa=True
             )
-        return self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
+        return self._output(attn, gate)
 
     def decode(
         self, x: Tensor, cache: Tensor | None = None, pos: int = 0
@@ -397,7 +410,7 @@ class SelfAttention(nn.Module):
         # cache is truncated below and can no longer be used to infer it.
         # Always runs eager (see GPT.__init__), so flex_attention would gain
         # nothing here over a plain masked SDPA call; keep the simpler path.
-        query, key, value = self._project(x)
+        query, key, value, gate = self._project(x)
         old_len = 0 if cache is None else cache.shape[-2]
         if cache is not None:
             key = torch.cat([cache[0], key], dim=-2)
@@ -415,7 +428,7 @@ class SelfAttention(nn.Module):
         attn = F.scaled_dot_product_attention(
             query_r, key_r, value, attn_mask=mask, enable_gqa=True
         )
-        out = self.proj_o(rearrange(attn, "b h l d -> b l (h d)"))
+        out = self._output(attn, gate)
         # Truncate only what's carried into the *next* call's cache; the attention
         # above already used the full, untruncated key/value, so a chunk longer
         # than window_size (e.g. a long prefill) is handled correctly for free.
@@ -735,9 +748,9 @@ def estimate_num_params(
     # back to 3*d_model -- so an unset d_expert lands on ffn_hidden.
     expert_hidden = ffn_hidden if d_expert is None else d_expert
 
-    # Attention: q/o are square (d_head*n_heads == d_model), k/v project to
-    # kv_dim. All bias-free.
-    attn = 2 * d_model * d_model + 2 * d_model * kv_dim
+    # Attention: q/g/o are square (d_head*n_heads == d_model), k/v project to
+    # kv_dim. All bias-free. g is the gated-attention output gate.
+    attn = 3 * d_model * d_model + 2 * d_model * kv_dim
     # SwiGLU: up/gate/down, all bias-free.
     ffn = 3 * d_model * ffn_hidden
     layer_params = attn + ffn
