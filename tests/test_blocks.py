@@ -3,7 +3,14 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from picochat.gpt import SelfAttention, SwiGLU, Transformer, rms_norm, rotate_half
+from picochat.gpt import (
+    DepthAttention,
+    SelfAttention,
+    SwiGLU,
+    Transformer,
+    rms_norm,
+    rotate_half,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +286,38 @@ def test_window_none_means_full_attention():
     assert not torch.allclose(full[:, 9], out[:, 9], atol=1e-5)
 
 
+def test_depth_attention_single_source_is_identity():
+    # softmax over one source is 1, so a lone block passes through unchanged.
+    mix = DepthAttention(16)
+    x = torch.randn(1, 5, 16)
+    assert torch.allclose(mix(x[None], None), x)
+
+
+def test_depth_attention_zero_query_mixes_uniformly():
+    # the zero-init query gives uniform weights: blocks + partial average.
+    mix = DepthAttention(16)
+    a, b = torch.randn(2, 1, 5, 16)
+    assert torch.allclose(mix(a[None], b), (a + b) / 2, atol=1e-6)
+
+
+def test_depth_attention_query_selects_sources():
+    # a trained (non-zero) query reweights sources per token: push the query
+    # far toward one source's direction and the mix approaches that source.
+    torch.manual_seed(0)
+    mix = DepthAttention(16)
+    a, b = torch.randn(2, 1, 5, 16)
+    with torch.no_grad():
+        mix.query.copy_(100.0 * rms_norm(a)[0, 0])
+    out = mix(a[None], b)
+    assert torch.allclose(out[:, 0], a[:, 0], atol=1e-3)
+    assert not torch.allclose(out, (a + b) / 2, atol=1e-2)
+
+
 def test_transformer_interleaves_global_and_local_layers():
-    # global_attn_ratio=2 -> every 2nd layer (1-indexed) is full attention,
+    # layers_per_block=2 -> every 2nd layer (1-indexed) is full attention,
     # the rest are windowed.
     model = Transformer(
-        d_model=32, n_heads=4, n_layers=4, window_size=3, global_attn_ratio=2
+        d_model=32, n_heads=4, n_layers=4, window_size=3, layers_per_block=2
     )
     window_sizes = [layer.attn.window_size for layer in model.layers]
     assert window_sizes == [3, None, 3, None]

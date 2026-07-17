@@ -93,7 +93,7 @@ def test_estimate_num_params_ignores_extra_kwargs():
     base = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     ref = estimate_num_params(**base)
     extra = dict(
-        **base, max_seq_len=4096, window_size=128, global_attn_ratio=4, rope_base=10000
+        **base, max_seq_len=4096, window_size=128, layers_per_block=4, rope_base=10000
     )
     assert estimate_num_params(**extra) == ref
 

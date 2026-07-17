@@ -1,7 +1,8 @@
 """The picochat model, in one file (nanochat-style): the building blocks
-(norm, RoPE, SwiGLU, MoE, attention) up through TransformerLM, plus the
-scale-ladder presets and the build_lm/estimate_num_params helpers that size
-it. The LightningModules that train it live in trainer.py.
+(norm, RoPE, SwiGLU, MoE, gated attention, depth-attention residuals) up
+through TransformerLM, plus the scale-ladder presets and the
+build_lm/estimate_num_params helpers that size it. The LightningModules that
+train it live in trainer.py.
 """
 
 import math
@@ -462,6 +463,37 @@ class SelfAttention(nn.Module):
         return x
 
 
+class DepthAttention(nn.Module):
+    """Depth-wise softmax attention over block representations -- the residual
+    mixing of Block Attention Residuals (arXiv:2603.15031). Replaces the
+    fixed-unit-weight residual stream: a sublayer's input is a softmax-weighted
+    mix over the token embedding, every completed block representation and the
+    current block's partial sum, weighted by a learned per-sublayer query
+    against RMSNorm'd keys. The norm keeps blocks with naturally larger
+    magnitudes (sums over more sublayers) from dominating the weights; the
+    values themselves stay unnormalized. The zero-init query starts every
+    sublayer at a uniform mix, and softmax (not sigmoid) provides the
+    competitive selection the paper found essential. Per-token and
+    mask-independent, so sequence packing, sliding windows and the KV cache
+    are unaffected.
+    """
+
+    def __init__(self, d_model: int):
+        super().__init__()
+        # 1-dim on purpose: lands in the AdamW no-decay group, not Muon (see
+        # trainer._muon_param_split).
+        self.query = nn.Parameter(torch.zeros(d_model))
+
+    def forward(self, blocks: Tensor, partial: Tensor | None) -> Tensor:
+        # blocks (n, b, t, d): committed block representations, blocks[0] being
+        # the token embedding. partial (b, t, d): the current block's running
+        # sum of sublayer outputs; None at a block's first sublayer, where only
+        # completed blocks are visible.
+        values = blocks if partial is None else torch.cat([blocks, partial[None]])
+        weight = (rms_norm(values) * self.query).sum(-1).softmax(0)
+        return (values * weight[..., None]).sum(0)
+
+
 class TransformerLayer(nn.Module):
     def __init__(
         self,
@@ -477,6 +509,8 @@ class TransformerLayer(nn.Module):
         d_expert: int | None = None,
     ):
         super().__init__()
+        self.mix_attn = DepthAttention(d_model)
+        self.mix_ffn = DepthAttention(d_model)
         self.attn = SelfAttention(
             d_model,
             n_heads,
@@ -493,28 +527,46 @@ class TransformerLayer(nn.Module):
                 d_model, d_hidden=d_expert, n_experts=n_experts, n_active=n_active
             )
 
-    def forward(self, x: Tensor, attn_mask: BlockMask | Tensor | None = None) -> Tensor:
-        # attn/ffn apply pre-norm (rms_norm) internally, so add the raw residual.
-        x = self.attn(x, attn_mask) + x
+    def forward(
+        self,
+        blocks: Tensor,
+        partial: Tensor | None,
+        attn_mask: BlockMask | Tensor | None = None,
+    ) -> Tensor:
+        # Block AttnRes protocol (see Transformer.forward): instead of adding
+        # onto a single residual stream, each sublayer reads its input as depth
+        # attention over the block representations plus the current block's
+        # partial sum, and accumulates its output into that partial sum.
+        # attn/ffn still apply their pre-norm (rms_norm) internally. The MoE
+        # branch shares the FFN's mix: the two run in parallel from the same
+        # input, forming one MLP sublayer.
+        a = self.attn(self.mix_attn(blocks, partial), attn_mask)
+        partial = a if partial is None else partial + a
+        h = self.mix_ffn(blocks, partial)
         if hasattr(self, "moe"):
-            x = self.ffn(x) + self.moe(x) + x
+            partial = partial + self.ffn(h) + self.moe(h)
         else:
-            x = self.ffn(x) + x
-        return x
+            partial = partial + self.ffn(h)
+        return partial
 
     def decode(
-        self, x: Tensor, cache: Tensor | None = None, pos: int = 0
+        self,
+        blocks: Tensor,
+        partial: Tensor | None,
+        cache: Tensor | None = None,
+        pos: int = 0,
     ) -> tuple[Tensor, Tensor]:
-        a, cache = self.attn.decode(x, cache, pos)
-        x = a + x
+        a, cache = self.attn.decode(self.mix_attn(blocks, partial), cache, pos)
+        partial = a if partial is None else partial + a
         # Mirror forward(): MoE layers must apply their experts at inference too,
         # otherwise generation silently runs a different (FFN-only) network than
         # training. no_drop=True: never drop a token while generating.
+        h = self.mix_ffn(blocks, partial)
         if hasattr(self, "moe"):
-            x = self.ffn(x) + self.moe(x, no_drop=True) + x
+            partial = partial + self.ffn(h) + self.moe(h, no_drop=True)
         else:
-            x = self.ffn(x) + x
-        return x, cache
+            partial = partial + self.ffn(h)
+        return partial, cache
 
 
 class Transformer(nn.Module):
@@ -529,13 +581,22 @@ class Transformer(nn.Module):
         max_seq_len: int = 4096,
         grad_checkpoint: bool = False,
         window_size: int = 64,
-        global_attn_ratio: int = 4,
+        layers_per_block: int = 4,
         n_experts: int | None = None,
         d_expert: int | None = None,
         n_active: int = 2,
     ):
         super().__init__()
         self.n_layers = n_layers
+        # layers_per_block groups the layers into blocks that serve two roles
+        # at once: the last layer of each block uses full (global) attention
+        # while the rest use the sliding window, and each block is one unit of
+        # the Block AttnRes residual (see DepthAttention / forward) -- the
+        # block representation is committed right after its global layer has
+        # integrated long-range context. layers_per_block=1 makes every layer
+        # global and its own block (i.e. Full AttnRes). When n_layers isn't
+        # divisible, the trailing remainder forms a final, windowed-only block.
+        self.layers_per_block = layers_per_block
         # Trade compute for memory during training: don't keep each layer's
         # activations for the backward pass, recompute them instead. Lets us fit
         # bigger models / longer sequences on a fixed GPU. No effect on decode().
@@ -550,12 +611,14 @@ class Transformer(nn.Module):
                 rope_base=rope_base,
                 d_ffn=d_ffn,
                 max_seq_len=max_seq_len,
-                window_size=None if (i + 1) % global_attn_ratio == 0 else window_size,
+                window_size=None if (i + 1) % layers_per_block == 0 else window_size,
                 n_experts=n_experts,
                 d_expert=d_expert,
                 n_active=n_active,
             )
             self.layers.append(layer)
+        # Final aggregation over all block representations before the head.
+        self.mix_out = DepthAttention(d_model)
 
     def packed_masks(self, doc_ids: Tensor) -> dict[int | None, BlockMask | Tensor]:
         # One packed-document mask per distinct window size among the layers
@@ -583,14 +646,28 @@ class Transformer(nn.Module):
         # otherwise it is built here for eager/CPU convenience.
         if masks is None and doc_ids is not None:
             masks = self.packed_masks(doc_ids)
-        for layer in self.layers:
+        # Block AttnRes state: `blocks` stacks the committed block
+        # representations (starting with the token embedding as blocks[0]),
+        # `partial` is the running sum of the current block's sublayer outputs.
+        # Both thread through the layers as explicit args -- also across the
+        # gradient-checkpoint boundary, where `blocks` grows by one tensor per
+        # completed block but its rows are shared references, so checkpointing
+        # keeps O(n_layers) distinct (b, t, d) activations alive as before.
+        blocks, partial = x[None], None
+        for i, layer in enumerate(self.layers):
+            if i > 0 and i % self.layers_per_block == 0:
+                # Block boundary: commit the finished block's summed outputs;
+                # the next layer opens a fresh block and (like every block's
+                # first sublayer) attends over completed blocks only.
+                blocks = torch.cat([blocks, partial[None]])
+                partial = None
             mask = masks[layer.attn.window_size] if masks is not None else None
             if self.grad_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(
-                    layer, x, mask, use_reentrant=False
+                partial = torch.utils.checkpoint.checkpoint(
+                    layer, blocks, partial, mask, use_reentrant=False
                 )
             else:
-                x = layer(x, mask)
+                partial = layer(blocks, partial, mask)
 
         if self.training:
             # Apply each MoE's staged load-balancing bias update here -- once,
@@ -600,6 +677,9 @@ class Transformer(nn.Module):
             for layer in self.layers:
                 if hasattr(layer, "moe"):
                     layer.moe.apply_bias_update()
+        # The head reads a final depth-attention aggregate of every block (the
+        # last one possibly still partial) rather than the last partial sum.
+        x = self.mix_out(blocks, partial)
         x = rms_norm(x)
         return x
 
@@ -610,11 +690,18 @@ class Transformer(nn.Module):
         # the same `pos` (they all process the same chunk at the same time), and
         # only this method computes/advances it. Neither the cache nor the
         # position is kept as model state -- both flow through args/returns only.
+        # The AttnRes blocks/partial state is per-token and lives only within
+        # this call (rebuilt for each chunk), so the cache format is unchanged.
         if cache is None:
             cache = [None] * self.n_layers
         q_len = x.shape[-2]
+        blocks, partial = x[None], None
         for i, layer in enumerate(self.layers):
-            x, cache[i] = layer.decode(x, cache[i], pos)
+            if i > 0 and i % self.layers_per_block == 0:
+                blocks = torch.cat([blocks, partial[None]])
+                partial = None
+            partial, cache[i] = layer.decode(blocks, partial, cache[i], pos)
+        x = self.mix_out(blocks, partial)
         x = rms_norm(x)
         return x, cache, pos + q_len  # type: ignore
 
@@ -633,7 +720,7 @@ class TransformerLM(nn.Module):
         init_std: float = 0.02,
         grad_checkpoint: bool = True,
         window_size: int = 64,
-        global_attn_ratio: int = 4,
+        layers_per_block: int = 4,
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
@@ -654,7 +741,7 @@ class TransformerLM(nn.Module):
             max_seq_len=max_seq_len,
             grad_checkpoint=grad_checkpoint,
             window_size=window_size,
-            global_attn_ratio=global_attn_ratio,
+            layers_per_block=layers_per_block,
             n_experts=n_experts,
             n_active=n_active,
             d_expert=d_expert,
@@ -753,7 +840,8 @@ def estimate_num_params(
     attn = 3 * d_model * d_model + 2 * d_model * kv_dim
     # SwiGLU: up/gate/down, all bias-free.
     ffn = 3 * d_model * ffn_hidden
-    layer_params = attn + ffn
+    # Block AttnRes: one depth-attention query per sublayer (attn + MLP).
+    layer_params = attn + ffn + 2 * d_model
     if n_experts is not None:
         # router (always fully active) + per-expert up/gate/down; only n_active
         # of the experts fire for a given token, so the active count uses those.
@@ -763,7 +851,8 @@ def estimate_num_params(
     embed = vocab_size * d_model
     lmhead = vocab_size * d_model  # separate (untied) output projection
     layers = n_layers * layer_params
-    return embed + lmhead + layers
+    mix_out = d_model  # final depth-attention query before the head
+    return embed + lmhead + layers + mix_out
 
 
 # Scale ladder: pico (~0.5B, the entry point) up to large (~23B MoE), kept in

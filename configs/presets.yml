@@ -13,7 +13,7 @@ pico: # ~0.5B params (dense)
     n_kv_heads: 4
     vocab_size: 128000
     window_size: 128
-    global_attn_ratio: 4
+    layers_per_block: 4
 
 small: # ~1.0B params (dense)
     d_model: 1536
@@ -22,7 +22,7 @@ small: # ~1.0B params (dense)
     n_kv_heads: 4
     vocab_size: 128000
     window_size: 128
-    global_attn_ratio: 4
+    layers_per_block: 4
 
 base: # ~1.9B params (dense)
     d_model: 2048
@@ -31,7 +31,7 @@ base: # ~1.9B params (dense)
     n_kv_heads: 8
     vocab_size: 128000
     window_size: 256
-    global_attn_ratio: 6
+    layers_per_block: 6
 
 medium: # ~7.5B total / ~2.6B active (MoE)
     d_model: 2048
@@ -40,7 +40,7 @@ medium: # ~7.5B total / ~2.6B active (MoE)
     n_kv_heads: 8
     vocab_size: 128000
     window_size: 256
-    global_attn_ratio: 6
+    layers_per_block: 6
     n_experts: 32
     n_active: 4
     d_expert: 1024
@@ -52,7 +52,7 @@ large: # ~23B total / ~4.9B active (MoE)
     n_kv_heads: 4
     vocab_size: 128000
     window_size: 512
-    global_attn_ratio: 6
+    layers_per_block: 6
     n_experts: 64
     n_active: 6
     d_expert: 1280

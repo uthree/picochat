@@ -13,7 +13,7 @@ def _moe_transformer(grad_checkpoint: bool) -> Transformer:
         n_layers=2,
         n_experts=4,
         d_expert=16,
-        global_attn_ratio=1,  # all full attention -> CPU-friendly, no windows
+        layers_per_block=1,  # all full attention -> CPU-friendly, no windows
         grad_checkpoint=grad_checkpoint,
     )
 
@@ -96,7 +96,7 @@ def test_moe_decode_matches_full_forward():
         n_experts=2,
         d_expert=16,
         n_active=2,
-        global_attn_ratio=1,
+        layers_per_block=1,
     ).eval()
     x = torch.randn(1, 6, 32)
     full = m(x)

@@ -68,7 +68,7 @@ def test_transformer_packed_forward_matches_separate_documents():
     # doesn't matter. Mix windowed and full-attention layers.
     torch.manual_seed(0)
     model = Transformer(
-        d_model=32, n_heads=4, n_layers=4, window_size=3, global_attn_ratio=2
+        d_model=32, n_heads=4, n_layers=4, window_size=3, layers_per_block=2
     ).eval()
     a, b = torch.randn(1, 4, 32), torch.randn(1, 6, 32)
     packed = torch.cat([a, b], dim=1)
@@ -105,7 +105,7 @@ def test_transformer_packed_forward_matches_separate_documents_on_cuda():
     torch.manual_seed(0)
     model = (
         Transformer(
-            d_model=64, n_heads=8, n_layers=4, window_size=3, global_attn_ratio=2
+            d_model=64, n_heads=8, n_layers=4, window_size=3, layers_per_block=2
         )
         .cuda()
         .eval()
