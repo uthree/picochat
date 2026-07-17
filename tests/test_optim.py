@@ -29,7 +29,7 @@ def test_muon_param_split_covers_everything_once():
 
     # fused MoE weights (router + flattened 2D experts) are Muon-optimized
     moe = lm.transformer.layers[0].moe
-    for w in (moe.weight_router, moe.weight_up, moe.weight_gate, moe.weight_down):
+    for w in (moe.weight_router, moe.bank.weight_up, moe.bank.weight_gate, moe.bank.weight_down):
         assert id(w) in muon_ids
     # torch.optim.Muon accepts exactly 2D params, nothing else
     assert all(p.ndim == 2 for p in muon_params)
@@ -79,7 +79,7 @@ def test_muon_step_updates_moe_and_preserves_shapes():
     moe = lm.transformer.layers[0].moe
     attn = lm.transformer.layers[0].attn
     shapes = {name: p.shape for name, p in lm.named_parameters()}
-    before_up = moe.weight_up.detach().clone()
+    before_up = moe.bank.weight_up.detach().clone()
     before_q = attn.proj_q.weight.detach().clone()
     before_embed = lm.embed.weight.detach().clone()
 
@@ -93,7 +93,7 @@ def test_muon_step_updates_moe_and_preserves_shapes():
         assert torch.isfinite(p).all()
     # a Muon param (2D expert weight), a plain hidden matrix and an AdamW
     # param (embedding) all moved
-    assert not torch.allclose(moe.weight_up, before_up)
+    assert not torch.allclose(moe.bank.weight_up, before_up)
     assert not torch.allclose(attn.proj_q.weight, before_q)
     assert not torch.allclose(lm.embed.weight, before_embed)
 

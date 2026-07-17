@@ -126,13 +126,13 @@ def test_moe_no_drop_flag_is_per_token():
 def test_latent_moe_only_active_when_d_latent_set():
     plain = MixtureOfExperts(d_model=32, d_hidden=16, n_experts=4)
     assert not hasattr(plain, "weight_compress")
-    assert plain.weight_up.shape == (4 * 16, 32)  # experts in d_model
+    assert plain.bank.weight_up.shape == (4 * 16, 32)  # experts in d_model
 
     latent = MixtureOfExperts(d_model=32, d_hidden=16, n_experts=4, d_latent=8)
     assert latent.weight_compress.shape == (8, 32)
     assert latent.weight_expand.shape == (32, 8)
-    assert latent.weight_up.shape == (4 * 16, 8)  # experts in d_latent
-    assert latent.weight_down.shape == (4 * 8, 16)
+    assert latent.bank.weight_up.shape == (4 * 16, 8)  # experts in d_latent
+    assert latent.bank.weight_down.shape == (4 * 8, 16)
 
 
 def test_latent_moe_forward_shape_and_backward():
@@ -166,6 +166,118 @@ def test_latent_moe_decode_matches_full_forward():
     out, cache, pos = m.decode(x[:, :4])
     step, _, _ = m.decode(x[:, 4:], cache, pos)
     assert torch.allclose(torch.cat([out, step], dim=1), full, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# share_experts: one routed-expert bank for the whole stack (MoEUT-style)
+# ---------------------------------------------------------------------------
+def test_share_experts_single_bank_but_per_layer_routing():
+    m = Transformer(
+        d_model=32,
+        n_heads=4,
+        n_layers=3,
+        n_experts=4,
+        d_expert=16,
+        layers_per_block=1,
+        share_experts=True,
+    )
+    banks = [layer.moe.bank for layer in m.layers]
+    assert all(b is banks[0] for b in banks)  # one shared instance
+    # routers and load-balancing biases stay per layer
+    assert len({id(layer.moe.weight_router) for layer in m.layers}) == 3
+    assert len({id(layer.moe.expert_bias) for layer in m.layers}) == 3
+    # parameters() deduplicates: the bank's weights are counted once
+    bank_numel = sum(p.numel() for p in banks[0].parameters())
+    total = sum(p.numel() for p in m.parameters())
+    unshared = _moe_transformer(grad_checkpoint=False)
+    assert unshared.layers[0].moe.bank is not unshared.layers[1].moe.bank
+    total_unshared = sum(
+        p.numel()
+        for p in Transformer(
+            d_model=32, n_heads=4, n_layers=3, n_experts=4, d_expert=16,
+            layers_per_block=1,
+        ).parameters()
+    )
+    assert total == total_unshared - 2 * bank_numel  # 3 banks collapsed to 1
+
+
+def test_share_experts_bias_updates_stay_per_layer():
+    # each layer balances its own routing over the shared pool: one training
+    # forward moves every layer's own bias by exactly one rate step.
+    torch.manual_seed(0)
+    m = Transformer(
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        n_experts=4,
+        d_expert=16,
+        layers_per_block=1,
+        share_experts=True,
+    ).train()
+    m(torch.randn(2, 8, 32))
+    for layer in m.layers:
+        delta = layer.moe.expert_bias
+        assert (delta != 0).any()
+        assert delta.abs().max() == pytest.approx(layer.moe.bias_update_rate)
+
+
+def test_share_experts_grads_accumulate_from_every_layer():
+    m = Transformer(
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        n_experts=2,
+        d_expert=16,
+        n_active=2,
+        layers_per_block=1,
+        share_experts=True,
+    ).train()
+    m(torch.randn(2, 6, 32)).sum().backward()
+    bank = m.layers[0].moe.bank
+    assert bank.weight_up.grad is not None
+    assert all(layer.moe.weight_router.grad is not None for layer in m.layers)
+
+
+def test_share_experts_decode_matches_full_forward_with_latent():
+    torch.manual_seed(0)
+    m = Transformer(
+        d_model=32,
+        n_heads=4,
+        n_layers=3,
+        n_experts=2,
+        d_expert=16,
+        n_active=2,
+        d_latent=8,
+        layers_per_block=1,
+        share_experts=True,
+    ).eval()
+    x = torch.randn(1, 6, 32)
+    full = m(x)
+    out, cache, pos = m.decode(x[:, :4])
+    step, _, _ = m.decode(x[:, 4:], cache, pos)
+    assert torch.allclose(torch.cat([out, step], dim=1), full, atol=1e-4)
+
+
+def test_share_experts_state_dict_roundtrip():
+    # the shared bank appears under one key per owning layer (same storage);
+    # loading those duplicates into a fresh shared model must reproduce it.
+    torch.manual_seed(0)
+
+    def build() -> Transformer:
+        return Transformer(
+            d_model=32,
+            n_heads=4,
+            n_layers=2,
+            n_experts=4,
+            d_expert=16,
+            layers_per_block=1,
+            share_experts=True,
+        )
+
+    a, b = build().eval(), build().eval()
+    b.load_state_dict(a.state_dict())
+    x = torch.randn(1, 5, 32)
+    assert torch.allclose(a(x), b(x), atol=1e-6)
 
 
 def test_moe_forward_drops_but_no_drop_keeps_every_token():

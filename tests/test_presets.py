@@ -78,6 +78,25 @@ def _actual_params(lm) -> int:
             d_expert=24,
             d_latent=16,
         ),
+        dict(  # shared routed-expert bank across layers
+            vocab_size=100,
+            d_model=64,
+            n_heads=8,
+            n_layers=3,
+            n_experts=4,
+            d_expert=16,
+            share_experts=True,
+        ),
+        dict(  # shared bank + latent experts
+            vocab_size=100,
+            d_model=64,
+            n_heads=8,
+            n_layers=2,
+            n_experts=8,
+            d_expert=24,
+            d_latent=16,
+            share_experts=True,
+        ),
         dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2, d_ffn=96),  # d_ffn set
     ],
 )
@@ -131,6 +150,28 @@ def test_estimate_active_params_equals_total_for_dense():
     # no experts, single head -> nothing to sparsify
     cfg = dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(**cfg)
+
+
+def test_estimate_active_params_shared_bank_saturates():
+    # with per-layer routing into one shared pool, a token can touch up to
+    # n_layers * n_active distinct experts, capped by the pool size. Here
+    # 4 layers * 2 active = 8 > 4 experts, so the whole bank counts as active
+    # and (everything else being dense) active equals total.
+    cfg = dict(
+        vocab_size=100,
+        d_model=64,
+        n_heads=8,
+        n_layers=4,
+        n_experts=4,
+        d_expert=16,
+        n_active=2,
+        share_experts=True,
+    )
+    assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(**cfg)
+    # a large pool doesn't saturate: only n_layers * n_active experts count
+    big = dict(cfg, n_experts=32)
+    total, active = estimate_num_params(**big), estimate_num_params(**big, active_only=True)
+    assert total - active == (32 - 4 * 2) * 3 * 16 * 64
 
 
 def test_estimate_active_params_drops_inactive_experts():

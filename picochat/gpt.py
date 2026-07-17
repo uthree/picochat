@@ -131,6 +131,49 @@ class SwiGLU(nn.Module):
         return x
 
 
+class ExpertBank(nn.Module):
+    """The fused routed-expert weights of a MixtureOfExperts, factored out so
+    they can be owned per layer (the default) or built once and shared by
+    every layer's MoE (Transformer's share_experts, MoEUT-style): each layer
+    then keeps its own router, load-balancing bias and latent projections
+    while dispatching into the same expert pool.
+
+    The weights are stored 2D, experts stacked along the rows --
+    (n_experts * out_features, in_features) -- and viewed back to
+    (n_experts, out, in) for the bmm in forward. torch.optim.Muon accepts
+    only 2D parameters, and this flattened matrix is exactly what Muon
+    orthogonalizes for a stacked expert weight anyway.
+
+    A shared bank is registered as a submodule of every owning MoE:
+    parameters()/modules() deduplicate it, torch.save stores the shared
+    storage once, and load_state_dict writes the same values through each
+    duplicate key -- harmless in both directions.
+    """
+
+    def __init__(self, n_experts: int, d_io: int, d_hidden: int):
+        super().__init__()
+        self.n_experts = n_experts
+        self.d_io = d_io  # d_model, or d_latent for a LatentMoE
+        self.d_hidden = d_hidden
+        self.weight_up = nn.Parameter(torch.empty(n_experts * d_hidden, d_io))
+        self.weight_gate = nn.Parameter(torch.empty(n_experts * d_hidden, d_io))
+        self.weight_down = nn.Parameter(torch.empty(n_experts * d_io, d_hidden))
+        for w in (self.weight_up, self.weight_gate, self.weight_down):
+            nn.init.normal_(w, mean=0.0, std=0.02)
+
+    def forward(self, expert_in: Tensor, p_dropout: float = 0.0) -> Tensor:
+        # expert_in (n_experts, capacity, d_io): each expert's dispatched
+        # tokens; runs every expert's SwiGLU as one batched bmm.
+        w_up = self.weight_up.view(self.n_experts, self.d_hidden, self.d_io)
+        w_gate = self.weight_gate.view(self.n_experts, self.d_hidden, self.d_io)
+        w_down = self.weight_down.view(self.n_experts, self.d_io, self.d_hidden)
+        up = torch.bmm(expert_in, w_up.transpose(1, 2))
+        gate = torch.bmm(expert_in, w_gate.transpose(1, 2))
+        h = F.dropout(up * F.silu(gate), p_dropout, training=self.training)
+        out = torch.bmm(h, w_down.transpose(1, 2))
+        return F.dropout(out, p_dropout, training=self.training)
+
+
 class MixtureOfExperts(nn.Module):
     def __init__(
         self,
@@ -142,6 +185,7 @@ class MixtureOfExperts(nn.Module):
         capacity_factor: float = 1.25,
         bias_update_rate: float = 1e-3,
         d_latent: int | None = None,
+        bank: ExpertBank | None = None,
     ):
         super().__init__()
         assert n_active <= n_experts
@@ -171,15 +215,15 @@ class MixtureOfExperts(nn.Module):
         d_expert_io = d_model if d_latent is None else d_latent
         self.d_expert_io = d_expert_io
         self.weight_router = nn.Parameter(torch.empty(n_experts, d_model))
-        # The fused expert weights are stored 2D, experts stacked along the
-        # rows -- (n_experts * out_features, in_features) -- and viewed back
-        # to (n_experts, out, in) for the bmm in forward. torch.optim.Muon
-        # accepts only 2D parameters, and this flattened matrix is exactly
-        # what Muon orthogonalizes for a stacked expert weight anyway.
-        self.weight_up = nn.Parameter(torch.empty(n_experts * d_hidden, d_expert_io))
-        self.weight_gate = nn.Parameter(torch.empty(n_experts * d_hidden, d_expert_io))
-        self.weight_down = nn.Parameter(torch.empty(n_experts * d_expert_io, d_hidden))
-        weights = [self.weight_router, self.weight_up, self.weight_gate, self.weight_down]
+        # The routed-expert weights live in an ExpertBank (see there) so they
+        # can be shared across layers: with a shared bank passed in, this MoE
+        # owns only its router, load-balancing bias and latent projections.
+        if bank is None:
+            bank = ExpertBank(n_experts, d_expert_io, d_hidden)
+        assert bank.n_experts == n_experts
+        assert bank.d_io == d_expert_io and bank.d_hidden == d_hidden
+        self.bank = bank
+        weights = [self.weight_router]
         if d_latent is not None:
             self.weight_compress = nn.Parameter(torch.empty(d_latent, d_model))
             self.weight_expand = nn.Parameter(torch.empty(d_model, d_latent))
@@ -270,14 +314,7 @@ class MixtureOfExperts(nn.Module):
             0, dest, inputs[pair_token] * keep_f
         )
         expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d_io)
-        w_up = self.weight_up.view(self.n_experts, self.d_hidden, d_io)
-        w_gate = self.weight_gate.view(self.n_experts, self.d_hidden, d_io)
-        w_down = self.weight_down.view(self.n_experts, d_io, self.d_hidden)
-        up = torch.bmm(expert_in, w_up.transpose(1, 2))
-        gate = torch.bmm(expert_in, w_gate.transpose(1, 2))
-        h = F.dropout(up * F.silu(gate), self.p_dropout, training=self.training)
-        expert_out = torch.bmm(h, w_down.transpose(1, 2))
-        expert_out = F.dropout(expert_out, self.p_dropout, training=self.training)
+        expert_out = self.bank(expert_in, self.p_dropout)
         expert_out = torch.cat(
             [expert_out.reshape(n_slots, d_io), expert_out.new_zeros(1, d_io)], dim=0
         )
@@ -531,6 +568,7 @@ class TransformerLayer(nn.Module):
         n_active: int = 2,
         d_expert: int | None = None,
         d_latent: int | None = None,
+        expert_bank: ExpertBank | None = None,
     ):
         super().__init__()
         self.mix_attn = DepthAttention(d_model)
@@ -553,6 +591,7 @@ class TransformerLayer(nn.Module):
                 n_experts=n_experts,
                 n_active=n_active,
                 d_latent=d_latent,
+                bank=expert_bank,
             )
 
     def forward(
@@ -614,6 +653,7 @@ class Transformer(nn.Module):
         d_expert: int | None = None,
         n_active: int = 2,
         d_latent: int | None = None,
+        share_experts: bool = False,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -632,6 +672,12 @@ class Transformer(nn.Module):
         self.grad_checkpoint = grad_checkpoint
 
         self.layers = nn.ModuleList()
+        # share_experts: every layer dispatches into one routed-expert pool
+        # (MoEUT-style) while keeping its own router, load-balancing bias,
+        # latent projections and dense FFN (the shared-expert analogue). The
+        # first layer builds the bank through the normal default chain
+        # (d_expert -> d_ffn -> 3*d_model); the rest receive that instance.
+        expert_bank = None
         for i in range(n_layers):
             layer = TransformerLayer(
                 d_model,
@@ -645,7 +691,10 @@ class Transformer(nn.Module):
                 d_expert=d_expert,
                 n_active=n_active,
                 d_latent=d_latent,
+                expert_bank=expert_bank,
             )
+            if share_experts and n_experts is not None and expert_bank is None:
+                expert_bank = layer.moe.bank
             self.layers.append(layer)
         # Final aggregation over all block representations before the head.
         self.mix_out = DepthAttention(d_model)
@@ -755,6 +804,7 @@ class TransformerLM(nn.Module):
         n_active: int = 2,
         d_expert: int | None = None,
         d_latent: int | None = None,
+        share_experts: bool = False,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -777,6 +827,7 @@ class TransformerLM(nn.Module):
             n_active=n_active,
             d_expert=d_expert,
             d_latent=d_latent,
+            share_experts=share_experts,
         )
         self._init_weights()
 
@@ -800,10 +851,12 @@ class TransformerLM(nn.Module):
             elif isinstance(m, MixtureOfExperts):
                 # With d_latent set, the shared expansion (not the experts'
                 # down projection) is what writes into the residual stream.
+                # (With share_experts the bank's weight_down is just re-drawn
+                # once per owning layer -- same distribution, harmless.)
                 if m.d_latent is not None:
                     nn.init.normal_(m.weight_expand, mean=0.0, std=scaled_std)
                 else:
-                    nn.init.normal_(m.weight_down, mean=0.0, std=scaled_std)
+                    nn.init.normal_(m.bank.weight_down, mean=0.0, std=scaled_std)
 
     def encode(
         self,
@@ -842,6 +895,7 @@ def estimate_num_params(
     d_expert: int | None = None,
     n_active: int = 2,
     d_latent: int | None = None,
+    share_experts: bool = False,
     active_only: bool = False,
     **_ignored,
 ) -> int:
@@ -880,23 +934,33 @@ def estimate_num_params(
     ffn = 3 * d_model * ffn_hidden
     # Block AttnRes: one depth-attention query per sublayer (attn + MLP).
     layer_params = attn + ffn + 2 * d_model
+    shared_bank = 0
     if n_experts is not None:
         # router (always fully active) + per-expert up/gate/down; only n_active
         # of the experts fire for a given token, so the active count uses those.
         # With d_latent (LatentMoE) the experts' io dimension shrinks to the
         # latent size and the shared compress/expand pair (always active) is
-        # added on top.
-        experts = n_active if active_only else n_experts
+        # added on top. With share_experts the up/gate/down weights exist once
+        # for the whole stack (ExpertBank) instead of per layer; a token's
+        # forward then touches up to n_layers * n_active distinct experts of
+        # that bank, capped by the pool size.
         expert_io = d_model if d_latent is None else d_latent
-        layer_params += n_experts * d_model + 3 * experts * expert_hidden * expert_io
+        expert_size = 3 * expert_hidden * expert_io  # one expert's up/gate/down
+        layer_params += n_experts * d_model  # router
         if d_latent is not None:
             layer_params += 2 * d_model * d_latent
+        if share_experts:
+            experts = min(n_layers * n_active, n_experts) if active_only else n_experts
+            shared_bank = experts * expert_size
+        else:
+            experts = n_active if active_only else n_experts
+            layer_params += experts * expert_size
 
     embed = vocab_size * d_model
     lmhead = vocab_size * d_model  # separate (untied) output projection
     layers = n_layers * layer_params
     mix_out = d_model  # final depth-attention query before the head
-    return embed + lmhead + layers + mix_out
+    return embed + lmhead + layers + mix_out + shared_bank
 
 
 # Scale ladder: pico (~0.5B, the entry point) up to large (~23B MoE), kept in
