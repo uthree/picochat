@@ -141,6 +141,7 @@ class MixtureOfExperts(nn.Module):
         n_active: int = 2,
         capacity_factor: float = 1.25,
         bias_update_rate: float = 1e-3,
+        d_latent: int | None = None,
     ):
         super().__init__()
         assert n_active <= n_experts
@@ -155,21 +156,35 @@ class MixtureOfExperts(nn.Module):
         if d_hidden is None:
             d_hidden = d_model * 3
         self.d_hidden = d_hidden
+        # LatentMoE (arXiv:2601.18089): when d_latent is set, tokens are
+        # compressed to that dimension by a shared down-projection before
+        # dispatch, the routed experts run their SwiGLU entirely in the latent
+        # space (the intermediate d_hidden stays as configured, preserving the
+        # nonlinear budget), and the combined output is expanded back to
+        # d_model by a shared up-projection. Expert weight loading and token
+        # dispatch then cost d_latent instead of d_model each, the saving the
+        # paper reinvests in more experts / higher top-k (a preset choice, via
+        # n_experts / n_active). The router (below) and the dense FFN that
+        # TransformerLayer runs in parallel (the paper's shared expert) stay
+        # in d_model. d_latent=None keeps the standard MoE unchanged.
+        self.d_latent = d_latent
+        d_expert_io = d_model if d_latent is None else d_latent
+        self.d_expert_io = d_expert_io
         self.weight_router = nn.Parameter(torch.empty(n_experts, d_model))
         # The fused expert weights are stored 2D, experts stacked along the
         # rows -- (n_experts * out_features, in_features) -- and viewed back
         # to (n_experts, out, in) for the bmm in forward. torch.optim.Muon
         # accepts only 2D parameters, and this flattened matrix is exactly
         # what Muon orthogonalizes for a stacked expert weight anyway.
-        self.weight_up = nn.Parameter(torch.empty(n_experts * d_hidden, d_model))
-        self.weight_gate = nn.Parameter(torch.empty(n_experts * d_hidden, d_model))
-        self.weight_down = nn.Parameter(torch.empty(n_experts * d_model, d_hidden))
-        for w in (
-            self.weight_router,
-            self.weight_up,
-            self.weight_gate,
-            self.weight_down,
-        ):
+        self.weight_up = nn.Parameter(torch.empty(n_experts * d_hidden, d_expert_io))
+        self.weight_gate = nn.Parameter(torch.empty(n_experts * d_hidden, d_expert_io))
+        self.weight_down = nn.Parameter(torch.empty(n_experts * d_expert_io, d_hidden))
+        weights = [self.weight_router, self.weight_up, self.weight_gate, self.weight_down]
+        if d_latent is not None:
+            self.weight_compress = nn.Parameter(torch.empty(d_latent, d_model))
+            self.weight_expand = nn.Parameter(torch.empty(d_model, d_latent))
+            weights += [self.weight_compress, self.weight_expand]
+        for w in weights:
             nn.init.normal_(w, mean=0.0, std=0.02)
         # DeepSeek-V3 style aux-loss-free load balancing: a per-expert bias
         # that only steers *which* experts get picked (added before top-k,
@@ -244,25 +259,33 @@ class MixtureOfExperts(nn.Module):
                 )
 
         # Dispatch pairs into per-expert buffers, run the expert SwiGLU, combine.
+        # With d_latent set (LatentMoE), dispatch, expert computation and the
+        # combine all happen in the latent dimension d_io; only the final
+        # expansion returns to d_model. Weighting the contributions before the
+        # (linear) expansion matches the paper's W_up(sum p_i * E_i) exactly.
+        d_io = self.d_expert_io
+        inputs = tokens if self.d_latent is None else tokens @ self.weight_compress.T
         keep_f = keep.unsqueeze(-1).to(tokens.dtype)
-        buffer = tokens.new_zeros(n_slots + 1, d).index_add(
-            0, dest, tokens[pair_token] * keep_f
+        buffer = inputs.new_zeros(n_slots + 1, d_io).index_add(
+            0, dest, inputs[pair_token] * keep_f
         )
-        expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d)
-        w_up = self.weight_up.view(self.n_experts, self.d_hidden, d)
-        w_gate = self.weight_gate.view(self.n_experts, self.d_hidden, d)
-        w_down = self.weight_down.view(self.n_experts, d, self.d_hidden)
+        expert_in = buffer[:n_slots].reshape(self.n_experts, capacity, d_io)
+        w_up = self.weight_up.view(self.n_experts, self.d_hidden, d_io)
+        w_gate = self.weight_gate.view(self.n_experts, self.d_hidden, d_io)
+        w_down = self.weight_down.view(self.n_experts, d_io, self.d_hidden)
         up = torch.bmm(expert_in, w_up.transpose(1, 2))
         gate = torch.bmm(expert_in, w_gate.transpose(1, 2))
         h = F.dropout(up * F.silu(gate), self.p_dropout, training=self.training)
         expert_out = torch.bmm(h, w_down.transpose(1, 2))
         expert_out = F.dropout(expert_out, self.p_dropout, training=self.training)
         expert_out = torch.cat(
-            [expert_out.reshape(n_slots, d), expert_out.new_zeros(1, d)], dim=0
+            [expert_out.reshape(n_slots, d_io), expert_out.new_zeros(1, d_io)], dim=0
         )
 
         contrib = expert_out[dest] * (pair_weight.unsqueeze(-1) * keep_f)
-        out = tokens.new_zeros(n_tokens, d).index_add(0, pair_token, contrib)
+        out = inputs.new_zeros(n_tokens, d_io).index_add(0, pair_token, contrib)
+        if self.d_latent is not None:
+            out = out @ self.weight_expand.T
         return out.reshape(b, t, d)
 
     @torch.no_grad()
@@ -507,6 +530,7 @@ class TransformerLayer(nn.Module):
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
+        d_latent: int | None = None,
     ):
         super().__init__()
         self.mix_attn = DepthAttention(d_model)
@@ -524,7 +548,11 @@ class TransformerLayer(nn.Module):
         self.ffn = SwiGLU(d_model, d_hidden=d_ffn)
         if n_experts is not None:
             self.moe = MixtureOfExperts(
-                d_model, d_hidden=d_expert, n_experts=n_experts, n_active=n_active
+                d_model,
+                d_hidden=d_expert,
+                n_experts=n_experts,
+                n_active=n_active,
+                d_latent=d_latent,
             )
 
     def forward(
@@ -585,6 +613,7 @@ class Transformer(nn.Module):
         n_experts: int | None = None,
         d_expert: int | None = None,
         n_active: int = 2,
+        d_latent: int | None = None,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -615,6 +644,7 @@ class Transformer(nn.Module):
                 n_experts=n_experts,
                 d_expert=d_expert,
                 n_active=n_active,
+                d_latent=d_latent,
             )
             self.layers.append(layer)
         # Final aggregation over all block representations before the head.
@@ -724,6 +754,7 @@ class TransformerLM(nn.Module):
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
+        d_latent: int | None = None,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -745,6 +776,7 @@ class TransformerLM(nn.Module):
             n_experts=n_experts,
             n_active=n_active,
             d_expert=d_expert,
+            d_latent=d_latent,
         )
         self._init_weights()
 
@@ -766,7 +798,12 @@ class TransformerLM(nn.Module):
             elif isinstance(m, SwiGLU):
                 nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
             elif isinstance(m, MixtureOfExperts):
-                nn.init.normal_(m.weight_down, mean=0.0, std=scaled_std)
+                # With d_latent set, the shared expansion (not the experts'
+                # down projection) is what writes into the residual stream.
+                if m.d_latent is not None:
+                    nn.init.normal_(m.weight_expand, mean=0.0, std=scaled_std)
+                else:
+                    nn.init.normal_(m.weight_down, mean=0.0, std=scaled_std)
 
     def encode(
         self,
@@ -804,6 +841,7 @@ def estimate_num_params(
     n_experts: int | None = None,
     d_expert: int | None = None,
     n_active: int = 2,
+    d_latent: int | None = None,
     active_only: bool = False,
     **_ignored,
 ) -> int:
@@ -845,8 +883,14 @@ def estimate_num_params(
     if n_experts is not None:
         # router (always fully active) + per-expert up/gate/down; only n_active
         # of the experts fire for a given token, so the active count uses those.
+        # With d_latent (LatentMoE) the experts' io dimension shrinks to the
+        # latent size and the shared compress/expand pair (always active) is
+        # added on top.
         experts = n_active if active_only else n_experts
-        layer_params += n_experts * d_model + 3 * experts * expert_hidden * d_model
+        expert_io = d_model if d_latent is None else d_latent
+        layer_params += n_experts * d_model + 3 * experts * expert_hidden * expert_io
+        if d_latent is not None:
+            layer_params += 2 * d_model * d_latent
 
     embed = vocab_size * d_model
     lmhead = vocab_size * d_model  # separate (untied) output projection

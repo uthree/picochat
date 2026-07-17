@@ -69,6 +69,15 @@ def _actual_params(lm) -> int:
             vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_experts=4, d_expert=16
         ),
         dict(vocab_size=50, d_model=48, n_heads=6, n_layers=2, d_ffn=128, n_experts=4),
+        dict(  # LatentMoE: experts in a d_latent-dim space
+            vocab_size=100,
+            d_model=64,
+            n_heads=8,
+            n_layers=2,
+            n_experts=8,
+            d_expert=24,
+            d_latent=16,
+        ),
         dict(vocab_size=40, d_model=32, n_heads=4, n_layers=2, d_ffn=96),  # d_ffn set
     ],
 )

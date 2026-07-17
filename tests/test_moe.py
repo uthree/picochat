@@ -120,6 +120,54 @@ def test_moe_no_drop_flag_is_per_token():
     assert torch.allclose(full[:, 3:4], single, atol=1e-5)
 
 
+# ---------------------------------------------------------------------------
+# LatentMoE (d_latent set): experts run in a compressed latent space
+# ---------------------------------------------------------------------------
+def test_latent_moe_only_active_when_d_latent_set():
+    plain = MixtureOfExperts(d_model=32, d_hidden=16, n_experts=4)
+    assert not hasattr(plain, "weight_compress")
+    assert plain.weight_up.shape == (4 * 16, 32)  # experts in d_model
+
+    latent = MixtureOfExperts(d_model=32, d_hidden=16, n_experts=4, d_latent=8)
+    assert latent.weight_compress.shape == (8, 32)
+    assert latent.weight_expand.shape == (32, 8)
+    assert latent.weight_up.shape == (4 * 16, 8)  # experts in d_latent
+    assert latent.weight_down.shape == (4 * 8, 16)
+
+
+def test_latent_moe_forward_shape_and_backward():
+    moe = MixtureOfExperts(d_model=32, d_hidden=16, n_experts=4, d_latent=8)
+    x = torch.randn(2, 6, 32, requires_grad=True)
+    out = moe(x)
+    assert out.shape == x.shape
+    out.sum().backward()
+    assert x.grad is not None
+    assert moe.weight_compress.grad is not None
+    assert moe.weight_expand.grad is not None
+
+
+def test_latent_moe_decode_matches_full_forward():
+    # the latent projections must behave identically on the training path and
+    # the per-token decode path (n_active == n_experts so nothing is dropped).
+    torch.manual_seed(0)
+    m = Transformer(
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        n_experts=2,
+        d_expert=16,
+        n_active=2,
+        d_latent=8,
+        layers_per_block=1,
+    ).eval()
+    x = torch.randn(1, 6, 32)
+    full = m(x)
+
+    out, cache, pos = m.decode(x[:, :4])
+    step, _, _ = m.decode(x[:, 4:], cache, pos)
+    assert torch.allclose(torch.cat([out, step], dim=1), full, atol=1e-4)
+
+
 def test_moe_forward_drops_but_no_drop_keeps_every_token():
     # the default forward (training AND validation) keeps the bounded, dropping
     # path -- crucially it must NOT balloon to an n_tokens-sized capacity on a
