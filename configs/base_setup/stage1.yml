@@ -12,10 +12,12 @@ block_size: 1024
 
 datasets:
     # --- simple stories (formerly stage 1) ---
-    - { preset: tinystories, output: tinystories }
-    - { preset: tinystories, output: tinystories.val, split: validation }
-    # children-stories has no dedicated split on the Hub; carve 1% of train
-    # off for validation instead (see scripts/base_setup.py expand_val_fraction).
+    # TinyStories is deliberately left out of pretraining: its synthetic, tiny-
+    # vocabulary style is far too uniform to be worth the tokens for a 1B model
+    # (it stays in the smoke-test config as a cheap pipeline check). children-
+    # stories is real prose ("a bit richer than TinyStories"), so it stays.
+    # It has no dedicated split on the Hub; carve 1% of train off for validation
+    # instead (see scripts/base_setup.py expand_val_fraction).
     - {
           preset: children-stories,
           output: children-stories,

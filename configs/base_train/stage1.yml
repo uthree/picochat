@@ -18,9 +18,10 @@ data:
     block_size: 1024
 
     datasets:
-        # simple stories (kept in the mix so the model still sees easy prose;
-        # lower these weights if they crowd out the knowledge data)
-        - { path: tinystories, weight: 1.0 }
+        # simple stories: real children's prose for some easy text (TinyStories
+        # is excluded -- too uniform/synthetic to be worth the tokens at 1B; it
+        # stays only in the smoke-test config). Lower the weight if it crowds out
+        # the knowledge data.
         - { path: children-stories, weight: 1.0 }
         # knowledge: code + textbooks + wikipedia
         - { path: tiny-codes, weight: 1.0 }
@@ -32,7 +33,6 @@ data:
         - { path: cosmopedia, weight: 1.0 }
         - { path: wikipedia-en, weight: 1.0 }
     val_bin: # per-dataset validation splits (see configs/base_setup/stage1.yml)
-        - tinystories.val
         - children-stories.val
         - tiny-codes.val
         - python-codes.val
