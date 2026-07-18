@@ -1,17 +1,15 @@
-"""The picochat model, in one file (nanochat-style): the building blocks
-(norm, RoPE, SwiGLU, MoE, gated attention, depth-attention residuals) up
-through TransformerLM, plus the scale-ladder presets and the
-build_lm/estimate_num_params helpers that size it. The LightningModules that
-train it live in trainer.py.
+"""The picochat model (nanochat-style): the building blocks (norm, RoPE, SwiGLU,
+MoE, gated attention, depth-attention residuals) up through TransformerLM. The
+scale-ladder presets and the build_lm factory live in presets.py, the parameter
+estimator in param_estimate.py (both re-exported here for back-compat); the
+LightningModules that train it live in trainer.py.
 """
 
 import math
-from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import yaml
 from einops import rearrange
 from torch import Tensor
 from torch.nn.attention.flex_attention import (
@@ -996,112 +994,6 @@ class TransformerLM(nn.Module):
         return self.lmhead(embeds), mtp, cache, pos
 
 
-def estimate_num_params(
-    vocab_size: int,
-    d_model: int,
-    n_heads: int,
-    n_layers: int,
-    n_kv_heads: int | None = None,
-    d_ffn: int | None = None,
-    n_experts: int | None = None,
-    d_expert: int | None = None,
-    n_active: int = 2,
-    d_latent: int | None = None,
-    share_experts: bool = False,
-    n_mtp: int = 0,
-    mtp_rank: int | None = None,
-    active_only: bool = False,
-    **_ignored,
-) -> int:
-    """Estimate a TransformerLM's parameter count from its hyperparameters,
-    without building the model (which can OOM at large scale).
-
-    active_only=False (default) counts every parameter (the total). active_only=
-    True counts only the parameters that a single token's forward pass touches --
-    the "active parameters" headline for a sparse model: the router still runs
-    fully but only n_active of the n_experts experts fire per token. The
-    embedding and the lm head are counted in full in both. (For a dense model
-    the two are equal.)
-
-    Mirrors the module shapes in this file. RMSNorm/RoPE add no parameters and
-    buffers (e.g. MoE expert_bias) are ignored, so this is the trainable
-    parameter count -- exact for the current architecture, but treat it as an
-    estimate since the shapes may drift. Extra keyword arguments (max_seq_len,
-    window_size, rope_base, ...) are accepted and ignored, so a preset or a
-    saved model_config can be splatted straight in:
-
-        estimate_num_params(**MODEL_PRESETS["8b"])
-        estimate_num_params(**MODEL_PRESETS["8b-moe"], active_only=True)
-    """
-    n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
-    d_head = d_model // n_heads
-    kv_dim = d_head * n_kv_heads
-    ffn_hidden = 3 * d_model if d_ffn is None else d_ffn
-    # TransformerLayer falls d_expert back to d_ffn, and MoE falls a None hidden
-    # back to 3*d_model -- so an unset d_expert lands on ffn_hidden.
-    expert_hidden = ffn_hidden if d_expert is None else d_expert
-
-    # Attention: q/g/o are square (d_head*n_heads == d_model), k/v project to
-    # kv_dim. All bias-free. g is the gated-attention output gate.
-    attn = 3 * d_model * d_model + 2 * d_model * kv_dim
-    # SwiGLU: up/gate/down, all bias-free.
-    ffn = 3 * d_model * ffn_hidden
-    # Block AttnRes: one depth-attention query per sublayer (attn + MLP).
-    layer_params = attn + ffn + 2 * d_model
-    shared_bank = 0
-    if n_experts is not None:
-        # router (always fully active) + per-expert up/gate/down; only n_active
-        # of the experts fire for a given token, so the active count uses those.
-        # With d_latent (LatentMoE) the experts' io dimension shrinks to the
-        # latent size and the shared compress/expand pair (always active) is
-        # added on top. With share_experts the up/gate/down weights exist once
-        # for the whole stack (ExpertBank) instead of per layer; a token's
-        # forward then touches up to n_layers * n_active distinct experts of
-        # that bank, capped by the pool size.
-        expert_io = d_model if d_latent is None else d_latent
-        expert_size = 3 * expert_hidden * expert_io  # one expert's up/gate/down
-        layer_params += n_experts * d_model  # router
-        layer_params += d_model  # out_gain: expert-output RMSNorm (per layer)
-        if d_latent is not None:
-            layer_params += 2 * d_model * d_latent
-        if share_experts:
-            experts = min(n_layers * n_active, n_experts) if active_only else n_experts
-            shared_bank = experts * expert_size
-        else:
-            experts = n_active if active_only else n_experts
-            layer_params += experts * expert_size
-
-    embed = vocab_size * d_model
-    lmhead = vocab_size * d_model  # separate (untied) output projection
-    # Multi-token-prediction heads (MTPHead): each is a d_model-space residual
-    # transform (d_model^2, or 2*d_model*mtp_rank when low-rank) decoded by the
-    # shared lm head -- so, unlike a full vocab projection, they are cheap.
-    # Counted in the total but NOT in active_only: plain autoregressive decoding
-    # runs only the primary head; the MTP heads fire only in the optional
-    # speculative-decoding path (see TransformerLM.decode_heads).
-    mtp_per_head = d_model * d_model if mtp_rank is None else 2 * d_model * mtp_rank
-    mtp = 0 if active_only else n_mtp * mtp_per_head
-    layers = n_layers * layer_params
-    mix_out = d_model  # final depth-attention query before the head
-    return embed + lmhead + layers + mix_out + shared_bank + mtp
-
-
-# Scale ladder: total-param rungs 200m/1b/8b/35b/120b, each crossed with a
-# dense / -moe / -moe-shared architecture variant (dense up to 8b, MoE from 1b),
-# kept in configs/presets.yml so the hyperparameters live with the other recipes
-# (see that file for the naming and sizing rationale).
-PRESETS_FILE = Path(__file__).resolve().parents[1] / "configs" / "presets.yml"
-
-
-def load_presets(path: str | Path = PRESETS_FILE) -> dict[str, dict]:
-    """Load the {size: hyperparameters} scale ladder consumed by build_lm."""
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
-MODEL_PRESETS: dict[str, dict] = load_presets()
-
-
 def moe_modules(model: nn.Module) -> list[MixtureOfExperts]:
     """Every routed-expert layer in the model (empty list for a dense model)."""
     return [m for m in model.modules() if isinstance(m, MixtureOfExperts)]
@@ -1120,38 +1012,15 @@ def set_moe_top_k(model: nn.Module, k: int) -> None:
         m.n_active = max(1, min(int(k), m.n_experts))
 
 
-def build_lm(
-    size: str,
-    vocab_size: int | None = None,
-    max_seq_len: int = 4096,
-    **overrides,
-) -> TransformerLM:
-    """Build a TransformerLM from a preset name. vocab_size defaults to the
-    preset's recommended value; pass it explicitly (e.g. the tokenizer's actual
-    vocab) to override. Any other field can be overridden via overrides."""
-    if size not in MODEL_PRESETS:
-        raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
-    cfg = {**MODEL_PRESETS[size], **overrides}
-    if vocab_size is not None:
-        cfg["vocab_size"] = vocab_size
-    return TransformerLM(max_seq_len=max_seq_len, **cfg)
-
-
-def estimate_preset_params(
-    size: str,
-    vocab_size: int | None = None,
-    active_only: bool = False,
-    **overrides,
-) -> int:
-    """Estimate the parameter count of build_lm(size, ...) without building it.
-
-    Same preset/override resolution as build_lm, so the two always describe the
-    same model. Handy for sizing the scale ladder on a machine that can't hold
-    the larger presets in memory. active_only=True returns the per-token active
-    parameter count instead of the total (see estimate_num_params)."""
-    if size not in MODEL_PRESETS:
-        raise ValueError(f"unknown size '{size}'. choices: {list(MODEL_PRESETS)}")
-    cfg = {**MODEL_PRESETS[size], **overrides}
-    if vocab_size is not None:
-        cfg["vocab_size"] = vocab_size
-    return estimate_num_params(**cfg, active_only=active_only)
+# The parameter-count estimators and the preset/build helpers live in their own
+# modules (model definition vs. sizing vs. config glue); re-exported here so
+# `from picochat.gpt import build_lm, MODEL_PRESETS, estimate_num_params` keeps
+# working across the codebase.
+from picochat.param_estimate import estimate_num_params  # noqa: E402
+from picochat.presets import (  # noqa: E402
+    MODEL_PRESETS,
+    PRESETS_FILE,
+    build_lm,
+    estimate_preset_params,
+    load_presets,
+)
