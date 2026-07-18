@@ -62,15 +62,39 @@ def test_preset_names_match_dense_and_moe_axes():
     assert "120b" not in MODEL_PRESETS
 
 
-def test_shared_pool_gathers_the_per_layer_experts():
-    # a -moe-shared preset holds exactly n_layers x (the -moe per-layer experts),
-    # i.e. the same expert instances the non-shared variant scatters per layer,
-    # so the two match on total (and active) params -- only the pooling differs.
+def test_nonshared_moe_is_latent_and_fine_grained():
+    # every -moe (non-shared) preset is LatentMoE (d_latent set) and fine-grained
+    # (many small experts, high top-k) -- see configs/presets.yml.
+    for size, cfg in MODEL_PRESETS.items():
+        if size.endswith("-moe"):  # non-shared MoE
+            assert cfg.get("d_latent"), f"{size} should set d_latent (LatentMoE)"
+            assert cfg["n_active"] >= 8, size  # fine-grained: high top-k
+
+
+def test_shared_moe_is_coarse_grained_and_not_latent():
+    # every -moe-shared is coarse-grained (few-but-large experts, low top-k) with
+    # no latent compression, and larger experts + lower top-k than its non-shared
+    # sibling at the same rung.
     for size, cfg in MODEL_PRESETS.items():
         if not size.endswith("-moe-shared"):
             continue
-        base = MODEL_PRESETS[size[: -len("-shared")]]
-        assert cfg["n_experts"] == base["n_layers"] * base["n_experts"]
+        assert "d_latent" not in cfg, f"{size} shared pool is not LatentMoE"
+        assert cfg["n_active"] <= 2, size  # coarse: low top-k
+        sibling = MODEL_PRESETS[size[: -len("-shared")]]  # the -moe at this rung
+        assert cfg["d_expert"] > sibling["d_expert"]  # coarser (bigger) experts
+        assert cfg["n_active"] < sibling["n_active"]
+
+
+def test_moe_variants_match_rung_total():
+    # -moe and -moe-shared at the same rung are sized to the same total (within a
+    # tolerance); active differs (that is the point of comparing them).
+    rungs = {}
+    for size in MODEL_PRESETS:
+        if size.endswith("-moe") or size.endswith("-moe-shared"):
+            rungs.setdefault(_rung(size), []).append(size)
+    for rung, names in rungs.items():
+        totals = [estimate_preset_params(n) for n in names]
+        assert max(totals) / min(totals) < 1.15, f"{rung}: {names} totals diverge"
 
 
 def test_build_lm_unknown_size_raises():
