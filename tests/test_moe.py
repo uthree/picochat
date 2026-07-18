@@ -3,7 +3,7 @@ import copy
 import pytest
 import torch
 
-from picochat.gpt import MixtureOfExperts, Transformer
+from picochat.gpt import MixtureOfExperts, Transformer, moe_modules, set_moe_top_k
 
 
 def _moe_transformer(grad_checkpoint: bool) -> Transformer:
@@ -297,3 +297,61 @@ def test_moe_forward_drops_but_no_drop_keeps_every_token():
     n_dropped = int((bounded.abs().sum(-1) == 0).sum())
     assert n_dropped > 0  # bounded path drops (train/val behavior)
     assert int((kept.abs().sum(-1) == 0).sum()) == 0  # decode keeps every token
+
+
+# ---------------------------------------------------------------------------
+# expert-output normalization (learnable RMSNorm on the aggregated output)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("d_latent", [None, 8])
+def test_expert_output_is_rms_normalized(d_latent):
+    # every routed (kept) token's aggregated output is RMS-normalized then scaled
+    # by out_gain, so with gain=1 each non-zero row has unit RMS regardless of
+    # the experts' raw output scale -- this is the stabilizing output norm.
+    # (Scale the expert weights up first: at their tiny default init the summed
+    # output sits near rms_norm's eps, which is exactly the eps-floored regime
+    # that gently ramps the MoE contribution early in training; here we want a
+    # healthy magnitude so the assertion tests the normalization itself.)
+    torch.manual_seed(0)
+    moe = MixtureOfExperts(
+        d_model=16, d_hidden=32, n_experts=4, n_active=2, d_latent=d_latent
+    )
+    assert moe.out_gain.shape == (16,)
+    with torch.no_grad():
+        for p in moe.parameters():
+            if p.ndim >= 2:
+                p.mul_(30.0)
+    out = moe(torch.randn(1, 8, 16), no_drop=True)  # keep every token
+    rms = out.pow(2).mean(-1).sqrt()
+    assert torch.allclose(rms, torch.ones_like(rms), atol=1e-3)
+
+
+def test_out_gain_rescales_output():
+    # out_gain is a real, applied scale: doubling it doubles the output RMS.
+    torch.manual_seed(0)
+    moe = MixtureOfExperts(d_model=16, d_hidden=32, n_experts=4, n_active=2).eval()
+    x = torch.randn(1, 8, 16)
+    base = moe(x, no_drop=True)
+    with torch.no_grad():
+        moe.out_gain.mul_(2.0)
+    assert torch.allclose(moe(x, no_drop=True), 2.0 * base, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# runtime top-k (set_moe_top_k / moe_modules) -- the stochastic-k / inference dial
+# ---------------------------------------------------------------------------
+def test_set_moe_top_k_sets_and_clamps():
+    t = _moe_transformer(grad_checkpoint=False)  # 2 layers, n_experts=4
+    mods = moe_modules(t)
+    assert len(mods) == 2
+    set_moe_top_k(t, 3)
+    assert all(m.n_active == 3 for m in mods)
+    set_moe_top_k(t, 999)  # clamp up to the pool size
+    assert all(m.n_active == 4 for m in mods)
+    set_moe_top_k(t, 0)  # clamp down to >= 1
+    assert all(m.n_active == 1 for m in mods)
+
+
+def test_moe_modules_empty_for_dense_model():
+    dense = Transformer(d_model=32, n_heads=4, n_layers=2, layers_per_block=1)
+    assert moe_modules(dense) == []
+    set_moe_top_k(dense, 5)  # no-op, must not raise

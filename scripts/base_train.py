@@ -230,6 +230,10 @@ def main():
         # Used to render generated-text samples to TensorBoard during validation.
         tokenizer=tokenizer,
         model_config=model_config,
+        # Stochastic-k: `optim.stochastic_k: [min, max]` samples the MoE router
+        # top-k in that range each step so top-k becomes an inference-time dial
+        # (no-op on a dense model / when unset). See LMTrainerMixin.
+        stochastic_k=optim_cfg.get("stochastic_k"),
     )
 
     # --- resume: continue this exact stage (weights + optimizer + step) if it

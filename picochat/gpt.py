@@ -230,6 +230,17 @@ class MixtureOfExperts(nn.Module):
             weights += [self.weight_compress, self.weight_expand]
         for w in weights:
             nn.init.normal_(w, mean=0.0, std=0.02)
+        # Normalize the aggregated (routed) expert output before it re-enters the
+        # residual stream. The summed contribution of the selected experts has a
+        # scale that drifts with routing -- and, under stochastic-k training,
+        # with how many experts fire -- while fine-grained MoE outputs come out
+        # systematically scaled down versus a dense FFN. A learnable RMSNorm here
+        # rescales it and stabilizes training; it gives a small gain for standard
+        # MoE but is crucial for fine-grained experts (Scaling Laws for
+        # Fine-Grained MoE, arXiv:2402.07871), the same output normalization
+        # DeepSeek-V3 / Kimi-style stacks apply. Runs on the d_model output (after
+        # the latent expansion when d_latent is set).
+        self.out_gain = nn.Parameter(torch.ones(d_model))
         # DeepSeek-V3 style aux-loss-free load balancing: a per-expert bias
         # that only steers *which* experts get picked (added before top-k,
         # dropped again before computing combine weights below), nudged every
@@ -323,6 +334,7 @@ class MixtureOfExperts(nn.Module):
         out = inputs.new_zeros(n_tokens, d_io).index_add(0, pair_token, contrib)
         if self.d_latent is not None:
             out = out @ self.weight_expand.T
+        out = rms_norm(out) * self.out_gain  # normalize the aggregated output
         return out.reshape(b, t, d)
 
     @torch.no_grad()
@@ -961,6 +973,7 @@ def estimate_num_params(
         expert_io = d_model if d_latent is None else d_latent
         expert_size = 3 * expert_hidden * expert_io  # one expert's up/gate/down
         layer_params += n_experts * d_model  # router
+        layer_params += d_model  # out_gain: expert-output RMSNorm (per layer)
         if d_latent is not None:
             layer_params += 2 * d_model * d_latent
         if share_experts:
@@ -991,6 +1004,24 @@ def load_presets(path: str | Path = PRESETS_FILE) -> dict[str, dict]:
 
 
 MODEL_PRESETS: dict[str, dict] = load_presets()
+
+
+def moe_modules(model: nn.Module) -> list[MixtureOfExperts]:
+    """Every routed-expert layer in the model (empty list for a dense model)."""
+    return [m for m in model.modules() if isinstance(m, MixtureOfExperts)]
+
+
+def set_moe_top_k(model: nn.Module, k: int) -> None:
+    """Set the number of active experts (router top-k) for every MoE layer,
+    clamped to [1, that layer's pool size].
+
+    n_active is a pure runtime routing choice -- no weight shape depends on it --
+    so this is safe to call at any time: after training to trade compute for
+    quality, or every step during stochastic-k training (see LMTrainerMixin).
+    Changing it re-triggers a torch.compile specialization the first time each
+    distinct k is seen, so the set of values used should stay small."""
+    for m in moe_modules(model):
+        m.n_active = max(1, min(int(k), m.n_experts))
 
 
 def build_lm(

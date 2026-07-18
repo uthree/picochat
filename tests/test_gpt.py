@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from picochat.gpt import TransformerLM
+from picochat.gpt import TransformerLM, moe_modules
 from picochat.trainer import GPT
 
 
@@ -310,3 +310,59 @@ def test_gpt_gradient_accumulation_steps_once_per_cycle():
     # microbatches (1, 3) actually step
     assert trainer.global_step == 2
     assert seen == [False, True, False, True]
+
+
+def _moe_lm():
+    return TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, max_seq_len=64,
+        n_experts=6, n_active=4, d_expert=16, layers_per_block=1,
+    )
+
+
+def test_stochastic_k_samples_within_range_on_train_batch():
+    # on_train_batch_start samples one router top-k in [min, max] and applies it
+    # to every MoE layer.
+    torch.manual_seed(0)
+    gpt = GPT(_moe_lm(), pad_idx=0, compile=False, stochastic_k=(1, 3))
+    seen = set()
+    for i in range(20):
+        gpt.on_train_batch_start(batch=None, batch_idx=i)
+        ks = {m.n_active for m in moe_modules(gpt.model)}
+        assert len(ks) == 1  # one shared k across layers
+        k = ks.pop()
+        assert 1 <= k <= 3
+        seen.add(k)
+    assert len(seen) > 1  # actually varies (not stuck on one value)
+
+
+def test_stochastic_k_restores_nominal_for_validation():
+    gpt = GPT(_moe_lm(), pad_idx=0, compile=False, stochastic_k=(1, 3))
+    gpt.on_train_batch_start(batch=None, batch_idx=0)
+    set_k = {m.n_active for m in moe_modules(gpt.model)}.pop()
+    gpt.on_validation_start()  # validation must use the preset's nominal k (4)
+    assert all(m.n_active == 4 for m in moe_modules(gpt.model))
+    # sanity: the sampled range (1..3) never equals the nominal 4, so this moved
+    assert set_k != 4
+
+
+def test_stochastic_k_none_is_noop():
+    gpt = GPT(_moe_lm(), pad_idx=0, compile=False)  # stochastic_k defaults off
+    gpt.on_train_batch_start(batch=None, batch_idx=0)
+    assert all(m.n_active == 4 for m in moe_modules(gpt.model))
+
+
+def test_stochastic_k_fast_dev_run_and_restores_nominal():
+    # Lightning must invoke the mixin's hooks with the right signatures during a
+    # real fit; afterwards the model is left at the nominal top-k (on_fit_end).
+    gpt = GPT(_moe_lm(), pad_idx=0, compile=False, stochastic_k=(1, 3))
+    loader = DataLoader(_RandomTokenDataset(40, 6), batch_size=4)
+    trainer = L.Trainer(
+        fast_dev_run=True,
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        enable_checkpointing=False,
+    )
+    trainer.fit(gpt, loader, loader)
+    assert all(m.n_active == 4 for m in moe_modules(gpt.model))

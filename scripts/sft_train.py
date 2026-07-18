@@ -206,6 +206,9 @@ def main():
         fused_loss=trainer_cfg.get("fused_loss", False),
         tokenizer=tokenizer,
         model_config=model_config,
+        # `optim.stochastic_k: [min, max]` -> sample MoE router top-k each step
+        # (no-op on a dense model / when unset). See LMTrainerMixin.
+        stochastic_k=optim_cfg.get("stochastic_k"),
     )
 
     # --- resume: continue this exact SFT stage (weights + optimizer + step)
