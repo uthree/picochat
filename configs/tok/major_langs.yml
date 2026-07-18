@@ -19,3 +19,7 @@ data:
     - { preset: wikipedia-la, weight: 1 } # Latin
     - { preset: wikipedia-ms, weight: 1 } # Malay
     - { preset: wikipedia-th, weight: 1 } # Thai
+    # Code: so indentation, brackets and identifiers get their own merges
+    # instead of wasting tokens (matters for any coding-agent use later).
+    - { preset: python-codes, weight: 1 } # Python
+    - { preset: the-stack-smol, weight: 2 } # multi-language source code

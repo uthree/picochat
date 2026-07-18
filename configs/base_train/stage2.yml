@@ -15,6 +15,8 @@ data:
 
     datasets:
         - { path: tiny-codes, weight: 1.0 }
+        - { path: python-codes, weight: 1.0 }
+        - { path: the-stack-smol, weight: 1.0 }
         - { path: tiny-textbooks, weight: 1.0 }
         - { path: tiny-orca-textbooks, weight: 1.0 }
         - { path: textbooks, weight: 1.0 }
@@ -22,6 +24,7 @@ data:
         - { path: wikipedia-en, weight: 1.0 }
     val_bin: # per-dataset validation splits (see configs/base_setup/stage2.yml)
         - tiny-codes.val
+        - python-codes.val
         - tiny-textbooks.val
         - tiny-orca-textbooks.val
         - textbooks.val

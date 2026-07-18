@@ -77,8 +77,19 @@ TEXT_PRESETS: dict[str, DatasetSpec] = {
     "wikipedia-ms": DatasetSpec("wikimedia/wikipedia", "20231101.ms"),
     "wikipedia-th": DatasetSpec("wikimedia/wikipedia", "20231101.th"),
     "fineweb-ja": DatasetSpec("HuggingFaceFW/fineweb-2", "jpn_Jpan"),
-    # --- Programming
-    "tiny-codes": DatasetSpec("nampdn-ai/tiny-codes", text_key="response"),
+    # --- Programming (small first) ---
+    # ~50k short Python snippets, each with an instruction + fenced code block
+    # (prose interleaved with code -- good, cheap code signal for a small model).
+    "python-codes": DatasetSpec("flytech/python-codes-25k", text_key="text"),  # ~52MB
+    # 1.6M synthetic snippets across many languages, reasoning-augmented ("tiny"
+    # theme, matches the TinyStories/tiny-textbooks curriculum).
+    "tiny-codes": DatasetSpec("nampdn-ai/tiny-codes", text_key="response"),  # ~0.5GB
+    # Small multi-language sample of The Stack (raw source files, ~30 languages).
+    # The "-xl" smol variant is loadable without dataset scripts and ungated.
+    "the-stack-smol": DatasetSpec(
+        "bigcode/the-stack-smol-xl", text_key="content"
+    ),  # a few GB; stream + limit for a slice
+    # Full The Stack GitHub dump -- huge (~1TB); stream a slice, don't download.
     "github-code": DatasetSpec("codeparrot/github-code", text_key="code"),
     # --- Literature and Novels
     # 青空文庫 (aozora bunko)

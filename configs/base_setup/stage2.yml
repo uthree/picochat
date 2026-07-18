@@ -17,6 +17,18 @@ datasets:
           val_output: tiny-codes.val,
           val_fraction: 0.01,
       }
+    - {
+          preset: python-codes,
+          output: python-codes,
+          val_output: python-codes.val,
+          val_fraction: 0.01,
+      }
+    # Raw multi-language source code. The full "-xl" smol dump is multi-GB and
+    # exposes no usable size metadata for val_fraction, so stream a fixed slice
+    # as a train-only source (code val coverage comes from tiny/python-codes).
+    # Raw files are large (~20k tokens each), so 5k docs is already ~100M
+    # tokens; raise the limit for a bigger code share.
+    - { preset: the-stack-smol, output: the-stack-smol, streaming: true, limit: 5000 }
     - { preset: tiny-textbooks, output: tiny-textbooks }
     - { preset: tiny-textbooks, output: tiny-textbooks.val, split: test }
     - {
