@@ -8,6 +8,12 @@ training a small chat LLM from scratch on a budget of roughly $100.
 - Python 3.11
 - Training: a CUDA GPU (CUDA 12.6 or later in the 12.x series), PyTorch 2.12.1 or later (cu126 wheels)
 - Tests and evaluation also run on CPU
+- RL post-training (`scripts/grpo_train.py`) executes untrusted, model-generated
+  code to score it. Install [bubblewrap](https://github.com/containers/bubblewrap)
+  (`apt install bubblewrap`) so it runs sandboxed (isolated filesystem/network);
+  without it, or with `PICOCHAT_SANDBOX=none`, code runs in a hardened
+  subprocess (rlimits + scrubbed env) but **without** fs/network isolation. Set
+  `PICOCHAT_SANDBOX=bwrap` (or `sandbox: bwrap` in the config) to require it.
 
 ## Usage
 

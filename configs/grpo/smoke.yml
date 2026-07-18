@@ -8,6 +8,14 @@ output_dir: weights/grpo-smoke
 system: "You are a helpful coding assistant."
 tasks: configs/grpo/sample_tasks.jsonl
 
+# Isolation for the untrusted, policy-generated code the tests execute:
+#   auto  (default) bubblewrap if the kernel allows namespaces, else a hardened
+#         subprocess (rlimits + scrubbed env, but no fs/network isolation) + warn
+#   bwrap require bubblewrap -- fail fast at startup if it can't run
+#   none  hardened subprocess only
+# (also settable via the PICOCHAT_SANDBOX env var).
+sandbox: auto
+
 # Judge for the untested prompts. 'mock' is deterministic (no GPU); switch to
 # 'http' + a vLLM endpoint in production. The http judge grades with a yes/no
 # checklist and scores the fraction answered yes; override `questions` per task

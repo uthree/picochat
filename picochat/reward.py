@@ -34,6 +34,8 @@ from typing import Protocol
 
 from openai import AsyncOpenAI
 
+from picochat import sandbox
+
 _CODE_FENCE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
 
 
@@ -68,10 +70,11 @@ class CodeTask:
 
 
 def run_tests_verbose(code: str, task: CodeTask) -> tuple[bool, str]:
-    """Execute `setup + code + test_code` in a subprocess and return
-    `(passed, output)`: a clean exit (assertions hold, no exception) is a pass,
-    and `output` is the captured stdout+stderr (the failure message on a fail).
-    Runs in a throwaway temp dir with a wall-clock timeout; any failure mode
+    """Execute `setup + code + test_code` and return `(passed, output)`: a clean
+    exit (assertions hold, no exception) is a pass, and `output` is the captured
+    stdout+stderr (the failure message on a fail). Runs in a throwaway temp dir
+    under the isolation sandbox (picochat.sandbox: bubblewrap where available,
+    else a hardened subprocess) with a wall-clock timeout; any failure mode
     (assertion, exception, timeout, unparseable code) is a non-pass with a
     human-readable reason rather than an exception into the caller. The output
     is what the agentic loop feeds back to the policy as an observation.
@@ -81,12 +84,8 @@ def run_tests_verbose(code: str, task: CodeTask) -> tuple[bool, str]:
         path = Path(tmp) / "candidate.py"
         path.write_text(script)
         try:
-            proc = subprocess.run(
-                [sys.executable, str(path)],
-                capture_output=True,
-                text=True,
-                timeout=task.timeout,
-                cwd=tmp,
+            proc = sandbox.run(
+                [sys.executable, str(path)], work_dir=tmp, timeout=task.timeout
             )
         except subprocess.TimeoutExpired:
             return False, f"Timed out after {task.timeout}s (possible infinite loop)."

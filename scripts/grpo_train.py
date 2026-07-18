@@ -26,6 +26,7 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
+from picochat import sandbox
 from picochat.gpt import build_lm
 from picochat.grpo import GRPOModule, grpo_collate
 from picochat.reward import CodeTask, HTTPJudge, MockJudge, RewardModel, RewardConfig
@@ -77,6 +78,11 @@ def main():
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    # Untrusted policy-generated code runs under the sandbox; resolve the policy
+    # and fail fast if 'bwrap' is required but unavailable (before any training).
+    sandbox.configure(cfg.get("sandbox", "auto"))
+    sandbox.check()
 
     tokenizer = load_tokenizer(cfg.get("tokenizer", "weights/tokenizer.json"))
     pad_idx = tokenizer.encode_single_token(PAD_TOKEN)

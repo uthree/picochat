@@ -15,6 +15,13 @@ output_dir: weights/grpo-agentic
 system: "You are a coding assistant. When tests fail, use the error to fix your code."
 tasks: configs/grpo/sample_tasks.jsonl
 
+# The agentic loop executes a lot of untrusted policy-generated code, so require
+# the bubblewrap sandbox (fresh mount+net+pid namespace, no home/repo/weights
+# visible, no network). Fails fast at startup if bwrap can't create namespaces.
+# Drop to 'auto' only for local verification where you trust the code. See
+# picochat/sandbox.py.
+sandbox: bwrap
+
 # Untested prompts still fall back to the judge; tested prompts drive the
 # agentic loop (the judge is not called there).
 judge:
