@@ -230,8 +230,7 @@ class MixtureOfExperts(nn.Module):
             nn.init.normal_(w, mean=0.0, std=0.02)
         # Normalize the aggregated (routed) expert output before it re-enters the
         # residual stream. The summed contribution of the selected experts has a
-        # scale that drifts with routing -- and, under stochastic-k training,
-        # with how many experts fire -- while fine-grained MoE outputs come out
+        # scale that drifts with routing, while fine-grained MoE outputs come out
         # systematically scaled down versus a dense FFN. A learnable RMSNorm here
         # rescales it and stabilizes training; it gives a small gain for standard
         # MoE but is crucial for fine-grained experts (Scaling Laws for
@@ -1012,19 +1011,6 @@ class TransformerLM(nn.Module):
 def moe_modules(model: nn.Module) -> list[MixtureOfExperts]:
     """Every routed-expert layer in the model (empty list for a dense model)."""
     return [m for m in model.modules() if isinstance(m, MixtureOfExperts)]
-
-
-def set_moe_top_k(model: nn.Module, k: int) -> None:
-    """Set the number of active experts (router top-k) for every MoE layer,
-    clamped to [1, that layer's pool size].
-
-    n_active is a pure runtime routing choice -- no weight shape depends on it --
-    so this is safe to call at any time: after training to trade compute for
-    quality, or every step during stochastic-k training (see LMTrainerMixin).
-    Changing it re-triggers a torch.compile specialization the first time each
-    distinct k is seen, so the set of values used should stay small."""
-    for m in moe_modules(model):
-        m.n_active = max(1, min(int(k), m.n_experts))
 
 
 # The parameter-count estimators and the preset/build helpers live in their own

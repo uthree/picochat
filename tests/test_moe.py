@@ -3,7 +3,7 @@ import copy
 import pytest
 import torch
 
-from picochat.gpt import MixtureOfExperts, Transformer, moe_modules, set_moe_top_k
+from picochat.gpt import MixtureOfExperts, Transformer, moe_modules
 
 
 def _moe_transformer(grad_checkpoint: bool) -> Transformer:
@@ -337,21 +337,15 @@ def test_out_gain_rescales_output():
 
 
 # ---------------------------------------------------------------------------
-# runtime top-k (set_moe_top_k / moe_modules) -- the stochastic-k / inference dial
+# moe_modules -- discovery of the routed-expert layers in a model
 # ---------------------------------------------------------------------------
-def test_set_moe_top_k_sets_and_clamps():
+def test_moe_modules_finds_all_layers():
     t = _moe_transformer(grad_checkpoint=False)  # 2 layers, n_experts=4
     mods = moe_modules(t)
     assert len(mods) == 2
-    set_moe_top_k(t, 3)
-    assert all(m.n_active == 3 for m in mods)
-    set_moe_top_k(t, 999)  # clamp up to the pool size
-    assert all(m.n_active == 4 for m in mods)
-    set_moe_top_k(t, 0)  # clamp down to >= 1
-    assert all(m.n_active == 1 for m in mods)
+    assert all(m.n_experts == 4 for m in mods)
 
 
 def test_moe_modules_empty_for_dense_model():
     dense = Transformer(d_model=32, n_heads=4, n_layers=2, layers_per_block=1)
     assert moe_modules(dense) == []
-    set_moe_top_k(dense, 5)  # no-op, must not raise

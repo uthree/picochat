@@ -44,9 +44,6 @@ optim:
     weight_decay: 0.1
     warmup_steps: 2000
     max_steps: 100000
-    # stochastic_k: [4, 8]  # MoE only: sample the router top-k in this inclusive
-    # range each step so top-k becomes an inference-time quality/compute dial (set
-    # it post-training with picochat.gpt.set_moe_top_k). No-op on a dense model.
 
 trainer:
     batch_size: 16

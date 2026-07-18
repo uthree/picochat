@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from picochat.gpt import TransformerLM, build_lm, moe_modules, set_moe_top_k
+from picochat.gpt import TransformerLM, build_lm
 from picochat.kernels import (
     fused_linear_cross_entropy,
     fused_linear_cross_entropy_available,
@@ -68,7 +68,6 @@ class LMTrainerMixin:
         tokenizer=None,
         muon_weight_decay: float = 0.01,
         fused_loss: bool = False,
-        stochastic_k: tuple[int, int] | None = None,
     ) -> None:
         self.lr = lr
         self.weight_decay = weight_decay
@@ -110,41 +109,6 @@ class LMTrainerMixin:
                 "after the first fetch)"
             )
         self.fused_loss = fused_loss
-        # Stochastic-k (MoE): if set to (min_k, max_k), each training step samples
-        # one router top-k in that inclusive range and applies it to every MoE
-        # layer, so the model learns to work across a range of active-expert
-        # counts and top-k becomes a real quality/compute dial at inference (set
-        # it with picochat.gpt.set_moe_top_k). Validation and inference use the
-        # preset's nominal top-k (captured here per layer). None disables it (and
-        # it is a no-op on a dense model).
-        self.stochastic_k = tuple(stochastic_k) if stochastic_k is not None else None
-        self._nominal_top_k = [m.n_active for m in moe_modules(self.model)]
-
-    def _restore_nominal_top_k(self) -> None:
-        for m, k in zip(moe_modules(self.model), self._nominal_top_k):
-            m.n_active = k
-
-    def on_train_batch_start(self, batch, batch_idx: int) -> None:
-        # Sample one top-k for the whole model this step (a single value across
-        # layers -- matches how inference sets top-k, and keeps every layer's
-        # forward consistent). Uses torch so it honours Lightning's seeding.
-        if self.stochastic_k is None or not self._nominal_top_k:
-            return
-        lo, hi = self.stochastic_k
-        k = int(torch.randint(lo, hi + 1, (1,)).item())
-        set_moe_top_k(self.model, k)
-
-    def on_validation_start(self) -> None:
-        # Always validate at the nominal top-k so val_loss stays comparable
-        # across steps regardless of the k sampled for the surrounding batch.
-        if self.stochastic_k is not None:
-            self._restore_nominal_top_k()
-
-    def on_fit_end(self) -> None:
-        # Leave the model at its nominal top-k (checkpoints rebuild from the
-        # preset's nominal n_active anyway, but keep the live object consistent).
-        if self.stochastic_k is not None:
-            self._restore_nominal_top_k()
 
     def _setup_compiled_forward(self, compile: bool | None) -> None:
         """Build self._forward, the trainable forward, torch.compiled when the
@@ -422,7 +386,6 @@ class GPT(LMTrainerMixin, L.LightningModule):
         tokenizer=None,
         sample_batches: int = 20,
         model_config: dict | None = None,
-        stochastic_k: tuple[int, int] | None = None,
         mtp_weight: float = 0.3,
     ):
         super().__init__()
@@ -462,7 +425,6 @@ class GPT(LMTrainerMixin, L.LightningModule):
             accumulate=accumulate,
             tokenizer=tokenizer,
             fused_loss=fused_loss,
-            stochastic_k=stochastic_k,
         )
         # Manual optimization: mirrors SFTModule so the two share the same LR
         # schedule / gradient-accumulation step (see LMTrainerMixin._optimizer_step),
@@ -551,7 +513,6 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         fused_loss: bool = False,
         tokenizer=None,
         model_config: dict | None = None,
-        stochastic_k: tuple[int, int] | None = None,
         mtp_weight: float = 0.3,
     ):
         super().__init__()
@@ -576,7 +537,6 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
             accumulate=accumulate,
             tokenizer=tokenizer,
             fused_loss=fused_loss,
-            stochastic_k=stochastic_k,
         )
         # Manual optimization: mirrors GPT so the two share the same LR
         # schedule / gradient-accumulation step (see LMTrainerMixin._optimizer_step).

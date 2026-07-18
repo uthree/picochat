@@ -159,9 +159,6 @@ def main():
         fused_loss=trainer_cfg.get("fused_loss", False),
         tokenizer=tokenizer,
         model_config=model_config,
-        # `optim.stochastic_k: [min, max]` -> sample MoE router top-k each step
-        # (no-op on a dense model / when unset). See LMTrainerMixin.
-        stochastic_k=optim_cfg.get("stochastic_k"),
         # Auxiliary multi-token-prediction loss weight (n_mtp > 0 models only).
         mtp_weight=optim_cfg.get("mtp_weight", 0.3),
     )
