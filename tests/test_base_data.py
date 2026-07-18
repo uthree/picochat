@@ -5,7 +5,36 @@ from lightning.pytorch.utilities.model_helpers import is_overridden
 from torch.utils.data import Dataset
 
 from picochat.dataloader import PretrainDataModule
-from picochat.dataset import holdout_splits
+from picochat.dataset import (
+    TEXT_PRESETS,
+    chat_spec_from_entry,
+    holdout_splits,
+    spec_from_entry,
+)
+
+
+def test_spec_from_entry_preset_inline_and_split_override():
+    # preset lookup
+    preset_name = next(iter(TEXT_PRESETS))
+    assert spec_from_entry({"preset": preset_name}) is TEXT_PRESETS[preset_name]
+    # inline spec
+    inline = spec_from_entry({"path": "x", "split": "test", "text_key": "body"})
+    assert inline.path == "x" and inline.split == "test" and inline.text_key == "body"
+    # per-entry split override copies rather than mutating the shared preset
+    original_split = TEXT_PRESETS[preset_name].split
+    overridden = spec_from_entry({"preset": preset_name, "split": "validation"})
+    assert overridden.split == "validation"
+    assert TEXT_PRESETS[preset_name].split == original_split  # preset untouched
+    # bad entry
+    with pytest.raises(SystemExit):
+        spec_from_entry({})
+
+
+def test_chat_spec_from_entry_inline_and_error():
+    spec = chat_spec_from_entry({"path": "y", "messages_key": "conv"})
+    assert spec.path == "y" and spec.messages_key == "conv"
+    with pytest.raises(SystemExit):
+        chat_spec_from_entry({"preset": "does-not-exist"})
 
 
 class _RandomTokenDataset(Dataset):

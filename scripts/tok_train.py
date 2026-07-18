@@ -11,31 +11,8 @@ from pathlib import Path
 
 import yaml
 
-from picochat.dataset import TEXT_PRESETS, DatasetSpec, Mixture, iter_mixture
+from picochat.dataset import Mixture, iter_mixture, spec_from_entry
 from picochat.tokenizer import SPECIAL_TOKENS, train_tokenizer
-
-
-def spec_from_entry(entry: dict) -> DatasetSpec:
-    """Resolve one `data:` entry into a DatasetSpec.
-
-    Either {preset: <name>} referencing picochat.dataset, or an inline
-    {path, name, split, text_key}.
-    """
-    if "preset" in entry:
-        name = entry["preset"]
-        if name not in TEXT_PRESETS:
-            raise SystemExit(
-                f"unknown preset '{name}'. choices: {', '.join(TEXT_PRESETS)}"
-            )
-        return TEXT_PRESETS[name]
-    if "path" in entry:
-        return DatasetSpec(
-            path=entry["path"],
-            name=entry.get("name"),
-            split=entry.get("split", "train"),
-            text_key=entry.get("text_key", "text"),
-        )
-    raise SystemExit(f"data entry needs 'preset' or 'path': {entry}")
 
 
 def main():

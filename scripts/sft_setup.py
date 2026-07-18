@@ -29,8 +29,8 @@ from tqdm import tqdm
 
 from picochat.dataloader import pack_examples
 from picochat.dataset import (
-    CHAT_PRESETS,
     ChatDatasetSpec,
+    chat_spec_from_entry,
     iter_conversations,
     resolve_chat_spec,
 )
@@ -45,36 +45,6 @@ DEFAULT_MAX_LENGTH = 2048
 def load_enc_and_pad_id(tokenizer_path: str):
     enc = load_tokenizer(tokenizer_path)
     return enc, enc.encode_single_token(PAD_TOKEN)
-
-
-def spec_from_entry(entry: dict) -> ChatDatasetSpec:
-    """Resolve one `datasets:` entry into a ChatDatasetSpec.
-
-    Either {preset: <name>} referencing picochat.dataset, or an inline
-    {path, name, split, messages_key}. An optional `split` overrides the preset's.
-    """
-    if "preset" in entry:
-        name = entry["preset"]
-        if name not in CHAT_PRESETS:
-            raise SystemExit(
-                f"unknown preset '{name}'. choices: {', '.join(CHAT_PRESETS)}"
-            )
-        spec = CHAT_PRESETS[name]
-    elif "path" in entry:
-        spec = ChatDatasetSpec(
-            path=entry["path"],
-            name=entry.get("name"),
-            split=entry.get("split", "train"),
-            messages_key=entry.get("messages_key", "messages"),
-        )
-    else:
-        raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
-    # Per-entry `split` override. Use replace() to copy the spec rather than
-    # mutate it: CHAT_PRESETS entries are shared, so mutating would leak the split
-    # into every other entry using the same preset.
-    if "split" in entry:
-        spec = replace(spec, split=entry["split"])
-    return spec
 
 
 def process(
@@ -140,7 +110,7 @@ def run_config(cfg: dict, enc, pad_id: int) -> None:
             raise SystemExit(f"dataset entry needs 'output': {entry}")
 
     for i, entry in enumerate(entries, 1):
-        spec = spec_from_entry(entry)
+        spec = chat_spec_from_entry(entry)
         output = output_dir / entry["output"]
         limit = entry.get("limit")
         # Per-entry overrides of the file defaults.

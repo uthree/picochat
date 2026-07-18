@@ -28,7 +28,6 @@ Two ways to run:
 import argparse
 import os
 import time
-from dataclasses import replace
 from itertools import islice
 from pathlib import Path
 from typing import Iterator
@@ -46,11 +45,11 @@ from picochat.dataloader import (  # DTYPE: uint32; shared with the reader
     write_meta,
 )
 from picochat.dataset import (
-    TEXT_PRESETS,
     DatasetSpec,
     holdout_splits,
     iter_texts,
     resolve_text_spec,
+    spec_from_entry,
 )
 from picochat.tokenizer import BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, load_tokenizer
 
@@ -112,36 +111,6 @@ def load_enc(tokenizer_path: str):
         f"vocab {enc.n_vocab} does not fit in {DTYPE}"
     )
     return enc, bos_id, eos_id, pad_id
-
-
-def spec_from_entry(entry: dict) -> DatasetSpec:
-    """Resolve one `datasets:` entry into a DatasetSpec.
-
-    Either {preset: <name>} referencing picochat.dataset, or an inline
-    {path, name, split, text_key}. An optional `split` overrides the preset's.
-    """
-    if "preset" in entry:
-        name = entry["preset"]
-        if name not in TEXT_PRESETS:
-            raise SystemExit(
-                f"unknown preset '{name}'. choices: {', '.join(TEXT_PRESETS)}"
-            )
-        spec = TEXT_PRESETS[name]
-    elif "path" in entry:
-        spec = DatasetSpec(
-            path=entry["path"],
-            name=entry.get("name"),
-            split=entry.get("split", "train"),
-            text_key=entry.get("text_key", "text"),
-        )
-    else:
-        raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
-    # Per-entry `split` override. Use replace() to copy the spec rather than
-    # mutate it: TEXT_PRESETS entries are shared, so mutating would leak the split
-    # into every other entry using the same preset.
-    if "split" in entry:
-        spec = replace(spec, split=entry["split"])
-    return spec
 
 
 def _split_example_count(spec: DatasetSpec) -> int:

@@ -9,7 +9,7 @@ conversation sources for SFT (scripts/sft_setup.py). Tokenizing, packing and
 loading the results live in picochat.dataloader.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Iterator
 
 from datasets import load_dataset
@@ -261,6 +261,61 @@ def iter_conversations(
         messages = spec.to_messages(row)
         if messages:
             yield messages
+
+
+def spec_from_entry(entry: dict) -> DatasetSpec:
+    """Resolve one config `data:`/`datasets:` entry into a DatasetSpec: either
+    {preset: <name>} referencing TEXT_PRESETS, or an inline {path, name, split,
+    text_key}. An optional `split` overrides the preset's. Shared by the text
+    setup / tokenizer scripts."""
+    if "preset" in entry:
+        name = entry["preset"]
+        if name not in TEXT_PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(TEXT_PRESETS)}"
+            )
+        spec = TEXT_PRESETS[name]
+    elif "path" in entry:
+        spec = DatasetSpec(
+            path=entry["path"],
+            name=entry.get("name"),
+            split=entry.get("split", "train"),
+            text_key=entry.get("text_key", "text"),
+        )
+    else:
+        raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
+    # Per-entry `split` override. replace() copies rather than mutates: preset
+    # specs are shared, so mutating would leak the split into every other entry
+    # using the same preset.
+    if "split" in entry:
+        spec = replace(spec, split=entry["split"])
+    return spec
+
+
+def chat_spec_from_entry(entry: dict) -> ChatDatasetSpec:
+    """Resolve one config `datasets:` entry into a ChatDatasetSpec: either
+    {preset: <name>} referencing CHAT_PRESETS, or an inline {path, name, split,
+    messages_key}. An optional `split` overrides the preset's. Used by the SFT
+    setup script."""
+    if "preset" in entry:
+        name = entry["preset"]
+        if name not in CHAT_PRESETS:
+            raise SystemExit(
+                f"unknown preset '{name}'. choices: {', '.join(CHAT_PRESETS)}"
+            )
+        spec = CHAT_PRESETS[name]
+    elif "path" in entry:
+        spec = ChatDatasetSpec(
+            path=entry["path"],
+            name=entry.get("name"),
+            split=entry.get("split", "train"),
+            messages_key=entry.get("messages_key", "messages"),
+        )
+    else:
+        raise SystemExit(f"dataset entry needs 'preset' or 'path': {entry}")
+    if "split" in entry:
+        spec = replace(spec, split=entry["split"])
+    return spec
 
 
 def resolve_chat_spec(preset: str | None, dataset: str | None) -> ChatDatasetSpec:
