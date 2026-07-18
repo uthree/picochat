@@ -363,8 +363,9 @@ def test_mtp_training_step_trains_all_heads():
     loss = gpt.training_step(batch, 0)
     assert loss.requires_grad and torch.isfinite(loss)
     assert lm.lmhead.weight.grad is not None
+    # each MTP head's transform must get gradient (gelu'(0)=0.5 despite zero init)
     for head in lm.mtp_heads:
-        g = head.weight.grad
+        g = head.out.weight.grad
         assert g is not None and g.abs().sum() > 0
 
 

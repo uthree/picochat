@@ -815,6 +815,30 @@ class Transformer(nn.Module):
         return x, cache, pos + q_len  # type: ignore
 
 
+class MTPHead(nn.Module):
+    """A parameter-light multi-token-prediction head (Medusa-style): a residual
+    transform in d_model space whose output is decoded by the *shared* lm head,
+    so the expensive vocab projection is not duplicated. Each head costs only
+    d_model*d_model (or 2*d_model*rank when `rank` is set) instead of a full
+    vocab*d_model output layer -- e.g. ~d_model/vocab of it.
+
+    The transform is zero-initialized (see TransformerLM._init_weights), so at
+    init `forward` returns the hidden state unchanged and the head predicts
+    exactly like the primary lm head; training then specializes it to its offset.
+    """
+
+    def __init__(self, d_model: int, rank: int | None = None):
+        super().__init__()
+        # rank=None: one square transform. rank=r: a low-rank d_model->r->d_model
+        # bottleneck (cheaper still when r < d_model/2).
+        self.proj_in = None if rank is None else nn.Linear(d_model, rank, bias=False)
+        self.out = nn.Linear(d_model if rank is None else rank, d_model, bias=False)
+
+    def forward(self, hidden: Tensor) -> Tensor:
+        z = hidden if self.proj_in is None else self.proj_in(hidden)
+        return hidden + F.gelu(self.out(z))  # residual; identity at init
+
+
 class TransformerLM(nn.Module):
     def __init__(
         self,
@@ -836,6 +860,7 @@ class TransformerLM(nn.Module):
         d_latent: int | None = None,
         share_experts: bool = False,
         n_mtp: int = 0,
+        mtp_rank: int | None = None,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -845,14 +870,16 @@ class TransformerLM(nn.Module):
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
         # Multi-token prediction (Gloeckle et al., 2024), simplest "several output
         # heads" form: from the final hidden state h_t the primary lmhead predicts
-        # token t+1, and mtp_heads[j] predicts token t+2+j. So n_mtp extra heads
-        # cover offsets +2..+(1+n_mtp). Trained as an auxiliary loss (see
+        # token t+1, and mtp_heads[j] predicts token t+2+j (offsets +2..+(1+n_mtp)).
+        # Each head is a light residual transform (MTPHead) decoded by the SHARED
+        # lmhead, so it costs ~d_model^2 rather than a full vocab*d_model layer
+        # (mtp_rank shrinks it further). Trained as an auxiliary loss (see
         # LMTrainerMixin) and used to draft tokens for self-speculative decoding
-        # (see picochat.engine.generate_speculative). Plain autoregressive decode
+        # (picochat.engine.generate_speculative). Plain autoregressive decode
         # ignores them (only the primary head runs). n_mtp=0 -> standard model.
         self.n_mtp = n_mtp
         self.mtp_heads = nn.ModuleList(
-            nn.Linear(d_model, vocab_size, bias=False) for _ in range(n_mtp)
+            MTPHead(d_model, rank=mtp_rank) for _ in range(n_mtp)
         )
         self.transformer = Transformer(
             d_model,
@@ -899,6 +926,11 @@ class TransformerLM(nn.Module):
                     nn.init.normal_(m.weight_expand, mean=0.0, std=scaled_std)
                 else:
                     nn.init.normal_(m.bank.weight_down, mean=0.0, std=scaled_std)
+        # MTP heads start as the identity (their residual transform outputs zero),
+        # so at init each predicts exactly like the shared primary head; training
+        # then specializes it to its offset. gelu'(0)=0.5, so gradients still flow.
+        for head in self.mtp_heads:
+            nn.init.zeros_(head.out.weight)
 
     def encode(
         self,
@@ -958,7 +990,9 @@ class TransformerLM(nn.Module):
         embeds, cache, pos = self.transformer.decode(
             self.embed(x), cache, pos, cache_margin
         )
-        mtp = [head(embeds) for head in self.mtp_heads]
+        # each MTP head transforms the hidden state, then the SHARED lm head
+        # decodes it to vocab logits.
+        mtp = [self.lmhead(head(embeds)) for head in self.mtp_heads]
         return self.lmhead(embeds), mtp, cache, pos
 
 
@@ -975,6 +1009,7 @@ def estimate_num_params(
     d_latent: int | None = None,
     share_experts: bool = False,
     n_mtp: int = 0,
+    mtp_rank: int | None = None,
     active_only: bool = False,
     **_ignored,
 ) -> int:
@@ -1038,11 +1073,14 @@ def estimate_num_params(
 
     embed = vocab_size * d_model
     lmhead = vocab_size * d_model  # separate (untied) output projection
-    # Multi-token-prediction heads: n_mtp extra vocab-projections, each the size
-    # of the lm head. Counted in the total but NOT in active_only -- plain
-    # autoregressive decoding runs only the primary head; the MTP heads fire only
-    # in the optional speculative-decoding path (see TransformerLM.decode_heads).
-    mtp = 0 if active_only else n_mtp * vocab_size * d_model
+    # Multi-token-prediction heads (MTPHead): each is a d_model-space residual
+    # transform (d_model^2, or 2*d_model*mtp_rank when low-rank) decoded by the
+    # shared lm head -- so, unlike a full vocab projection, they are cheap.
+    # Counted in the total but NOT in active_only: plain autoregressive decoding
+    # runs only the primary head; the MTP heads fire only in the optional
+    # speculative-decoding path (see TransformerLM.decode_heads).
+    mtp_per_head = d_model * d_model if mtp_rank is None else 2 * d_model * mtp_rank
+    mtp = 0 if active_only else n_mtp * mtp_per_head
     layers = n_layers * layer_params
     mix_out = d_model  # final depth-attention query before the head
     return embed + lmhead + layers + mix_out + shared_bank + mtp

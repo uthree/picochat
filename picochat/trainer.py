@@ -183,10 +183,11 @@ class LMTrainerMixin:
             if isinstance(m, nn.Embedding)
             for p in m.parameters()
         }
-        # The lm head and the MTP output heads (see TransformerLM) are all output
-        # projections -> AdamW, not Muon (Muon skips input/output layers).
+        # The lm head is the model's output projection -> AdamW, not Muon (Muon
+        # skips input/output layers). The MTP heads' transforms are hidden
+        # d_model x d_model matrices (they reuse this same output projection), so
+        # they go to Muon like every other hidden weight.
         head_ids = {id(p) for p in self.model.lmhead.parameters()}
-        head_ids |= {id(p) for p in self.model.mtp_heads.parameters()}
         muon, adam_decay, adam_no_decay = [], [], []
         for p in self.model.parameters():
             if not p.requires_grad:
@@ -331,11 +332,15 @@ class LMTrainerMixin:
         loss = self._head_ce(hidden[:, :-1], self.model.lmhead.weight, targets[:, 1:])
         if self.model.n_mtp == 0:
             return loss
-        # MTP head j: offset +(2+j). hidden[:, :-o] predicts targets[:, o:].
+        # MTP head j: offset +(2+j). hidden[:, :-o] predicts targets[:, o:]. Each
+        # head transforms the hidden state; the shared lm head decodes it.
         mtp = hidden.new_zeros(())
         for j, head in enumerate(self.model.mtp_heads):
             o = j + 2
-            mtp = mtp + self._head_ce(hidden[:, :-o], head.weight, targets[:, o:])
+            transformed = head(hidden[:, :-o])
+            mtp = mtp + self._head_ce(
+                transformed, self.model.lmhead.weight, targets[:, o:]
+            )
         return loss + self.mtp_weight * mtp / self.model.n_mtp
 
     @torch.no_grad()

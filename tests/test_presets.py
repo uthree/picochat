@@ -190,18 +190,22 @@ def test_estimate_num_params_matches_actual(cfg):
 
 
 def test_estimate_counts_mtp_heads_in_total_not_active():
-    # each MTP head is one lm-head's worth of params: counted in the total (and
-    # in the real model), excluded from the active figure (plain decode runs only
-    # the primary head).
+    # each MTP head is a light d_model-space transform (d_model^2, reusing the
+    # shared lm head) -- counted in the total (and in the real model), excluded
+    # from the active figure (plain decode runs only the primary head).
     cfg = dict(vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_mtp=2)
     lm = TransformerLM(**cfg)
     assert len(lm.mtp_heads) == 2
     assert estimate_num_params(**cfg) == _actual_params(lm)
     dense = dict(cfg, n_mtp=0)
-    assert estimate_num_params(**cfg) - estimate_num_params(**dense) == 2 * 100 * 64
+    assert estimate_num_params(**cfg) - estimate_num_params(**dense) == 2 * 64 * 64
     assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(
         **dense, active_only=True
     )
+    # low-rank shrinks each head to 2 * d_model * rank
+    lr = dict(cfg, mtp_rank=8)
+    assert estimate_num_params(**lr) == _actual_params(TransformerLM(**lr))
+    assert estimate_num_params(**lr) - estimate_num_params(**dense) == 2 * (2 * 64 * 8)
 
 
 def test_estimate_num_params_counts_untied_head():

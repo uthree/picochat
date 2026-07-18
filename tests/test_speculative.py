@@ -64,12 +64,31 @@ def test_decode_heads_shapes():
     assert pos == 6
 
 
+def test_mtp_heads_start_as_identity():
+    # zero-initialized transforms -> at init every MTP head predicts exactly like
+    # the shared primary head (a sensible starting point before specialization).
+    torch.manual_seed(0)
+    lm = _model(50, n_mtp=2)
+    logits, mtp, _, _ = lm.decode_heads(torch.randint(0, 50, (1, 4)))
+    for m in mtp:
+        assert torch.allclose(m, logits, atol=1e-5)
+
+
+def test_mtp_low_rank_head_is_cheaper():
+    # low-rank heads factor the d_model transform through a bottleneck.
+    full = _model(50, n_mtp=2)
+    low = _model(50, n_mtp=2, mtp_rank=4)
+    n = lambda lm: sum(p.numel() for h in lm.mtp_heads for p in h.parameters())
+    assert n(low) < n(full)
+
+
 @pytest.mark.parametrize(
     "kw",
     [
         dict(n_layers=4, layers_per_block=1),  # all full attention, own blocks
         dict(n_layers=4, layers_per_block=2, window_size=4),  # windowed + blocks
         dict(n_layers=4, n_experts=6, n_active=2, d_expert=16, layers_per_block=1),  # MoE
+        dict(n_layers=4, layers_per_block=1, mtp_rank=8),  # low-rank MTP heads
     ],
 )
 @pytest.mark.parametrize("n_mtp", [1, 3])
