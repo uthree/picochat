@@ -1,0 +1,8 @@
+tokenizer: weights/tok-smoke.json
+output_dir: data/smoke
+streaming: true # stream a small slice instead of downloading all ~2GB
+block_size: 256
+
+datasets:
+    - { preset: tinystories, output: tinystories, limit: 8000 }
+    - { preset: tinystories, output: tinystories.val, split: validation, limit: 500 }
