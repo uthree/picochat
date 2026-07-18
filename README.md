@@ -116,16 +116,23 @@ A flat package, one file per concern (following
 
 | Module | Responsibility |
 |---|---|
-| `picochat/gpt.py` | the model in one file: blocks (RMSNorm, RoPE, SwiGLU, MoE, attention) up through `TransformerLM`, plus the scale-ladder presets and `build_lm` |
+| `picochat/gpt.py` | the model: blocks (RMSNorm, RoPE, SwiGLU, MoE, attention) up through `TransformerLM` |
+| `picochat/presets.py` | the scale-ladder presets (`configs/presets.yml`) and the `build_lm` factory |
+| `picochat/param_estimate.py` | `estimate_num_params`: size a config without building the model |
 | `picochat/trainer.py` | the LightningModules that train it (`GPT` for pretraining, `SFTModule` for SFT) and the shared Muon/AdamW + LR-schedule scaffolding |
-| `picochat/engine.py` | sampling and KV-cached streaming generation |
+| `picochat/grpo.py` | GRPO RL post-training: rollouts (single- and multi-turn/agentic), group advantages, the clipped-surrogate + KL loss |
+| `picochat/reward.py` | verifiable rewards for GRPO: a test-runner backbone, an LLM judge, and the multi-turn code-fixing environment |
+| `picochat/sandbox.py` | isolated (bubblewrap / hardened-subprocess) execution of the untrusted code GRPO rewards |
+| `picochat/engine.py` | sampling, KV-cached streaming generation, and the shared device/sampling CLI helpers |
+| `picochat/config.py` | config loading and the multi-device (linear-scaling) launch helpers shared across the training CLIs |
 | `picochat/tokenizer.py` | BPE tokenizer (rustbpe training / tiktoken inference), special tokens, and the ChatML rendering built on them |
 | `picochat/dataset.py` | where raw data comes from: HF Hub sources for pretraining text and SFT conversations |
 | `picochat/dataloader.py` | sequence packing, the sharded on-disk token format, Datasets/samplers/DataModule |
 | `picochat/tasks.py` | likelihood-based multiple-choice benchmarks (hellaswag, arc, ...) |
+| `picochat/audio.py` | soft-token audio input path (Qwen-style, for multimodal experiments) |
 | `picochat/kernels.py` | optional [HF `kernels`](https://github.com/huggingface/kernels) integration with plain-PyTorch fallback (see below) |
 | `picochat/api.py` | OpenAI-compatible Chat Completions endpoints |
-| `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `base_eval`/`chat`/`api` |
+| `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `grpo_train` → `base_eval`/`chat`/`api` |
 
 ## Performance
 Training compiles the model with `torch.compile` (FlexAttention fuses the
