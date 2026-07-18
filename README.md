@@ -25,7 +25,7 @@ uv pip install -e ".[kernels]"
 ### 2. Train the tokenizer
 Train a BPE tokenizer (128k vocab, ChatML special tokens) from a YAML recipe:
 ```bash
-uv run scripts/tok_train.py --config configs/tok/major_langs.yml
+uv run scripts/tok_train.py --config configs/tok/default.yml
 
 # evaluate compression (bytes/token, higher = denser); 4-6 is fine
 uv run scripts/tok_eval.py
