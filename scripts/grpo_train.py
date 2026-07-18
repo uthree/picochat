@@ -22,14 +22,14 @@ from pathlib import Path
 
 import lightning as L
 import torch
-import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
 from picochat import sandbox
-from picochat.gpt import build_lm
+from picochat.config import load_config
 from picochat.grpo import GRPOModule, grpo_collate
 from picochat.reward import CodeTask, HTTPJudge, MockJudge, RewardModel, RewardConfig
+from picochat.trainer import load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer, render_chat_prompt
 
 
@@ -76,8 +76,7 @@ def main():
     p.add_argument("--devices", type=str, default="auto")
     args = p.parse_args()
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
     # Untrusted policy-generated code runs under the sandbox; resolve the policy
     # and fail fast if 'bwrap' is required but unavailable (before any training).
@@ -90,23 +89,11 @@ def main():
     output_dir = cfg.get("output_dir", "weights/grpo")
 
     # Rebuild policy + reference from the checkpoint's own model_config so they
-    # start identical (KL begins at 0).
+    # start identical (KL begins at 0); load the file once for both.
     ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
-    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
-    if model_config is None:
-        raise SystemExit(f"{init_from} has no model_config; retrain to produce one")
+    policy, model_config = load_lm_from_checkpoint(init_from, tokenizer.n_vocab, ckpt=ckpt)
+    reference, _ = load_lm_from_checkpoint(init_from, tokenizer.n_vocab, ckpt=ckpt)
     model_config = {**model_config, "vocab_size": tokenizer.n_vocab}
-
-    def fresh_lm():
-        lm = build_lm(**model_config)
-        # The checkpoint stores weights under GPT/SFTModule's "model." prefix.
-        state = {
-            k[len("model.") :]: v
-            for k, v in ckpt["state_dict"].items()
-            if k.startswith("model.")
-        }
-        lm.load_state_dict(state)
-        return lm
 
     reward_cfg = cfg.get("reward", {})
     reward_model = RewardModel(
@@ -123,8 +110,8 @@ def main():
     grpo_cfg = cfg.get("grpo", {})
 
     module = GRPOModule(
-        fresh_lm(),
-        fresh_lm(),
+        policy,
+        reference,
         reward_model,
         pad_idx=pad_idx,
         tokenizer=tokenizer,

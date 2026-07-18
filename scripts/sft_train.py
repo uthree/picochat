@@ -15,27 +15,13 @@ import argparse
 from pathlib import Path
 
 import lightning as L
-import torch
-import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
+from picochat.config import load_config, resolve_num_devices, scale_for_devices
 from picochat.dataloader import PretrainDataModule, SFTTensorDataset
-from picochat.gpt import build_lm
-from picochat.trainer import SFTModule
+from picochat.trainer import SFTModule, load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
-
-
-def resolve_num_devices(devices: str) -> int:
-    """Single-node device count implied by --devices, for scaling lr/max_steps.
-
-    Mirrors scripts/base_train.py's helper of the same name.
-    """
-    if devices == "auto":
-        return torch.cuda.device_count() if torch.cuda.is_available() else 1
-    if "," in devices:
-        return len(devices.split(","))
-    return int(devices)
 
 
 def resolve_paths(entries, data_dir: str) -> tuple[list[str], list[float]]:
@@ -76,34 +62,6 @@ def make_dataset(paths: list[str], weights: list[float] | None = None):
 MODEL_OVERRIDES = ("rope_base", "max_seq_len")
 
 
-def load_pretrained(checkpoint: str, vocab_size: int, overrides: dict | None = None):
-    """Rebuild the TransformerLM architecture from a checkpoint's own
-    `model_config` hyperparameter (see scripts/chat.py), apply `overrides`
-    on top, and load the checkpoint's weights. Returns (TransformerLM, model_config).
-    """
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
-        raise ValueError(f"{checkpoint} doesn't look like a Lightning checkpoint")
-    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
-    if model_config is None:
-        raise ValueError(
-            f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
-            "GPT.__init__ saving it, so its architecture can't be rebuilt."
-        )
-    model_config = {**model_config, **(overrides or {})}
-    lm = build_lm(**{**model_config, "vocab_size": vocab_size})
-    # GPT's state_dict keys are "model.*" (the wrapped TransformerLM) plus the
-    # trainer scaffolding around it; strip the prefix to load into a bare lm.
-    prefix = "model."
-    state = {
-        k[len(prefix) :]: v
-        for k, v in ckpt["state_dict"].items()
-        if k.startswith(prefix)
-    }
-    lm.load_state_dict(state)
-    return lm, model_config
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, required=True, help="SFT stage recipe (YAML)")
@@ -122,8 +80,7 @@ def main():
     )
     args = p.parse_args()
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
     model_cfg = cfg.get("model", {})
     data_cfg = cfg.get("data", {})
@@ -164,24 +121,20 @@ def main():
     # --- model: rebuilt from the pretrained checkpoint's own architecture,
     # optionally overriding e.g. max_seq_len/rope_base to extend context ---
     model_overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
-    lm, model_config = load_pretrained(init_from, vocab_size, overrides=model_overrides)
+    lm, model_config = load_lm_from_checkpoint(
+        init_from, vocab_size, overrides=model_overrides
+    )
     print(f"fine-tuning from {init_from} (model_config: {model_config})", flush=True)
 
     # Same per-device-config / linear-scaling convention as base_train.py.
     num_devices = resolve_num_devices(args.devices)
-    base_lr = optim_cfg.get("lr", 1e-5)
-    base_muon_lr = optim_cfg.get("muon_lr", 0.005)
-    base_max_steps = optim_cfg.get("max_steps", 2000)
-    lr = base_lr * num_devices
-    muon_lr = base_muon_lr * num_devices
-    max_steps = max(1, round(base_max_steps / num_devices))
-    if num_devices > 1:
-        print(
-            f"scaling for {num_devices} devices: lr {base_lr} -> {lr}, "
-            f"muon_lr {base_muon_lr} -> {muon_lr}, "
-            f"max_steps {base_max_steps} -> {max_steps}",
-            flush=True,
-        )
+    lr, muon_lr, max_steps = scale_for_devices(
+        optim_cfg,
+        num_devices,
+        lr_default=1e-5,
+        muon_lr_default=0.005,
+        max_steps_default=2000,
+    )
 
     sft = SFTModule(
         lm,

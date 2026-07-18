@@ -609,6 +609,49 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         return loss
 
 
+def _model_config_from_ckpt(ckpt, checkpoint: str) -> dict:
+    """Pull and validate the saved `model_config` (the build_lm recipe
+    GPT.__init__ stores) from a loaded Lightning checkpoint."""
+    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
+        raise ValueError(f"{checkpoint} doesn't look like a Lightning checkpoint")
+    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
+    if model_config is None:
+        raise ValueError(
+            f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
+            "GPT.__init__ saving it, so its architecture can't be rebuilt. "
+            "Retrain to produce a checkpoint with model_config."
+        )
+    return model_config
+
+
+def load_lm_from_checkpoint(
+    checkpoint: str,
+    vocab_size: int,
+    overrides: dict | None = None,
+    ckpt=None,
+) -> tuple[TransformerLM, dict]:
+    """Rebuild a bare TransformerLM from a checkpoint's saved `model_config`,
+    apply `overrides` (e.g. max_seq_len/rope_base for continual learning), load
+    its weights (stripping GPT's `model.` state_dict prefix), and return
+    (lm, model_config). Pass an already-loaded `ckpt` dict when several models
+    come from one file (GRPO's policy + reference). Used by sft_train/grpo_train;
+    load_gpt_checkpoint is the GPT-wrapping variant for inference CLIs."""
+    if ckpt is None:
+        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    model_config = {**_model_config_from_ckpt(ckpt, checkpoint), **(overrides or {})}
+    lm = build_lm(**{**model_config, "vocab_size": vocab_size})
+    # GPT's state_dict keys are "model.*" (the wrapped TransformerLM) plus the
+    # trainer scaffolding around it; strip the prefix to load into a bare lm.
+    prefix = "model."
+    state = {
+        k[len(prefix) :]: v
+        for k, v in ckpt["state_dict"].items()
+        if k.startswith(prefix)
+    }
+    lm.load_state_dict(state)
+    return lm, model_config
+
+
 def load_gpt_checkpoint(
     checkpoint: str, tokenizer_path: str, device: torch.device | str = "cpu"
 ) -> tuple[GPT, tiktoken.Encoding]:
@@ -624,16 +667,7 @@ def load_gpt_checkpoint(
     tokenizer = load_tokenizer(tokenizer_path)
 
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
-        raise ValueError(f"{checkpoint} doesn't look like a Lightning checkpoint")
-    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
-    if model_config is None:
-        raise ValueError(
-            f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
-            "GPT.__init__ saving it, so its architecture can't be rebuilt. "
-            "Retrain to produce a checkpoint with model_config."
-        )
-
+    model_config = _model_config_from_ckpt(ckpt, checkpoint)
     print(f"using model_config from checkpoint: {model_config}", flush=True)
     lm = build_lm(**{**model_config, "vocab_size": tokenizer.n_vocab})
 

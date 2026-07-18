@@ -40,7 +40,13 @@ from textual.widgets import Input, Static
 from textual.worker import get_current_worker
 
 from picochat.tokenizer import render_chat_prompt
-from picochat.engine import SamplingConfig, generate
+from picochat.engine import (
+    SamplingConfig,
+    add_sampling_args,
+    generate,
+    resolve_device,
+    sampling_from_args,
+)
 from picochat.trainer import load_gpt_checkpoint
 
 DEFAULT_THEME = "ansi-dark"
@@ -304,12 +310,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=str, required=True, help="path to a .ckpt file")
     p.add_argument("--tokenizer", type=str, default="weights/tokenizer.json")
-    p.add_argument("--max-new-tokens", type=int, default=256)
-    p.add_argument(
-        "--temperature", type=float, default=0.8, help="0 -> greedy decoding"
-    )
-    p.add_argument("--top-k", type=int, default=50, help="0 -> disabled")
-    p.add_argument("--top-p", type=float, default=1.0, help="1.0 -> disabled")
+    add_sampling_args(p)
     p.add_argument("--device", type=str, default=None)
     p.add_argument(
         "--theme",
@@ -327,24 +328,11 @@ def main():
     )
     args = p.parse_args()
 
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-
+    device = resolve_device(args.device)
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
     gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device)
 
-    sampling = SamplingConfig(
-        temperature=args.temperature,
-        top_k=args.top_k if args.top_k > 0 else None,
-        top_p=args.top_p if 0 < args.top_p < 1 else None,
-        max_new_tokens=args.max_new_tokens,
-    )
+    sampling = sampling_from_args(args)
     logo = Path("assets/logo_ascii.txt")
     banner = logo.read_text() if logo.exists() else None
 

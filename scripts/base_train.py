@@ -17,10 +17,10 @@ from pathlib import Path
 
 import lightning as L
 import torch
-import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
+from picochat.config import load_config, resolve_num_devices, scale_for_devices
 from picochat.dataloader import PackedDataset, PretrainDataModule
 from picochat.gpt import build_lm
 from picochat.trainer import GPT
@@ -36,20 +36,6 @@ MODEL_OVERRIDES = (
     "window_size",
     "rope_base",
 )
-
-
-def resolve_num_devices(devices: str) -> int:
-    """Single-node device count implied by --devices, for scaling lr/max_steps.
-
-    Mirrors how Lightning itself would interpret the flag ('auto' -> all
-    visible GPUs, 'N' -> N devices, '0,1' -> that many device ids) without
-    needing a Trainer instance up front.
-    """
-    if devices == "auto":
-        return torch.cuda.device_count() if torch.cuda.is_available() else 1
-    if "," in devices:
-        return len(devices.split(","))
-    return int(devices)
 
 
 def resolve_bins(bins, data_dir: str) -> list[str]:
@@ -112,8 +98,7 @@ def main():
     )
     args = p.parse_args()
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
     model_cfg = dict(cfg.get("model", {}))
     data_cfg = cfg.get("data", {})
@@ -182,19 +167,13 @@ def main():
     # batch (linear scaling rule), and max_steps scales down so the run still
     # sees the same total number of tokens.
     num_devices = resolve_num_devices(args.devices)
-    base_lr = optim_cfg.get("lr", 3e-4)
-    base_muon_lr = optim_cfg.get("muon_lr", 0.02)
-    base_max_steps = optim_cfg.get("max_steps", 10000)
-    lr = base_lr * num_devices
-    muon_lr = base_muon_lr * num_devices
-    max_steps = max(1, round(base_max_steps / num_devices))
-    if num_devices > 1:
-        print(
-            f"scaling for {num_devices} devices: lr {base_lr} -> {lr}, "
-            f"muon_lr {base_muon_lr} -> {muon_lr}, "
-            f"max_steps {base_max_steps} -> {max_steps}",
-            flush=True,
-        )
+    lr, muon_lr, max_steps = scale_for_devices(
+        optim_cfg,
+        num_devices,
+        lr_default=3e-4,
+        muon_lr_default=0.02,
+        max_steps_default=10000,
+    )
     gpt = GPT(
         lm,
         pad_idx=pad_idx,

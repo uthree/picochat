@@ -20,6 +20,7 @@ import json
 
 import torch
 
+from picochat.engine import resolve_device
 from picochat.tasks import TASKS, evaluate_task
 from picochat.trainer import load_gpt_checkpoint
 
@@ -52,14 +53,7 @@ def main():
     if unknown:
         raise SystemExit(f"unknown task(s) {unknown}. choices: {list(TASKS)}")
 
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = resolve_device(args.device)
 
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
     gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device)

@@ -217,3 +217,36 @@ def generate_speculative(
         cache = _truncate_cache(cache, (len(cand) - 1) - accepted)
         pos -= (len(cand) - 1) - accepted
         cand = [true[accepted]] + [int(mtp[j][0, accepted].argmax()) for j in range(k)]
+
+
+def resolve_device(spec: str | None) -> torch.device:
+    """Pick a torch device: honor an explicit spec (e.g. "cuda:1", "cpu"),
+    otherwise prefer CUDA, then Apple MPS, then CPU. Shared by the inference
+    CLIs (chat, api, base_eval)."""
+    if spec:
+        return torch.device(spec)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def add_sampling_args(parser, *, temperature: float = 0.8, temp_help: str = "0 -> greedy decoding") -> None:
+    """Add the shared --temperature/--top-k/--top-p/--max-new-tokens flags to an
+    argparse parser (used by chat.py and api.py); pair with sampling_from_args."""
+    parser.add_argument("--temperature", type=float, default=temperature, help=temp_help)
+    parser.add_argument("--top-k", type=int, default=50, help="0 -> disabled")
+    parser.add_argument("--top-p", type=float, default=1.0, help="1.0 -> disabled")
+    parser.add_argument("--max-new-tokens", type=int, default=256)
+
+
+def sampling_from_args(args) -> SamplingConfig:
+    """Build a SamplingConfig from add_sampling_args' parsed flags, applying the
+    disabling conventions (top_k 0 -> None, top_p outside (0, 1) -> None)."""
+    return SamplingConfig(
+        temperature=args.temperature,
+        top_k=args.top_k if args.top_k > 0 else None,
+        top_p=args.top_p if 0 < args.top_p < 1 else None,
+        max_new_tokens=args.max_new_tokens,
+    )
