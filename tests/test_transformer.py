@@ -120,6 +120,42 @@ def test_transformer_packed_forward_matches_separate_documents_on_cuda():
     assert torch.allclose(out[:, 4:], model(b), atol=1e-3)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="torch.compile + flex_attention is CUDA-only"
+)
+def test_transformer_forward_compiles_fullgraph_cuda():
+    # Guards the compiled forward path: with MoE + windowed attention + document
+    # packing + multiple blocks, the forward must compile *without a graph break*
+    # (fullgraph=True) and run. This pins the block-boundary / MLP-tail /
+    # finalize refactors -- extracting them into helper methods must not split
+    # the fused graph or error under inductor. (Eager numerical correctness is
+    # covered by the packed-forward tests; a pure extraction leaves it
+    # bit-identical.)
+    torch.manual_seed(0)
+    model = (
+        Transformer(
+            d_model=64,
+            n_heads=4,  # d_head = 16 (flex_attention's minimum under compile)
+            n_kv_heads=2,
+            n_layers=4,
+            layers_per_block=2,
+            window_size=3,
+            n_experts=8,
+            n_active=2,
+            d_expert=32,
+        )
+        .cuda()
+        .eval()
+    )
+    x = torch.randn(1, 12, 64, device="cuda")
+    doc_ids = torch.tensor([[0] * 6 + [1] * 6], device="cuda")
+    masks = model.packed_masks(doc_ids)
+    with torch.no_grad():
+        out = torch.compile(model, fullgraph=True)(x, masks=masks)
+    assert out.shape == (1, 12, 64)
+    assert torch.isfinite(out).all()
+
+
 def test_transformer_packed_backward_with_grad_checkpoint():
     model = Transformer(d_model=32, n_heads=4, n_layers=2, grad_checkpoint=True)
     model.train()

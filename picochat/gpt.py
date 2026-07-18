@@ -628,12 +628,7 @@ class TransformerLayer(nn.Module):
         # input, forming one MLP sublayer.
         a = self.attn(self.mix_attn(blocks, partial), attn_mask)
         partial = a if partial is None else partial + a
-        h = self.mix_ffn(blocks, partial)
-        if hasattr(self, "moe"):
-            partial = partial + self.ffn(h) + self.moe(h)
-        else:
-            partial = partial + self.ffn(h)
-        return partial
+        return self._mlp(blocks, partial, no_drop=False)
 
     def decode(
         self,
@@ -647,15 +642,20 @@ class TransformerLayer(nn.Module):
             self.mix_attn(blocks, partial), cache, pos, cache_margin
         )
         partial = a if partial is None else partial + a
-        # Mirror forward(): MoE layers must apply their experts at inference too,
-        # otherwise generation silently runs a different (FFN-only) network than
-        # training. no_drop=True: never drop a token while generating.
+        # no_drop=True mirrors forward()'s MoE but never drops a token, so
+        # generation runs the same network as training (see MoE.forward).
+        return self._mlp(blocks, partial, no_drop=True), cache
+
+    def _mlp(self, blocks: Tensor, partial: Tensor, no_drop: bool) -> Tensor:
+        # The MLP sublayer, shared by forward()/decode(): the dense FFN and (if
+        # present) the routed MoE run in parallel from the same depth-attention
+        # mix and accumulate into the block's partial sum. MoE layers must apply
+        # their experts at inference too, or generation would silently run a
+        # different (FFN-only) network than training -- decode passes no_drop.
         h = self.mix_ffn(blocks, partial)
         if hasattr(self, "moe"):
-            partial = partial + self.ffn(h) + self.moe(h, no_drop=True)
-        else:
-            partial = partial + self.ffn(h)
-        return partial, cache
+            return partial + self.ffn(h) + self.moe(h, no_drop=no_drop)
+        return partial + self.ffn(h)
 
 
 class Transformer(nn.Module):
@@ -756,12 +756,7 @@ class Transformer(nn.Module):
         # keeps O(n_layers) distinct (b, t, d) activations alive as before.
         blocks, partial = x[None], None
         for i, layer in enumerate(self.layers):
-            if i > 0 and i % self.layers_per_block == 0:
-                # Block boundary: commit the finished block's summed outputs;
-                # the next layer opens a fresh block and (like every block's
-                # first sublayer) attends over completed blocks only.
-                blocks = torch.cat([blocks, partial[None]])
-                partial = None
+            blocks, partial = self._open_block(blocks, partial, i)
             mask = masks[layer.attn.window_size] if masks is not None else None
             if self.grad_checkpoint and self.training:
                 partial = torch.utils.checkpoint.checkpoint(
@@ -778,11 +773,23 @@ class Transformer(nn.Module):
             for layer in self.layers:
                 if hasattr(layer, "moe"):
                     layer.moe.apply_bias_update()
+        return self._finalize(blocks, partial)
+
+    def _open_block(
+        self, blocks: Tensor, partial: Tensor | None, i: int
+    ) -> tuple[Tensor, Tensor | None]:
+        # At a block boundary, commit the finished block's summed sublayer
+        # outputs onto `blocks` and open a fresh (empty) partial; the next layer
+        # (like every block's first sublayer) then attends over completed blocks
+        # only. A no-op mid-block. Shared by forward()/decode().
+        if i > 0 and i % self.layers_per_block == 0:
+            return torch.cat([blocks, partial[None]]), None
+        return blocks, partial
+
+    def _finalize(self, blocks: Tensor, partial: Tensor | None) -> Tensor:
         # The head reads a final depth-attention aggregate of every block (the
         # last one possibly still partial) rather than the last partial sum.
-        x = self.mix_out(blocks, partial)
-        x = rms_norm(x)
-        return x
+        return rms_norm(self.mix_out(blocks, partial))
 
     def decode(
         self,
@@ -804,13 +811,9 @@ class Transformer(nn.Module):
         q_len = x.shape[-2]
         blocks, partial = x[None], None
         for i, layer in enumerate(self.layers):
-            if i > 0 and i % self.layers_per_block == 0:
-                blocks = torch.cat([blocks, partial[None]])
-                partial = None
+            blocks, partial = self._open_block(blocks, partial, i)
             partial, cache[i] = layer.decode(blocks, partial, cache[i], pos, cache_margin)
-        x = self.mix_out(blocks, partial)
-        x = rms_norm(x)
-        return x, cache, pos + q_len  # type: ignore
+        return self._finalize(blocks, partial), cache, pos + q_len  # type: ignore
 
 
 class MTPHead(nn.Module):
@@ -955,18 +958,30 @@ class TransformerLM(nn.Module):
     ) -> Tensor:
         return self.lmhead(self.encode(x, doc_ids, masks, inputs_embeds))
 
+    def _decode_trunk(
+        self,
+        x: Tensor | None,
+        cache: list[Tensor | None] | None,
+        pos: int,
+        cache_margin: int,
+        inputs_embeds: Tensor | None,
+    ) -> tuple[Tensor, list[Tensor], int]:
+        # Shared decode trunk (embed + cached transformer) up to the final hidden
+        # states. `inputs_embeds` prefills the cache from spliced embeddings
+        # (e.g. an audio-conditioned prompt) instead of token ids; later steps
+        # pass token ids as usual.
+        embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
+        return self.transformer.decode(embeds, cache, pos, cache_margin)
+
     def decode(
         self,
         x: Tensor | None = None,
         cache: list[Tensor | None] | None = None,
         pos: int = 0,
+        cache_margin: int = 0,
         inputs_embeds: Tensor | None = None,
     ) -> tuple[Tensor, list[Tensor], int]:
-        # `inputs_embeds` prefills the cache from spliced embeddings (e.g. an
-        # audio-conditioned prompt) instead of token ids; subsequent decode
-        # steps pass token ids as usual.
-        embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
-        embeds, cache, pos = self.transformer.decode(embeds, cache, pos)
+        embeds, cache, pos = self._decode_trunk(x, cache, pos, cache_margin, inputs_embeds)
         return self.lmhead(embeds), cache, pos
 
     def decode_heads(
@@ -975,6 +990,7 @@ class TransformerLM(nn.Module):
         cache: list[Tensor | None] | None = None,
         pos: int = 0,
         cache_margin: int = 0,
+        inputs_embeds: Tensor | None = None,
     ) -> tuple[Tensor, list[Tensor], list[Tensor], int]:
         """Like decode() but also returns every MTP head's logits, for
         speculative drafting. Returns (logits, mtp_logits, cache, pos), where
@@ -985,13 +1001,12 @@ class TransformerLM(nn.Module):
         in one call. `cache_margin` (>= the draft length) keeps enough windowed
         KV that the cache can be rolled back past rejected drafts and still hold a
         full window (see picochat.engine.generate_speculative)."""
-        embeds, cache, pos = self.transformer.decode(
-            self.embed(x), cache, pos, cache_margin
-        )
+        embeds, cache, pos = self._decode_trunk(x, cache, pos, cache_margin, inputs_embeds)
         # each MTP head transforms the hidden state, then the SHARED lm head
         # decodes it to vocab logits.
+        logits = self.lmhead(embeds)
         mtp = [self.lmhead(head(embeds)) for head in self.mtp_heads]
-        return self.lmhead(embeds), mtp, cache, pos
+        return logits, mtp, cache, pos
 
 
 def moe_modules(model: nn.Module) -> list[MixtureOfExperts]:
