@@ -146,15 +146,50 @@ class LMTrainerMixin:
         if self.stochastic_k is not None:
             self._restore_nominal_top_k()
 
-    def _param_groups(self) -> list[dict]:
-        # Apply weight decay only to weights with 2+ dims. Exclude biases (1-dim)
-        # and embeddings (rms_norm has no learnable params, so nothing to exclude there).
-        embed_ids = {
+    def _setup_compiled_forward(self, compile: bool | None) -> None:
+        """Build self._forward, the trainable forward, torch.compiled when the
+        environment supports it (`compile=None` -> auto). With fused_loss OR
+        multi-token prediction it stops at the hidden states (the lm/MTP heads
+        run in _next_token_loss); otherwise it is the full model up to the
+        primary logits. The compiled handle shares parameters with self.model,
+        which stays uncompiled so decode() runs eager. Stored via
+        object.__setattr__ so nn.Module doesn't register it as a submodule --
+        registered, it would duplicate every weight in state_dict under
+        `_forward.*` (or `_forward._orig_mod.*` when compiled), making a
+        checkpoint loadable only under the exact same compile setting.
+
+        Call after _init_trainer (sets self.fused_loss) and after self.model."""
+        self.compile = can_compile() if compile is None else compile
+        self._trunk_hidden = self.fused_loss or self.model.n_mtp > 0
+        trunk = self.model.encode if self._trunk_hidden else self.model
+        object.__setattr__(
+            self, "_forward", torch.compile(trunk) if self.compile else trunk
+        )
+
+    def _backward_and_step(self, loss: Tensor, batch_idx: int) -> None:
+        """The shared manual-optimization step: scale for gradient accumulation,
+        backward, then the optimizer/LR-schedule step (see _optimizer_step), and
+        log train_loss plus the progress-bar loss. Subclasses compute `loss`
+        their own way and may log extra metrics on top."""
+        (loss / self.accumulate).backward()
+        self._optimizer_step(batch_idx)
+        self.log("train_loss", loss)
+        self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
+
+    def _embedding_param_ids(self) -> set[int]:
+        """ids of the embedding parameters -- excluded from weight decay and,
+        under Muon, routed to AdamW like the input/output layers."""
+        return {
             id(p)
             for m in self.model.modules()
             if isinstance(m, nn.Embedding)
             for p in m.parameters()
         }
+
+    def _param_groups(self) -> list[dict]:
+        # Apply weight decay only to weights with 2+ dims. Exclude biases (1-dim)
+        # and embeddings (rms_norm has no learnable params, so nothing to exclude there).
+        embed_ids = self._embedding_param_ids()
         decay, no_decay = [], []
         for p in self.model.parameters():
             if not p.requires_grad:
@@ -177,12 +212,7 @@ class LMTrainerMixin:
         # projections, the router, and the fused MoE expert weights (stored 2D
         # exactly because torch.optim.Muon accepts nothing else, see
         # MixtureOfExperts) -- is optimized by Muon.
-        embed_ids = {
-            id(p)
-            for m in self.model.modules()
-            if isinstance(m, nn.Embedding)
-            for p in m.parameters()
-        }
+        embed_ids = self._embedding_param_ids()
         # The lm head is the model's output projection -> AdamW, not Muon (Muon
         # skips input/output layers). The MTP heads' transforms are hidden
         # d_model x d_model matrices (they reuse this same output projection), so
@@ -332,8 +362,13 @@ class LMTrainerMixin:
         loss = self._head_ce(hidden[:, :-1], self.model.lmhead.weight, targets[:, 1:])
         if self.model.n_mtp == 0:
             return loss
-        # MTP head j: offset +(2+j). hidden[:, :-o] predicts targets[:, o:]. Each
-        # head transforms the hidden state; the shared lm head decodes it.
+        return loss + self._mtp_loss(hidden, targets)
+
+    def _mtp_loss(self, hidden: Tensor, targets: Tensor) -> Tensor:
+        """Auxiliary multi-token-prediction loss (assumes model.n_mtp > 0): head
+        j reads the shared hidden state and predicts the token at offset 2+j
+        (hidden[:, :-o] predicts targets[:, o:]), decoded by the shared lm head;
+        averaged over heads and scaled by mtp_weight."""
         mtp = hidden.new_zeros(())
         for j, head in enumerate(self.model.mtp_heads):
             o = j + 2
@@ -341,7 +376,7 @@ class LMTrainerMixin:
             mtp = mtp + self._head_ce(
                 transformed, self.model.lmhead.weight, targets[:, o:]
             )
-        return loss + self.mtp_weight * mtp / self.model.n_mtp
+        return self.mtp_weight * mtp / self.model.n_mtp
 
     @torch.no_grad()
     def _generate(self, prompt: Tensor, max_new_tokens: int) -> Tensor:
@@ -434,25 +469,7 @@ class GPT(LMTrainerMixin, L.LightningModule):
         # which Lightning's automatic loop can't express. We own the optimizer
         # step, gradient accumulation, clipping and LR schedule here.
         self.automatic_optimization = False
-        # `compile=None` -> auto (compile iff the environment supports it). The
-        # compiled handle shares parameters with self.model, which stays
-        # uncompiled, so decode() runs eager. With fused_loss the trainable
-        # forward stops at the hidden states -- the lm-head runs inside the
-        # loss kernel instead (see _next_token_loss). Stored via
-        # object.__setattr__ so nn.Module.__setattr__ doesn't register it as
-        # a submodule: registered, it would duplicate every weight in
-        # state_dict under `_forward.*` (or `_forward._orig_mod.*` when
-        # compiled), making checkpoints loadable only under the exact same
-        # compile setting.
-        self.compile = can_compile() if compile is None else compile
-        # With fused_loss OR multi-token prediction the trainable forward stops at
-        # the hidden states (the lm/MTP heads run in _next_token_loss); otherwise
-        # it is the full model up to the primary logits.
-        self._trunk_hidden = self.fused_loss or self.model.n_mtp > 0
-        trunk = self.model.encode if self._trunk_hidden else self.model
-        object.__setattr__(
-            self, "_forward", torch.compile(trunk) if self.compile else trunk
-        )
+        self._setup_compiled_forward(compile)
 
     def _loss(self, x: Tensor) -> Tensor:
         # Next-token prediction: position i's logits predict token i+1, so
@@ -474,10 +491,7 @@ class GPT(LMTrainerMixin, L.LightningModule):
 
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
-        (loss / self.accumulate).backward()
-        self._optimizer_step(batch_idx)
-        self.log("train_loss", loss)
-        self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
+        self._backward_and_step(loss, batch_idx)
         return loss
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
@@ -567,18 +581,7 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         # Manual optimization: mirrors GPT so the two share the same LR
         # schedule / gradient-accumulation step (see LMTrainerMixin._optimizer_step).
         self.automatic_optimization = False
-        # object.__setattr__: keep the forward handle out of _modules so it
-        # doesn't duplicate weights in state_dict (see GPT.__init__, including
-        # the fused_loss trunk choice).
-        self.compile = can_compile() if compile is None else compile
-        # With fused_loss OR multi-token prediction the trainable forward stops at
-        # the hidden states (the lm/MTP heads run in _next_token_loss); otherwise
-        # it is the full model up to the primary logits.
-        self._trunk_hidden = self.fused_loss or self.model.n_mtp > 0
-        trunk = self.model.encode if self._trunk_hidden else self.model
-        object.__setattr__(
-            self, "_forward", torch.compile(trunk) if self.compile else trunk
-        )
+        self._setup_compiled_forward(compile)
 
     def _loss(
         self, input_ids: Tensor, labels: Tensor, doc_ids: Tensor | None = None
@@ -597,10 +600,7 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
         loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))
-        (loss / self.accumulate).backward()
-        self._optimizer_step(batch_idx)
-        self.log("train_loss", loss)
-        self.log("loss", loss, prog_bar=True, logger=False)
+        self._backward_and_step(loss, batch_idx)
         return loss
 
     def validation_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:

@@ -501,11 +501,8 @@ class GRPOModule(LMTrainerMixin, L.LightningModule):
         loss, metrics = grpo_loss(
             policy_lp, ref_lp, old_lp, adv, resp_mask, self.clip_eps, self.kl_coef
         )
-        (loss / self.accumulate).backward()
-        self._optimizer_step(batch_idx)
+        self._backward_and_step(loss, batch_idx)
 
-        self.log("train_loss", loss)
-        self.log("loss", loss, prog_bar=True, logger=False)
         self.log("reward", stats["reward_mean"], prog_bar=True)
         self.log("reward_max", stats["reward_max"])
         self.log("kl", metrics["kl"])
