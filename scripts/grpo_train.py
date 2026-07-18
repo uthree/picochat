@@ -1,0 +1,164 @@
+"""GRPO post-training from a YAML recipe (see picochat.grpo, picochat.reward).
+
+    python scripts/grpo_train.py --config configs/grpo/smoke.yml
+
+Like sft_train.py this always continues from an existing checkpoint: the policy
+AND the frozen reference are both built from `init_from`'s own `model_config`,
+so they start identical and KL(policy || reference) begins at 0. Tasks come
+from a JSONL file (one object per line):
+
+    {"prompt": "<instruction>", "test": "<python asserting on the answer>"}
+    {"prompt": "<instruction>"}                 # no test -> judged by the LLM
+
+Each prompt is rendered as a single ChatML user turn; the model's reply is
+rewarded by picochat.reward (test pass/fail backbone + external judge for the
+untested ones). The judge is any OpenAI-compatible endpoint -- `vllm serve ...`
+in production, or the deterministic MockJudge for single-GPU verification.
+"""
+
+import argparse
+import json
+from pathlib import Path
+
+import lightning as L
+import torch
+import yaml
+from lightning.pytorch.callbacks import ModelCheckpoint
+from torch.utils.data import DataLoader
+
+from picochat.gpt import build_lm
+from picochat.grpo import GRPOModule, grpo_collate
+from picochat.reward import CodeTask, HTTPJudge, MockJudge, RewardModel, RewardConfig
+from picochat.tokenizer import PAD_TOKEN, load_tokenizer, render_chat_prompt
+
+
+def load_tasks(path: str, tokenizer, system: str | None) -> list[dict]:
+    """Read the JSONL task file into GRPO samples: prompt token ids (a ChatML
+    user turn, optionally behind a system turn), the raw prompt text (for the
+    judge), and an optional CodeTask (the verifiable test)."""
+    samples = []
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        messages = ([{"role": "system", "content": system}] if system else []) + [
+            {"role": "user", "content": obj["prompt"]}
+        ]
+        task = CodeTask(test_code=obj["test"]) if obj.get("test") else None
+        samples.append(
+            {
+                "prompt_ids": render_chat_prompt(messages, tokenizer),
+                "prompt_str": obj["prompt"],
+                "task": task,
+            }
+        )
+    return samples
+
+
+def build_judge(cfg: dict):
+    """Judge backend from config: 'mock' (deterministic, for verification) or
+    'http' (any OpenAI-compatible endpoint, e.g. a vLLM server)."""
+    jcfg = dict(cfg.get("judge", {}))
+    backend = jcfg.pop("backend", "mock")
+    if backend == "mock":
+        return MockJudge(**jcfg)
+    if backend == "http":
+        return HTTPJudge(**jcfg)
+    raise SystemExit(f"unknown judge backend '{backend}' (choices: mock, http)")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", type=str, required=True, help="GRPO recipe (YAML)")
+    p.add_argument("--accelerator", type=str, default="auto")
+    p.add_argument("--devices", type=str, default="auto")
+    args = p.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+
+    tokenizer = load_tokenizer(cfg.get("tokenizer", "weights/tokenizer.json"))
+    pad_idx = tokenizer.encode_single_token(PAD_TOKEN)
+    init_from = cfg["init_from"]
+    output_dir = cfg.get("output_dir", "weights/grpo")
+
+    # Rebuild policy + reference from the checkpoint's own model_config so they
+    # start identical (KL begins at 0).
+    ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
+    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
+    if model_config is None:
+        raise SystemExit(f"{init_from} has no model_config; retrain to produce one")
+    model_config = {**model_config, "vocab_size": tokenizer.n_vocab}
+
+    def fresh_lm():
+        lm = build_lm(**model_config)
+        # The checkpoint stores weights under GPT/SFTModule's "model." prefix.
+        state = {
+            k[len("model.") :]: v
+            for k, v in ckpt["state_dict"].items()
+            if k.startswith("model.")
+        }
+        lm.load_state_dict(state)
+        return lm
+
+    reward_cfg = cfg.get("reward", {})
+    reward_model = RewardModel(
+        judge=build_judge(cfg),
+        cfg=RewardConfig(
+            w_task=reward_cfg.get("w_task", 1.0),
+            w_format=reward_cfg.get("w_format", 0.1),
+            judge_when_tested=reward_cfg.get("judge_when_tested", False),
+        ),
+    )
+
+    optim_cfg = cfg.get("optim", {})
+    trainer_cfg = cfg.get("trainer", {})
+    grpo_cfg = cfg.get("grpo", {})
+
+    module = GRPOModule(
+        fresh_lm(),
+        fresh_lm(),
+        reward_model,
+        pad_idx=pad_idx,
+        tokenizer=tokenizer,
+        group_size=grpo_cfg.get("group_size", 8),
+        temperature=grpo_cfg.get("temperature", 1.0),
+        top_k=grpo_cfg.get("top_k"),
+        top_p=grpo_cfg.get("top_p"),
+        max_new_tokens=grpo_cfg.get("max_new_tokens", 256),
+        clip_eps=grpo_cfg.get("clip_eps", 0.2),
+        kl_coef=grpo_cfg.get("kl_coef", 0.04),
+        reward_concurrency=grpo_cfg.get("reward_concurrency", 32),
+        lr=optim_cfg.get("lr", 1e-6),
+        weight_decay=optim_cfg.get("weight_decay", 0.0),
+        optimizer=optim_cfg.get("optimizer", "adamw"),
+        muon_lr=optim_cfg.get("muon_lr", 0.002),
+        warmup_steps=optim_cfg.get("warmup_steps", 10),
+        max_steps=optim_cfg.get("max_steps", 200),
+        grad_clip=trainer_cfg.get("grad_clip", 1.0),
+        accumulate=trainer_cfg.get("accumulate", 1),
+        model_config=model_config,
+    )
+
+    samples = load_tasks(cfg["tasks"], tokenizer, cfg.get("system"))
+    loader = DataLoader(
+        samples,
+        batch_size=trainer_cfg.get("batch_size", 1),
+        shuffle=True,
+        collate_fn=grpo_collate,
+    )
+
+    trainer = L.Trainer(
+        accelerator=args.accelerator,
+        devices=args.devices,
+        max_steps=optim_cfg.get("max_steps", 200),
+        precision=trainer_cfg.get("precision", "bf16-mixed"),
+        log_every_n_steps=trainer_cfg.get("log_every_n_steps", 10),
+        callbacks=[ModelCheckpoint(dirpath=output_dir, save_last=True)],
+    )
+    trainer.fit(module, loader)
+
+
+if __name__ == "__main__":
+    main()

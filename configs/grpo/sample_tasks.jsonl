@@ -1,0 +1,6 @@
+{"prompt": "Write a Python function `add(a, b)` that returns the sum of a and b.", "test": "assert add(2, 3) == 5\nassert add(-1, 1) == 0"}
+{"prompt": "Write a Python function `is_even(n)` that returns True if n is even, else False.", "test": "assert is_even(4)\nassert not is_even(7)"}
+{"prompt": "Write a Python function `reverse_string(s)` that returns the string reversed.", "test": "assert reverse_string('abc') == 'cba'\nassert reverse_string('') == ''"}
+{"prompt": "Write a Python function `factorial(n)` that returns n! for n >= 0.", "test": "assert factorial(0) == 1\nassert factorial(5) == 120"}
+{"prompt": "Write a Python function `max_of(xs)` that returns the largest item in a non-empty list.", "test": "assert max_of([1, 5, 3]) == 5\nassert max_of([-2, -9]) == -2"}
+{"prompt": "Explain in one sentence what a hash map is."}

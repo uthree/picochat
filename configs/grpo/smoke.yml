@@ -1,0 +1,47 @@
+# GRPO smoke test: verify the rollout -> reward -> advantage -> update loop
+# runs and moves the policy, on a tiny checkpoint with the deterministic judge.
+# Point init_from at an SFT (or base) checkpoint produced by this repo.
+
+tokenizer: weights/tok-smoke.json
+init_from: weights/smoke/last.ckpt # a checkpoint with model_config (see grpo_train.py)
+output_dir: weights/grpo-smoke
+system: "You are a helpful coding assistant."
+tasks: configs/grpo/sample_tasks.jsonl
+
+# Judge for the untested prompts. 'mock' is deterministic (no GPU); switch to
+# 'http' + a vLLM endpoint in production:
+#   judge: { backend: http, base_url: "http://<host>:8001/v1", model: "Qwen/Qwen2.5-7B-Instruct" }
+judge:
+    backend: mock
+
+reward:
+    w_task: 1.0 # test pass/fail (or judge when a task has no test)
+    w_format: 0.1 # small validity shaping (does the code parse)
+    # Smoke only: blend the (mock) judge into tested tasks too, so an untrained
+    # tiny model -- which never passes the tests -- still gets a varied reward
+    # and the rollout->advantage->update loop has a signal to move on. In a real
+    # run leave this false so tested tasks stay purely verifiable (no judge call).
+    judge_when_tested: true
+
+grpo:
+    group_size: 8 # rollouts per prompt (the group the advantage is relative to)
+    temperature: 1.0 # sample diverse rollouts (needs spread to learn from)
+    top_k: null
+    max_new_tokens: 128
+    clip_eps: 0.2
+    kl_coef: 0.04 # KL pull toward the frozen reference
+    reward_concurrency: 16
+
+optim:
+    lr: 1.0e-6 # RL fine-tuning: tiny steps
+    optimizer: adamw
+    weight_decay: 0.0
+    warmup_steps: 5
+    max_steps: 30
+
+trainer:
+    batch_size: 2 # prompts per step; effective rollouts = batch_size * group_size
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    log_every_n_steps: 1
