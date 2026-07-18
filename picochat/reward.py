@@ -67,14 +67,14 @@ class CodeTask:
     timeout: float = 10.0
 
 
-def run_tests(code: str, task: CodeTask) -> float:
-    """Execute `setup + code + test_code` in a subprocess and return 1.0 on a
-    clean exit, else 0.0.  Runs in a throwaway temp dir with a wall-clock
-    timeout; any failure mode (assertion, exception, timeout, unparseable
-    code) is a 0.0 rather than an exception into the caller.
-
-    Binary pass/fail is deliberate for a first cut; swap the runner for pytest
-    and count passed/total here if you want a graded pass-rate.
+def run_tests_verbose(code: str, task: CodeTask) -> tuple[bool, str]:
+    """Execute `setup + code + test_code` in a subprocess and return
+    `(passed, output)`: a clean exit (assertions hold, no exception) is a pass,
+    and `output` is the captured stdout+stderr (the failure message on a fail).
+    Runs in a throwaway temp dir with a wall-clock timeout; any failure mode
+    (assertion, exception, timeout, unparseable code) is a non-pass with a
+    human-readable reason rather than an exception into the caller. The output
+    is what the agentic loop feeds back to the policy as an observation.
     """
     script = f"{task.setup}\n{code}\n{task.test_code}\n"
     with tempfile.TemporaryDirectory() as tmp:
@@ -84,12 +84,20 @@ def run_tests(code: str, task: CodeTask) -> float:
             proc = subprocess.run(
                 [sys.executable, str(path)],
                 capture_output=True,
+                text=True,
                 timeout=task.timeout,
                 cwd=tmp,
             )
         except subprocess.TimeoutExpired:
-            return 0.0
-        return 1.0 if proc.returncode == 0 else 0.0
+            return False, f"Timed out after {task.timeout}s (possible infinite loop)."
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return proc.returncode == 0, output.strip()
+
+
+def run_tests(code: str, task: CodeTask) -> float:
+    """Binary pass/fail wrapper over `run_tests_verbose`: 1.0 on a clean exit,
+    else 0.0 (the single-turn reward path doesn't use the failure text)."""
+    return 1.0 if run_tests_verbose(code, task)[0] else 0.0
 
 
 @dataclass
@@ -285,3 +293,87 @@ class RewardModel:
         return await asyncio.gather(
             *(one(p, r, t) for p, r, t in zip(prompts, responses, tasks))
         )
+
+
+# --- Multi-step (agentic) RL: environment + trajectory reward -------------------
+#
+# The single-turn path above scores one response. The agentic path instead runs
+# an episode: the policy proposes code, the environment runs the task's tests
+# and -- on failure -- feeds the captured error back as an observation so the
+# policy can revise, repeating until the tests pass or a turn budget is hit
+# (the token generation loop lives in picochat.grpo.agent_rollout). The reward
+# then scores the whole *trajectory*, deliberately valuing eventually reaching a
+# correct answer and staying stable across a long trial-and-error episode over
+# one-shot correctness (see trajectory_reward).
+
+
+@dataclass
+class StepResult:
+    """Outcome of one agent turn: did the tests pass, did the code at least
+    parse (a "runs/valid but wrong" attempt beats a crashing one), and the
+    feedback text handed back to the policy as the next observation."""
+
+    passed: bool
+    valid: bool
+    feedback: str = ""
+
+
+@dataclass
+class CodeAgentEnv:
+    """A verifiable code-fixing environment for one task. `step` takes the
+    policy's response text, runs the task's tests, and returns a StepResult
+    whose `feedback` (the captured test output on failure) becomes the next
+    turn's observation. Stateless across steps: the conversation history lives
+    in the rollout's token sequence, not here."""
+
+    task: CodeTask
+    feedback_chars: int = 512  # cap the observation so it doesn't blow the context
+
+    def step(self, response_text: str) -> StepResult:
+        code = extract_code(response_text)
+        valid = is_valid_python(code)
+        passed, output = run_tests_verbose(code, self.task)
+        feedback = output[-self.feedback_chars :] if output else ""
+        return StepResult(passed=passed, valid=valid, feedback=feedback)
+
+
+@dataclass
+class AgentRewardConfig:
+    """Weights for `trajectory_reward`. The defaults encode the training goal:
+    prize *eventually* solving the task and staying stable through a long
+    trial-and-error episode, not solving it in one shot.
+
+    - `w_success` (dominant): terminal reward for the tests ever passing,
+      independent of how many turns it took -- getting there is what matters.
+    - `w_stability`: mean per-turn quality (pass=1, runs-but-wrong=`valid_credit`,
+      crash/garbage=0). Rewards attempts that stay valid and recover from
+      errors instead of collapsing, so a long messy-but-improving episode still
+      earns credit.
+    - `step_penalty`: per-extra-turn cost. Defaults to 0.0 -- we deliberately do
+      NOT punish taking many turns; raise it only if you want to nudge toward
+      efficiency once the model can already solve tasks."""
+
+    w_success: float = 1.0
+    w_stability: float = 0.3
+    step_penalty: float = 0.0
+    valid_credit: float = 0.5  # per-turn quality of a "runs but wrong" attempt
+
+
+def trajectory_reward(
+    steps: list[StepResult], cfg: AgentRewardConfig | None = None
+) -> float:
+    """Scalar reward for a whole agentic trajectory (GRPO then normalizes it
+    within the prompt's group). See AgentRewardConfig for the philosophy."""
+    cfg = cfg or AgentRewardConfig()
+    if not steps:
+        return 0.0
+    success = 1.0 if any(s.passed for s in steps) else 0.0
+    quality = [
+        1.0 if s.passed else (cfg.valid_credit if s.valid else 0.0) for s in steps
+    ]
+    stability = sum(quality) / len(quality)
+    return (
+        cfg.w_success * success
+        + cfg.w_stability * stability
+        - cfg.step_penalty * (len(steps) - 1)
+    )

@@ -19,6 +19,16 @@ update and the objective reduces to REINFORCE-with-group-baseline + KL. The
 clipped-ratio machinery is still here so adding inner epochs later is a config
 change, not a rewrite. Optimizer / LR-schedule / gradient-accumulation
 scaffolding is shared with the other trainers via LMTrainerMixin.
+
+Multi-step (agentic) RL: with `max_turns > 1`, a tested task runs as an episode
+instead of a single response -- the policy proposes code, `agent_rollout` runs
+the tests, and on failure feeds the error back as an observation so the policy
+can revise, up to the turn budget. The whole trajectory is one member of the
+GRPO group and is scored by `picochat.reward.trajectory_reward`, which is tuned
+to value eventually reaching a correct answer and staying stable across a long
+trial-and-error episode over solving in one shot. Only the policy's own tokens
+train (observations are masked out); everything downstream -- advantages, loss,
+KL -- is unchanged. `max_turns == 1` is exactly the original single-turn path.
 """
 
 from __future__ import annotations
@@ -32,8 +42,14 @@ from torch import Tensor
 
 from picochat.engine import SamplingConfig, sample
 from picochat.gpt import TransformerLM
-from picochat.reward import CodeTask, RewardModel
-from picochat.tokenizer import EOS_TOKEN, IM_END
+from picochat.reward import (
+    AgentRewardConfig,
+    CodeAgentEnv,
+    CodeTask,
+    RewardModel,
+    trajectory_reward,
+)
+from picochat.tokenizer import EOS_TOKEN, IM_END, render_turn
 from picochat.trainer import LMTrainerMixin
 
 
@@ -80,6 +96,102 @@ def rollout(
         logits, cache, pos = model.decode(next_token, cache, pos)
         next_token = sample(logits[:, -1], cfg)
     return responses
+
+
+@torch.no_grad()
+def _generate_turn(
+    model: TransformerLM,
+    cache,
+    pos,
+    first_next: Tensor,
+    cfg: SamplingConfig,
+    stop_ids: set[int],
+    max_new: int,
+) -> tuple[list[int], object, object]:
+    """Generate one assistant turn (batch 1) continuing from `first_next` (an
+    already-sampled but uncommitted token). Commits every token to the KV cache
+    and stops at a `stop_ids` token or `max_new`. Returns `(tokens, cache, pos)`
+    with `tokens` including the stop token if one was emitted -- the cache then
+    holds the whole prefix so the next observation can be appended straight on."""
+    toks: list[int] = []
+    nxt = first_next
+    for _ in range(max_new):
+        tok = int(nxt[0, 0])
+        logits, cache, pos = model.decode(nxt, cache, pos)  # commit tok
+        toks.append(tok)
+        if tok in stop_ids:
+            break
+        nxt = sample(logits[:, -1], cfg)
+    return toks, cache, pos
+
+
+@torch.no_grad()
+def agent_rollout(
+    model: TransformerLM,
+    prompt_ids: list[int],
+    cfg: SamplingConfig,
+    stop_ids: set[int],
+    env,
+    decode_text,
+    encode_observation,
+    max_turns: int,
+    per_turn_tokens: int,
+    device: torch.device | str = "cpu",
+    max_seq_len: int | None = None,
+) -> tuple[list[int], list[int], list]:
+    """Run one agentic episode for a single prompt: generate a turn, let `env`
+    run the tests, and on failure append the feedback observation and generate
+    again, up to `max_turns`. Returns `(token_ids, action_mask, steps)`:
+
+    - `token_ids`: the full episode sequence (prompt + every generated turn +
+      every observation), exactly the tokens fed to the model, so recomputing
+      log-probs over it teacher-forces the same distributions that were sampled.
+    - `action_mask`: 1 on policy-generated tokens, 0 on the prompt and on
+      environment observations -- only the policy's own tokens train.
+    - `steps`: the per-turn StepResult list the trajectory reward scores.
+
+    `decode_text(ids)->str` turns a turn's tokens into text for the env;
+    `encode_observation(feedback)->list[int]` renders the feedback (plus the
+    ChatML turn scaffolding) back into tokens. Both are injected so this loop
+    stays independent of the tokenizer.
+    """
+    token_ids = list(prompt_ids)
+    action_mask = [0] * len(prompt_ids)
+    steps: list = []
+
+    x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+    logits, cache, pos = model.decode(x)
+    nxt = sample(logits[:, -1], cfg)
+
+    for turn in range(max_turns):
+        room = per_turn_tokens
+        if max_seq_len is not None:
+            room = min(room, max_seq_len - len(token_ids))
+        if room <= 0:
+            break
+
+        toks, cache, pos = _generate_turn(
+            model, cache, pos, nxt, cfg, stop_ids, room
+        )
+        token_ids.extend(toks)
+        action_mask.extend([1] * len(toks))
+
+        text = decode_text([t for t in toks if t not in stop_ids])
+        result = env.step(text)
+        steps.append(result)
+        if result.passed or turn == max_turns - 1:
+            break
+
+        obs = encode_observation(result.feedback)
+        if max_seq_len is not None and len(token_ids) + len(obs) >= max_seq_len:
+            break  # no room to revise: end the episode here
+        token_ids.extend(obs)
+        action_mask.extend([0] * len(obs))
+        obs_t = torch.tensor([obs], dtype=torch.long, device=device)
+        logits, cache, pos = model.decode(obs_t, cache, pos)
+        nxt = sample(logits[:, -1], cfg)
+
+    return token_ids, action_mask, steps
 
 
 def group_advantages(rewards: Tensor, eps: float = 1e-6) -> Tensor:
@@ -164,6 +276,9 @@ class GRPOModule(LMTrainerMixin, L.LightningModule):
         clip_eps: float = 0.2,
         kl_coef: float = 0.04,
         reward_concurrency: int = 32,
+        max_turns: int = 1,
+        feedback_chars: int = 512,
+        agent_reward: dict | AgentRewardConfig | None = None,
         lr: float = 1e-6,
         weight_decay: float = 0.0,
         betas: tuple[float, float] = (0.9, 0.95),
@@ -192,6 +307,16 @@ class GRPOModule(LMTrainerMixin, L.LightningModule):
         self.clip_eps = clip_eps
         self.kl_coef = kl_coef
         self.reward_concurrency = reward_concurrency
+        # Multi-step (agentic) RL: max_turns>1 turns a tested task into an
+        # episode (propose -> run tests -> revise). max_turns==1 keeps the
+        # original single-turn behaviour untouched.
+        self.max_turns = max_turns
+        self.feedback_chars = feedback_chars
+        self.agent_reward = (
+            AgentRewardConfig(**agent_reward)
+            if isinstance(agent_reward, dict)
+            else (agent_reward or AgentRewardConfig())
+        )
         self.sampling = SamplingConfig(
             temperature=temperature,
             top_k=top_k,
@@ -246,54 +371,117 @@ class GRPOModule(LMTrainerMixin, L.LightningModule):
     def _build_batch(
         self, rows: list[tuple[list[int], list[int], float]]
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Pad (prompt_ids, response_ids, advantage) rows into (seqs, resp_mask,
-        adv). resp_mask marks the generated tokens (positions predicted by the
-        loss), aligned to token_logprobs' (B, L-1) output."""
-        max_len = max(len(p) + len(r) for p, r, _ in rows)
+        """Pad (token_ids, action_mask, advantage) rows into (seqs, resp_mask,
+        adv). action_mask is 1 on policy-generated tokens (0 on prompt and, for
+        agentic episodes, environment observations); resp_mask is it shifted to
+        align with token_logprobs' (B, L-1) output so only those tokens train."""
+        max_len = max(len(ids) for ids, _, _ in rows)
         seqs = torch.full((len(rows), max_len), self.pad_idx, dtype=torch.long)
         mask = torch.zeros(len(rows), max_len, dtype=torch.float)
         adv = torch.zeros(len(rows), dtype=torch.float)
-        for i, (prompt, resp, a) in enumerate(rows):
-            ids = prompt + resp
+        for i, (ids, action_mask, a) in enumerate(rows):
             seqs[i, : len(ids)] = torch.tensor(ids, dtype=torch.long)
-            # Response tokens occupy [len(prompt), len(prompt)+len(resp)); mark
-            # them so only generated tokens contribute to the loss.
-            mask[i, len(prompt) : len(ids)] = 1.0
+            mask[i, : len(action_mask)] = torch.tensor(action_mask, dtype=torch.float)
             adv[i] = a
         dev = self.device
         # Drop the first column: token_logprobs predicts seqs[:, 1:], so the
         # mask/targets live on positions 1..L-1.
         return seqs.to(dev), mask[:, 1:].to(dev), adv.to(dev)
 
+    def _decode_text(self, ids: list[int]) -> str:
+        return self.tokenizer.decode(ids) if self.tokenizer else ""
+
+    def _feedback_message(self, feedback: str) -> str:
+        fb = feedback.strip()
+        if fb:
+            return (
+                "The tests did not pass. Output:\n"
+                f"{fb}\n"
+                "Revise the code so the tests pass."
+            )
+        return "The tests did not pass. Revise the code so the tests pass."
+
+    def _encode_observation(self, feedback: str) -> list[int]:
+        """Render a failed-test observation as tokens to splice mid-episode: the
+        assistant turn's trailing newline (the model stopped at <|im_end|> and
+        never emitted it), then a user turn carrying the feedback, then the next
+        assistant header to cue the revision."""
+        newline = self.tokenizer.encode_ordinary("\n")
+        u_head, u_body, u_tail = render_turn(
+            "user", self._feedback_message(feedback), self.tokenizer
+        )
+        a_head, _, _ = render_turn("assistant", "", self.tokenizer)
+        return newline + u_head + u_body + u_tail + a_head
+
+    def _agentic_group(
+        self, sample_: dict
+    ) -> tuple[list[tuple[list[int], list[int]]], list[float]]:
+        """One prompt's group as multi-turn episodes: roll out `group_size`
+        agentic trajectories and score each with the trajectory reward."""
+        env = CodeAgentEnv(task=sample_["task"], feedback_chars=self.feedback_chars)
+        trajectories: list[tuple[list[int], list[int]]] = []
+        rewards: list[float] = []
+        for _ in range(self.group_size):
+            ids, action_mask, steps = agent_rollout(
+                self.model,
+                sample_["prompt_ids"],
+                self.sampling,
+                self.stop_ids(),
+                env,
+                self._decode_text,
+                self._encode_observation,
+                max_turns=self.max_turns,
+                per_turn_tokens=self.sampling.max_new_tokens,
+                device=self.device,
+                max_seq_len=self._max_seq_len,
+            )
+            trajectories.append((ids, action_mask))
+            rewards.append(trajectory_reward(steps, self.agent_reward))
+        return trajectories, rewards
+
+    def _single_turn_group(
+        self, sample_: dict
+    ) -> tuple[list[tuple[list[int], list[int]]], list[float]]:
+        """One prompt's group as single responses, scored by the RewardModel."""
+        prompt_ids = sample_["prompt_ids"]
+        responses = rollout(
+            self.model,
+            prompt_ids,
+            self.group_size,
+            self.sampling,
+            self.stop_ids(),
+            device=self.device,
+            max_seq_len=self._max_seq_len,
+        )
+        texts = [self._decode_text(r) for r in responses]
+        tasks = [sample_.get("task")] * self.group_size
+        prompts = [sample_.get("prompt_str", "")] * self.group_size
+        rewards = self._score(prompts, texts, tasks)
+        trajectories = [
+            (prompt_ids + resp, [0] * len(prompt_ids) + [1] * len(resp))
+            for resp in responses
+        ]
+        return trajectories, rewards
+
     def _rollout_and_reward(
         self, batch: list[dict]
     ) -> tuple[list[tuple[list[int], list[int], float]], dict[str, float]]:
         """Roll out every prompt, reward the rollouts, and turn each group's
-        rewards into advantages. Returns per-rollout (prompt, response,
-        advantage) rows plus logging stats."""
+        rewards into advantages. A tested task runs as a multi-turn episode when
+        max_turns>1; everything else stays single-turn. Returns unified
+        (token_ids, action_mask, advantage) rows plus logging stats."""
         self.model.eval()  # no dropout: sampling and the loss forward must agree
         rows: list[tuple[list[int], list[int], float]] = []
         all_rewards: list[float] = []
         for sample_ in batch:
-            prompt_ids = sample_["prompt_ids"]
-            responses = rollout(
-                self.model,
-                prompt_ids,
-                self.group_size,
-                self.sampling,
-                self.stop_ids(),
-                device=self.device,
-                max_seq_len=self._max_seq_len,
-            )
-            texts = [
-                self.tokenizer.decode(r) if self.tokenizer else "" for r in responses
-            ]
-            tasks = [sample_.get("task")] * self.group_size
-            prompts = [sample_.get("prompt_str", "")] * self.group_size
-            rewards = self._score(prompts, texts, tasks)
+            task = sample_.get("task")
+            if self.max_turns > 1 and task is not None and task.test_code:
+                trajectories, rewards = self._agentic_group(sample_)
+            else:
+                trajectories, rewards = self._single_turn_group(sample_)
             adv = group_advantages(torch.tensor(rewards, dtype=torch.float))
-            for resp, a in zip(responses, adv.tolist()):
-                rows.append((prompt_ids, resp, a))
+            for (ids, action_mask), a in zip(trajectories, adv.tolist()):
+                rows.append((ids, action_mask, a))
             all_rewards.extend(rewards)
         stats = {
             "reward_mean": sum(all_rewards) / max(1, len(all_rewards)),

@@ -103,6 +103,59 @@ def test_compose_gates_on_tests():
     assert 0.0 <= judged <= 1.1
 
 
+def test_run_tests_verbose_reports_pass_and_failure():
+    task = R.CodeTask(test_code="assert add(2, 3) == 5")
+    ok, out = R.run_tests_verbose("def add(a, b):\n    return a + b", task)
+    assert ok is True
+    bad_ok, bad_out = R.run_tests_verbose("def add(a, b):\n    return a - b", task)
+    assert bad_ok is False
+    assert "AssertionError" in bad_out  # failure text is captured for feedback
+
+
+def test_code_agent_env_step_classifies_turns():
+    env = R.CodeAgentEnv(task=R.CodeTask(test_code="assert add(1, 1) == 2"))
+    good = env.step("```python\ndef add(a, b):\n    return a + b\n```")
+    assert good.passed and good.valid
+    wrong = env.step("```python\ndef add(a, b):\n    return a - b\n```")
+    assert not wrong.passed and wrong.valid and wrong.feedback  # runs but wrong
+    crash = env.step("this is not python !!!")
+    assert not crash.passed and not crash.valid  # doesn't even parse
+
+
+def test_trajectory_reward_prizes_eventual_success_and_stability():
+    S = R.StepResult
+    # crash < runs-but-wrong < pass, in per-turn quality
+    assert (
+        R.trajectory_reward([S(False, False)])
+        < R.trajectory_reward([S(False, True)])
+        < R.trajectory_reward([S(True, True)])
+    )
+    assert R.trajectory_reward([]) == 0.0
+
+    # eventually reaching the answer (even after messy turns) beats never reaching it
+    win_late = [S(False, False), S(False, True), S(True, True)]
+    never = [S(False, True), S(False, True), S(False, True)]
+    assert R.trajectory_reward(win_late) > R.trajectory_reward(never)
+
+    # one-shot success is NOT strongly favored over eventual success (small gap),
+    # and by default a longer successful episode is not punished for its length
+    one_shot = [S(True, True)]
+    long_win = [S(False, True)] * 5 + [S(True, True)]
+    assert R.trajectory_reward(one_shot) - R.trajectory_reward(win_late) < 0.3
+    assert R.trajectory_reward(long_win) >= R.trajectory_reward(win_late)
+
+
+def test_trajectory_reward_step_penalty_is_opt_in():
+    S = R.StepResult
+    one_shot = [S(True, True)]
+    long_win = [S(False, True)] * 5 + [S(True, True)]
+    # default (no penalty): the long episode isn't dragged below the short one
+    assert R.trajectory_reward(long_win) >= R.trajectory_reward(one_shot) - 0.3
+    # opt in to a step penalty and brevity is rewarded among successes
+    cfg = R.AgentRewardConfig(step_penalty=0.1)
+    assert R.trajectory_reward(one_shot, cfg) > R.trajectory_reward(long_win, cfg)
+
+
 def test_score_group_runs_concurrently():
     rm = R.RewardModel(judge=R.MockJudge())
     task = R.CodeTask(test_code="assert add(1, 1) == 2")

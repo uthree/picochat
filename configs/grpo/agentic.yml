@@ -1,0 +1,60 @@
+# Multi-step (agentic) GRPO: instead of scoring one response, each tested task
+# runs as an episode -- the policy proposes code, the tests run, and on failure
+# the captured error is fed back as an observation so the policy revises, up to
+# `max_turns`. The whole trajectory is one GRPO group member, scored to value
+# eventually reaching a correct answer and staying stable across a long
+# trial-and-error episode over solving it in one shot (see agent_reward).
+#
+#   python scripts/grpo_train.py --config configs/grpo/agentic.yml
+#
+# Point init_from at an SFT (or base) checkpoint produced by this repo.
+
+tokenizer: weights/tokenizer.json
+init_from: weights/sft-stage1/last.ckpt # a checkpoint with model_config
+output_dir: weights/grpo-agentic
+system: "You are a coding assistant. When tests fail, use the error to fix your code."
+tasks: configs/grpo/sample_tasks.jsonl
+
+# Untested prompts still fall back to the judge; tested prompts drive the
+# agentic loop (the judge is not called there).
+judge:
+    backend: http
+    base_url: "http://localhost:8001/v1"
+    model: "Qwen/Qwen2.5-7B-Instruct"
+
+reward: # single-turn / untested-prompt reward composition
+    w_task: 1.0
+    w_format: 0.1
+
+# Trajectory reward for the agentic episodes. Defaults encode the training goal:
+# prize eventual success + stability, don't punish a long episode for its length.
+agent_reward:
+    w_success: 1.0 # terminal reward for the tests EVER passing (dominant)
+    w_stability: 0.3 # mean per-turn quality: pass=1, runs-but-wrong=0.5, crash=0
+    step_penalty: 0.0 # per extra turn; 0 = don't penalize long trial-and-error
+    valid_credit: 0.5 # per-turn quality of a "runs but wrong" attempt
+
+grpo:
+    group_size: 8 # trajectories per prompt (the group the advantage is relative to)
+    temperature: 1.0
+    top_k: null
+    max_new_tokens: 256 # per-turn generation budget
+    max_turns: 4 # propose -> run tests -> revise, up to this many turns
+    feedback_chars: 512 # cap the test-output observation fed back each turn
+    clip_eps: 0.2
+    kl_coef: 0.04
+    reward_concurrency: 16
+
+optim:
+    lr: 1.0e-6
+    optimizer: adamw
+    weight_decay: 0.0
+    warmup_steps: 5
+    max_steps: 200
+
+trainer:
+    batch_size: 2 # prompts per step; effective episodes = batch_size * group_size
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    log_every_n_steps: 1
