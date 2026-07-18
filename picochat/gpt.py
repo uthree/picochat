@@ -930,8 +930,8 @@ def estimate_num_params(
     window_size, rope_base, ...) are accepted and ignored, so a preset or a
     saved model_config can be splatted straight in:
 
-        estimate_num_params(**MODEL_PRESETS["base"])
-        estimate_num_params(**MODEL_PRESETS["base"], active_only=True)
+        estimate_num_params(**MODEL_PRESETS["8b"])
+        estimate_num_params(**MODEL_PRESETS["8b-moe"], active_only=True)
     """
     n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
     d_head = d_model // n_heads
@@ -977,9 +977,10 @@ def estimate_num_params(
     return embed + lmhead + layers + mix_out + shared_bank
 
 
-# Scale ladder: pico (~0.5B, the entry point) up to large (~23B MoE), kept in
-# configs/presets.yml so the hyperparameters live with the other recipes (see
-# that file for the sizing rationale).
+# Scale ladder: total-param rungs 200m/1b/8b/35b/120b, each crossed with a
+# dense / -moe / -moe-shared architecture variant (dense up to 8b, MoE from 1b),
+# kept in configs/presets.yml so the hyperparameters live with the other recipes
+# (see that file for the naming and sizing rationale).
 PRESETS_FILE = Path(__file__).resolve().parents[1] / "configs" / "presets.yml"
 
 

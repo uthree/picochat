@@ -1,12 +1,66 @@
 # Model scale ladder, loaded by picochat.gpt (MODEL_PRESETS /
 # build_lm / estimate_preset_params).
 #
-# Sized for a 128k vocab and an untied lm head (embedding + head together are
-# 256000*d_model params, which dominates the smaller presets). pico is the
-# ~0.5B-param entry point; each step up roughly doubles the active parameter
-# count. medium/large are sparse (MoE): total >> active.
+# Two independent axes, so a recipe can pick size and architecture separately:
+#
+#   1. Total-parameter rung: 200m / 1b / 8b / 35b / 120b. Each step up is
+#      roughly the next order-of-magnitude landmark in *total* params.
+#   2. Architecture variant at that rung:
+#        - <rung>            dense (no MoE)          -- only up to 8b
+#        - <rung>-moe        sparse, per-layer expert pools
+#        - <rung>-moe-shared sparse, one expert pool shared across all layers
+#                            (share_experts, MoEUT-style)
+#
+# Dense stops at 8b: 35b and 120b are MoE-only (a dense model that large is not
+# the regime we target). MoE starts at 1b: below that the routing overhead is
+# not worth it (200m is dense-only, and doubles as the tiny full-attention
+# variant below).
+#
+# Dense vs sparse at the same rung are matched on *total* params (checkpoint /
+# memory footprint), so the comparison is "same budget, spent on one dense FFN
+# per layer vs a routed pool". Sparse activates far fewer of them per token
+# (the "active" figure), which is the point.
+#
+# -moe vs -moe-shared at the same rung are matched on *both* total and active
+# params: the shared pool holds exactly n_layers x (per-layer experts) expert
+# instances -- the same instances the non-shared variant scatters one set per
+# layer, gathered into a single pool every layer routes into. So the only thing
+# that changes is per-layer pools vs one shared pool (a clean controlled
+# comparison of parameter sharing), which is why -moe-shared has a much larger
+# n_experts than -moe for the same headline size.
+#
+# Sizes assume a 128k vocab with an untied lm head (embedding + head together
+# are 256000*d_model params, which dominates the small presets -- 200m is
+# mostly its embeddings). Totals below are estimate_num_params() figures.
 
-pico: # ~0.5B params (dense)
+# --------------------------------------------------------------------------
+# 200M -- dense, and deliberately the simplest topology: layers_per_block: 1
+# makes every layer full (global) attention and its own Block-AttnRes block
+# (i.e. no sliding window, no attention-residual blocking). At this scale the
+# windowing/blocking machinery buys nothing, so the tiny model runs the plain
+# variant. Also the default target for the smoke test and base pretraining.
+# --------------------------------------------------------------------------
+200m: # ~0.20B params (dense, full attention)
+    d_model: 576
+    n_layers: 12
+    n_heads: 9
+    n_kv_heads: 3
+    vocab_size: 128000
+    layers_per_block: 1  # full attention every layer; residual not blocked
+
+# --------------------------------------------------------------------------
+# 1B
+# --------------------------------------------------------------------------
+1b: # ~0.98B params (dense)
+    d_model: 1536
+    n_layers: 20
+    n_heads: 12
+    n_kv_heads: 3
+    vocab_size: 128000
+    window_size: 128
+    layers_per_block: 4
+
+1b-moe: # ~1.0B total / ~0.65B active (MoE, per-layer pools)
     d_model: 1024
     n_layers: 20
     n_heads: 16
@@ -14,45 +68,112 @@ pico: # ~0.5B params (dense)
     vocab_size: 128000
     window_size: 128
     layers_per_block: 4
+    n_experts: 16
+    n_active: 4
+    d_expert: 512
 
-small: # ~1.0B params (dense)
-    d_model: 1536
-    n_layers: 24
-    n_heads: 24
+1b-moe-shared: # ~1.0B total / ~0.66B active (MoE, one shared pool)
+    d_model: 1024
+    n_layers: 20
+    n_heads: 16
     n_kv_heads: 4
     vocab_size: 128000
     window_size: 128
     layers_per_block: 4
+    n_experts: 320  # = 20 layers x 16, the non-shared pool gathered into one
+    n_active: 4
+    d_expert: 512
+    share_experts: true
 
-base: # ~1.9B params (dense)
-    d_model: 2048
-    n_layers: 28
+# --------------------------------------------------------------------------
+# 8B
+# --------------------------------------------------------------------------
+8b: # ~7.8B params (dense)
+    d_model: 4096
+    n_layers: 32
     n_heads: 32
     n_kv_heads: 8
     vocab_size: 128000
     window_size: 256
-    layers_per_block: 6
+    layers_per_block: 4
 
-medium: # ~7.5B total / ~2.6B active (MoE)
+8b-moe: # ~7.6B total / ~2.7B active (MoE, per-layer pools)
     d_model: 2048
     n_layers: 28
-    n_heads: 32
-    n_kv_heads: 8
+    n_heads: 16
+    n_kv_heads: 4
     vocab_size: 128000
     window_size: 256
-    layers_per_block: 6
+    layers_per_block: 4
     n_experts: 32
     n_active: 4
     d_expert: 1024
 
-large: # ~23B total / ~4.9B active (MoE)
-    d_model: 2560
-    n_layers: 32
-    n_heads: 20
+8b-moe-shared: # ~7.7B total / ~2.7B active (MoE, one shared pool)
+    d_model: 2048
+    n_layers: 28
+    n_heads: 16
     n_kv_heads: 4
+    vocab_size: 128000
+    window_size: 256
+    layers_per_block: 4
+    n_experts: 896  # = 28 layers x 32
+    n_active: 4
+    d_expert: 1024
+    share_experts: true
+
+# --------------------------------------------------------------------------
+# 35B -- MoE only (no dense past 8b)
+# --------------------------------------------------------------------------
+35b-moe: # ~35.4B total / ~10.8B active (MoE, per-layer pools)
+    d_model: 3584
+    n_layers: 40
+    n_heads: 28
+    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads (28 % 8 != 0)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
     n_experts: 64
-    n_active: 6
+    n_active: 8
+    d_expert: 1024
+
+35b-moe-shared: # ~35.8B total / ~11.1B active (MoE, one shared pool)
+    d_model: 3584
+    n_layers: 40
+    n_heads: 28
+    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads (28 % 8 != 0)
+    vocab_size: 128000
+    window_size: 512
+    layers_per_block: 6
+    n_experts: 2560  # = 40 layers x 64
+    n_active: 8
+    d_expert: 1024
+    share_experts: true
+
+# --------------------------------------------------------------------------
+# 120B -- MoE only
+# --------------------------------------------------------------------------
+120b-moe: # ~120B total / ~17.2B active (MoE, per-layer pools)
+    d_model: 4096
+    n_layers: 48
+    n_heads: 32
+    n_kv_heads: 8
+    vocab_size: 128000
+    window_size: 512
+    layers_per_block: 6
+    n_experts: 144
+    n_active: 8
     d_expert: 1280
+
+120b-moe-shared: # ~121B total / ~18.5B active (MoE, one shared pool)
+    d_model: 4096
+    n_layers: 48
+    n_heads: 32
+    n_kv_heads: 8
+    vocab_size: 128000
+    window_size: 512
+    layers_per_block: 6
+    n_experts: 6912  # = 48 layers x 144
+    n_active: 8
+    d_expert: 1280
+    share_experts: true

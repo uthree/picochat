@@ -165,7 +165,7 @@ def main():
     )
 
     # --- model ---
-    size = model_cfg.pop("size", "pico")
+    size = model_cfg.pop("size", "1b")
     overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
     lm = build_lm(size, vocab_size=vocab_size, max_seq_len=max_seq_len, **overrides)
     # Recipe for rebuilding this exact architecture later (see GPT.model_config);

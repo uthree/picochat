@@ -13,14 +13,64 @@ from picochat.gpt import (
 # ---------------------------------------------------------------------------
 # scale-ladder presets (loaded from configs/presets.yml)
 # ---------------------------------------------------------------------------
+# The ladder is two axes: a total-param rung (200m/1b/8b/35b/120b) crossed with
+# an architecture variant (dense / -moe / -moe-shared). Dense stops at 8b; MoE
+# starts at 1b (see configs/presets.yml).
+EXPECTED_PRESETS = [
+    "200m",
+    "1b",
+    "1b-moe",
+    "1b-moe-shared",
+    "8b",
+    "8b-moe",
+    "8b-moe-shared",
+    "35b-moe",
+    "35b-moe-shared",
+    "120b-moe",
+    "120b-moe-shared",
+]
+RUNGS = ["200m", "1b", "8b", "35b", "120b"]
+
+
+def _rung(size: str) -> str:
+    # the leading token before the first '-' is the total-param rung
+    return size.split("-", 1)[0]
+
+
 def test_presets_load_from_yaml_with_required_keys():
     # the ladder lives in configs/presets.yml; a malformed edit there (missing
     # key, non-integer value) must fail loudly here rather than at train time
-    assert list(MODEL_PRESETS) == ["pico", "small", "base", "medium", "large"]
+    assert list(MODEL_PRESETS) == EXPECTED_PRESETS
     required = {"d_model", "n_layers", "n_heads", "n_kv_heads", "vocab_size"}
     for size, cfg in MODEL_PRESETS.items():
         assert required <= cfg.keys(), f"{size} is missing {required - cfg.keys()}"
+        # every value is an int (share_experts is a bool, an int subclass)
         assert all(isinstance(v, int) for v in cfg.values()), size
+
+
+def test_preset_names_match_dense_and_moe_axes():
+    # dense only up to 8b; -moe / -moe-shared for every rung from 1b up
+    for size, cfg in MODEL_PRESETS.items():
+        if size.endswith("-moe-shared"):
+            assert cfg.get("share_experts") is True and "n_experts" in cfg
+        elif size.endswith("-moe"):
+            assert "n_experts" in cfg and not cfg.get("share_experts", False)
+        else:  # dense
+            assert "n_experts" not in cfg
+    assert "200m" in MODEL_PRESETS and "200m-moe" not in MODEL_PRESETS  # tiny is dense
+    assert "35b" not in MODEL_PRESETS  # no dense past 8b
+    assert "120b" not in MODEL_PRESETS
+
+
+def test_shared_pool_gathers_the_per_layer_experts():
+    # a -moe-shared preset holds exactly n_layers x (the -moe per-layer experts),
+    # i.e. the same expert instances the non-shared variant scatters per layer,
+    # so the two match on total (and active) params -- only the pooling differs.
+    for size, cfg in MODEL_PRESETS.items():
+        if not size.endswith("-moe-shared"):
+            continue
+        base = MODEL_PRESETS[size[: -len("-shared")]]
+        assert cfg["n_experts"] == base["n_layers"] * base["n_experts"]
 
 
 def test_build_lm_unknown_size_raises():
@@ -36,19 +86,19 @@ def test_preset_dims_are_consistent(size):
     assert (cfg["d_model"] // cfg["n_heads"]) % 2 == 0  # d_head even (RoPE)
 
 
-def test_build_lm_pico_forward():
-    lm = build_lm("pico", vocab_size=50, max_seq_len=64)
+def test_build_lm_smallest_forward():
+    lm = build_lm("200m", vocab_size=50, max_seq_len=64)
     logits = lm(torch.randint(0, 50, (2, 16)))
     assert logits.shape == (2, 16, 50)
 
 
 def test_build_lm_overrides_preset():
-    lm = build_lm("pico", vocab_size=50, n_layers=2)
-    assert lm.transformer.n_layers == 2  # overridden from preset's 8
+    lm = build_lm("200m", vocab_size=50, n_layers=2)
+    assert lm.transformer.n_layers == 2  # overridden from preset's 12
 
 
 def test_build_lm_vocab_override():
-    lm = build_lm("pico", vocab_size=123)
+    lm = build_lm("200m", vocab_size=123)
     assert lm.embed.num_embeddings == 123
     assert lm.lmhead.out_features == 123
 
@@ -128,17 +178,22 @@ def test_estimate_num_params_ignores_extra_kwargs():
 
 def test_estimate_preset_params_matches_build_lm():
     # same preset/override resolution as build_lm -> same model -> same count
-    lm = build_lm("pico", vocab_size=1000, n_layers=2)
+    lm = build_lm("200m", vocab_size=1000, n_layers=2)
     assert estimate_preset_params(
-        "pico", vocab_size=1000, n_layers=2
+        "200m", vocab_size=1000, n_layers=2
     ) == _actual_params(lm)
 
 
-def test_estimate_preset_params_all_presets_positive_and_monotone():
-    counts = [estimate_preset_params(s) for s in MODEL_PRESETS]
-    assert all(c > 0 for c in counts)
-    # the ladder is listed smallest -> largest
-    assert counts == sorted(counts)
+def test_estimate_preset_params_positive_and_rungs_are_ordered():
+    counts = {s: estimate_preset_params(s) for s in MODEL_PRESETS}
+    assert all(c > 0 for c in counts.values())
+    # totals aren't globally monotone (dense/-moe/-moe-shared cluster within a
+    # rung), but the rungs themselves climb: every preset on a higher rung is
+    # bigger than every preset on a lower one.
+    for lo, hi in zip(RUNGS, RUNGS[1:]):
+        lo_max = max(c for s, c in counts.items() if _rung(s) == lo)
+        hi_min = min(c for s, c in counts.items() if _rung(s) == hi)
+        assert lo_max < hi_min, f"{lo} rung overlaps {hi} rung"
 
 
 def test_estimate_preset_params_unknown_raises():
