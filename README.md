@@ -41,11 +41,11 @@ uv run scripts/base_setup.py --config configs/base_setup/stage2.yml
 ```
 
 ### 4. Pretrain (2-stage)
-Stage 1 is the single mixed base corpus (stories + code + textbooks +
+Stage 1 is the single knowledge-oriented base corpus (code + textbooks +
 wikipedia); stage 2 broadens to multilingual/web text and extends the context
 length, warm-starting from stage 1's checkpoint (`init_from` in the config):
 ```bash
-uv run scripts/base_train.py --config configs/base_train/stage1.yml  # mixed base corpus
+uv run scripts/base_train.py --config configs/base_train/stage1.yml  # knowledge base corpus
 uv run scripts/base_train.py --config configs/base_train/stage2.yml  # multilingual, longer context
 ```
 Interrupted stages resume automatically from `output_dir/last.ckpt`. Training
