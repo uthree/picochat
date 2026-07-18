@@ -189,6 +189,21 @@ def test_estimate_num_params_matches_actual(cfg):
     assert estimate_num_params(**cfg) == _actual_params(lm)
 
 
+def test_estimate_counts_mtp_heads_in_total_not_active():
+    # each MTP head is one lm-head's worth of params: counted in the total (and
+    # in the real model), excluded from the active figure (plain decode runs only
+    # the primary head).
+    cfg = dict(vocab_size=100, d_model=64, n_heads=8, n_layers=2, n_mtp=2)
+    lm = TransformerLM(**cfg)
+    assert len(lm.mtp_heads) == 2
+    assert estimate_num_params(**cfg) == _actual_params(lm)
+    dense = dict(cfg, n_mtp=0)
+    assert estimate_num_params(**cfg) - estimate_num_params(**dense) == 2 * 100 * 64
+    assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(
+        **dense, active_only=True
+    )
+
+
 def test_estimate_num_params_counts_untied_head():
     # the lm head is a separate (untied) projection, so it and the embedding
     # each contribute vocab * d_model.

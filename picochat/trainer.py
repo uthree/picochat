@@ -183,7 +183,10 @@ class LMTrainerMixin:
             if isinstance(m, nn.Embedding)
             for p in m.parameters()
         }
+        # The lm head and the MTP output heads (see TransformerLM) are all output
+        # projections -> AdamW, not Muon (Muon skips input/output layers).
         head_ids = {id(p) for p in self.model.lmhead.parameters()}
+        head_ids |= {id(p) for p in self.model.mtp_heads.parameters()}
         muon, adam_decay, adam_no_decay = [], [], []
         for p in self.model.parameters():
             if not p.requires_grad:
@@ -284,39 +287,56 @@ class LMTrainerMixin:
         for opt in opts:
             opt.zero_grad()
 
+    def _head_ce(self, hidden: Tensor, weight: Tensor, target_ids: Tensor) -> Tensor:
+        """Cross-entropy of a single output head (weight: (vocab, d_model)) over
+        already-aligned hidden states and target ids. Uses the fused lm-head +
+        cross-entropy kernel on CUDA (the (b*l, vocab) logits are never
+        materialized -- the big memory lever at 128k vocab), a plain
+        F.cross_entropy otherwise."""
+        hidden = hidden.reshape(-1, hidden.shape[-1])
+        target_ids = target_ids.reshape(-1)
+        if self.fused_loss and hidden.is_cuda:
+            return fused_linear_cross_entropy(
+                hidden, weight, target_ids, ignore_index=self.pad_idx
+            )
+        return F.cross_entropy(
+            hidden @ weight.T, target_ids, ignore_index=self.pad_idx
+        )
+
     def _next_token_loss(self, input_ids: Tensor, targets: Tensor, masks) -> Tensor:
         """Next-token cross-entropy: position i's prediction is scored against
         targets[i+1] (`targets` is input-aligned, not pre-shifted; it is
         simply `input_ids` for pretraining, the masked labels for SFT).
         Positions whose target is pad_idx are ignored.
 
-        With fused_loss, `self._forward` is the model trunk up to the final
-        hidden states (TransformerLM.encode) and the lm-head matmul is folded
-        into the loss kernel so the (b*l, vocab) logits are never
-        materialized (see picochat.kernels.fused_linear_cross_entropy);
-        otherwise `self._forward` is the full model and this is a plain
-        F.cross_entropy over its logits.
+        With multi-token prediction (model.n_mtp > 0) the primary next-token
+        loss is joined by one auxiliary cross-entropy per MTP head: head j reads
+        the same hidden state and predicts the token at offset 2+j, weighted by
+        `mtp_weight`. Otherwise this is the plain single-head next-token loss.
+
+        When `self._trunk_hidden` (fused_loss or MTP) `self._forward` is the model
+        trunk up to the final hidden states and the head matmuls happen here (see
+        _head_ce); otherwise it is the full model and this is a plain loss over
+        its primary logits.
         """
-        if self.fused_loss:
-            hidden = self._forward(input_ids, masks=masks)[:, :-1]
-            if hidden.is_cuda:
-                return fused_linear_cross_entropy(
-                    hidden.reshape(-1, hidden.shape[-1]),
-                    self.model.lmhead.weight,
-                    targets[:, 1:].reshape(-1),
-                    ignore_index=self.pad_idx,
-                )
-            # The kernel is available in this process but the module runs on
-            # CPU (e.g. a CPU Trainer in tests): apply the lm-head eagerly and
-            # fall through to the plain loss on its logits.
-            logits = self.model.lmhead(hidden)
-        else:
+        if not self._trunk_hidden:
             logits = self._forward(input_ids, masks=masks)[:, :-1]
-        return F.cross_entropy(
-            rearrange(logits, "b l v -> (b l) v"),
-            rearrange(targets[:, 1:], "b l -> (b l)"),
-            ignore_index=self.pad_idx,
-        )
+            return F.cross_entropy(
+                rearrange(logits, "b l v -> (b l) v"),
+                rearrange(targets[:, 1:], "b l -> (b l)"),
+                ignore_index=self.pad_idx,
+            )
+        hidden = self._forward(input_ids, masks=masks)
+        # Primary head: offset +1. hidden[:, :-1] predicts targets[:, 1:].
+        loss = self._head_ce(hidden[:, :-1], self.model.lmhead.weight, targets[:, 1:])
+        if self.model.n_mtp == 0:
+            return loss
+        # MTP head j: offset +(2+j). hidden[:, :-o] predicts targets[:, o:].
+        mtp = hidden.new_zeros(())
+        for j, head in enumerate(self.model.mtp_heads):
+            o = j + 2
+            mtp = mtp + self._head_ce(hidden[:, :-o], head.weight, targets[:, o:])
+        return loss + self.mtp_weight * mtp / self.model.n_mtp
 
     @torch.no_grad()
     def _generate(self, prompt: Tensor, max_new_tokens: int) -> Tensor:
@@ -363,8 +383,12 @@ class GPT(LMTrainerMixin, L.LightningModule):
         sample_batches: int = 20,
         model_config: dict | None = None,
         stochastic_k: tuple[int, int] | None = None,
+        mtp_weight: float = 0.3,
     ):
         super().__init__()
+        # Weight on the auxiliary multi-token-prediction heads' loss (see
+        # LMTrainerMixin._next_token_loss); ignored when the model has no MTP heads.
+        self.mtp_weight = mtp_weight
         # `model_config` is the plain-dict build_lm(**model_config) recipe used to
         # construct `transformer_lm` (size/vocab_size/max_seq_len/overrides).
         # Saving it (and nothing else -- transformer_lm/tokenizer aren't
@@ -416,7 +440,11 @@ class GPT(LMTrainerMixin, L.LightningModule):
         # compiled), making checkpoints loadable only under the exact same
         # compile setting.
         self.compile = can_compile() if compile is None else compile
-        trunk = self.model.encode if self.fused_loss else self.model
+        # With fused_loss OR multi-token prediction the trainable forward stops at
+        # the hidden states (the lm/MTP heads run in _next_token_loss); otherwise
+        # it is the full model up to the primary logits.
+        self._trunk_hidden = self.fused_loss or self.model.n_mtp > 0
+        trunk = self.model.encode if self._trunk_hidden else self.model
         object.__setattr__(
             self, "_forward", torch.compile(trunk) if self.compile else trunk
         )
@@ -505,11 +533,15 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         tokenizer=None,
         model_config: dict | None = None,
         stochastic_k: tuple[int, int] | None = None,
+        mtp_weight: float = 0.3,
     ):
         super().__init__()
         self.save_hyperparameters("model_config")
         self.model = transformer_lm
         self.pad_idx = pad_idx
+        # Weight on the auxiliary multi-token-prediction loss (see
+        # LMTrainerMixin._next_token_loss); ignored without MTP heads.
+        self.mtp_weight = mtp_weight
         self._init_trainer(
             lr=lr,
             weight_decay=weight_decay,
@@ -534,7 +566,11 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         # doesn't duplicate weights in state_dict (see GPT.__init__, including
         # the fused_loss trunk choice).
         self.compile = can_compile() if compile is None else compile
-        trunk = self.model.encode if self.fused_loss else self.model
+        # With fused_loss OR multi-token prediction the trainable forward stops at
+        # the hidden states (the lm/MTP heads run in _next_token_loss); otherwise
+        # it is the full model up to the primary logits.
+        self._trunk_hidden = self.fused_loss or self.model.n_mtp > 0
+        trunk = self.model.encode if self._trunk_hidden else self.model
         object.__setattr__(
             self, "_forward", torch.compile(trunk) if self.compile else trunk
         )

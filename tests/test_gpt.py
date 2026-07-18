@@ -351,6 +351,41 @@ def test_stochastic_k_none_is_noop():
     assert all(m.n_active == 4 for m in moe_modules(gpt.model))
 
 
+def test_mtp_training_step_trains_all_heads():
+    # with MTP heads the loss is primary + weighted auxiliary heads; a training
+    # step must reach every head (primary and each MTP head).
+    torch.manual_seed(0)
+    lm = TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, max_seq_len=64, n_mtp=2
+    )
+    gpt = GPT(lm, pad_idx=0, compile=False, mtp_weight=0.5)
+    batch = torch.randint(1, 40, (2, 16))
+    loss = gpt.training_step(batch, 0)
+    assert loss.requires_grad and torch.isfinite(loss)
+    assert lm.lmhead.weight.grad is not None
+    for head in lm.mtp_heads:
+        g = head.weight.grad
+        assert g is not None and g.abs().sum() > 0
+
+
+def test_mtp_loss_exceeds_primary_only():
+    # the MTP auxiliary terms add to the objective, so the reported loss is above
+    # the primary-only next-token loss on the same batch.
+    torch.manual_seed(0)
+    lm = TransformerLM(
+        vocab_size=40, d_model=32, n_heads=4, n_layers=2, max_seq_len=64, n_mtp=1
+    )
+    gpt = GPT(lm, pad_idx=0, compile=False, mtp_weight=1.0)
+    batch = torch.randint(1, 40, (2, 16))
+    with torch.no_grad():
+        combined = gpt._loss(batch)
+        # primary-only: temporarily drop the MTP head
+        saved, lm.n_mtp = lm.n_mtp, 0
+        primary = gpt._loss(batch)
+        lm.n_mtp = saved
+    assert combined > primary
+
+
 def test_stochastic_k_fast_dev_run_and_restores_nominal():
     # Lightning must invoke the mixin's hooks with the right signatures during a
     # real fit; afterwards the model is left at the nominal top-k (on_fit_end).

@@ -209,6 +209,8 @@ def main():
         # `optim.stochastic_k: [min, max]` -> sample MoE router top-k each step
         # (no-op on a dense model / when unset). See LMTrainerMixin.
         stochastic_k=optim_cfg.get("stochastic_k"),
+        # Auxiliary multi-token-prediction loss weight (n_mtp > 0 models only).
+        mtp_weight=optim_cfg.get("mtp_weight", 0.3),
     )
 
     # --- resume: continue this exact SFT stage (weights + optimizer + step)

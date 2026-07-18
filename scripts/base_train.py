@@ -234,6 +234,9 @@ def main():
         # top-k in that range each step so top-k becomes an inference-time dial
         # (no-op on a dense model / when unset). See LMTrainerMixin.
         stochastic_k=optim_cfg.get("stochastic_k"),
+        # Weight on the auxiliary multi-token-prediction loss (models with
+        # n_mtp > 0 only; ignored otherwise).
+        mtp_weight=optim_cfg.get("mtp_weight", 0.3),
     )
 
     # --- resume: continue this exact stage (weights + optimizer + step) if it

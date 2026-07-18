@@ -34,6 +34,12 @@
 # < 10% of total. -moe and -moe-shared match on total but differ on granularity
 # (fine vs coarse), sharing (per-layer vs one pool) and hence active params.
 #
+# Multi-token prediction: 8b and every larger preset carry n_mtp extra output
+# heads (offsets +2.., simplest "several heads" form) for self-speculative
+# decoding (picochat.engine.generate_speculative). Each head is one lm-head's
+# worth of params, counted in the total but NOT in the active figure -- plain
+# autoregressive decoding runs only the primary head. Smaller presets omit them.
+#
 # Sizes assume a 128k vocab with an untied lm head (embedding + head together
 # are 256000*d_model params, which dominates the small presets -- 200m is
 # mostly its embeddings). Totals below are estimate_num_params() figures.
@@ -68,7 +74,7 @@
 # --------------------------------------------------------------------------
 # 8B
 # --------------------------------------------------------------------------
-8b: # ~7.8B params (dense)
+8b: # ~8.3B params (dense; ~7.8B backbone + one MTP head)
     d_model: 4096
     n_layers: 32
     n_heads: 32
@@ -76,12 +82,13 @@
     vocab_size: 128000
     window_size: 256
     layers_per_block: 4
+    n_mtp: 1  # multi-token prediction head (speculative decoding); 8B and up
 
 # --------------------------------------------------------------------------
 # 35B -- MoE only (no dense past 8b). Narrow backbone (d_model 2560) + small
 # dense/shared FFN + a big routed pool, so per-token activation is ~7-10%.
 # --------------------------------------------------------------------------
-35b-moe: # ~35.5B total / ~2.5B active (7.1%) -- LatentMoE, fine-grained
+35b-moe: # ~35.8B total / ~2.5B active (7.0%) -- LatentMoE, fine-grained
     d_model: 2560
     n_layers: 40
     n_heads: 20
@@ -94,8 +101,9 @@
     n_active: 6
     d_expert: 512    # fine-grained
     d_latent: 1024   # LatentMoE: experts run in a d_model/2.5 latent space
+    n_mtp: 1         # multi-token prediction head (speculative decoding)
 
-35b-moe-shared: # ~35.5B total / ~3.4B active (9.6%) -- coarse-grained, shared pool
+35b-moe-shared: # ~35.8B total / ~3.4B active (9.5%) -- coarse-grained, shared pool
     d_model: 2560
     n_layers: 40
     n_heads: 20
@@ -108,6 +116,7 @@
     n_active: 2
     d_expert: 2304   # coarse: ~4.5x the fine variant's experts
     share_experts: true
+    n_mtp: 1         # multi-token prediction head (speculative decoding)
 
 # --------------------------------------------------------------------------
 # 120B -- MoE only. Narrow backbone (d_model 3584) + small dense/shared FFN +
@@ -126,6 +135,7 @@
     n_active: 8
     d_expert: 768    # fine-grained
     d_latent: 1792   # LatentMoE latent space (d_model/2)
+    n_mtp: 1         # multi-token prediction head (speculative decoding)
 
 120b-moe-shared: # ~118B total / ~8.1B active (6.8%) -- coarse-grained, shared pool
     d_model: 3584
@@ -140,3 +150,4 @@
     n_active: 2
     d_expert: 3584   # coarse: ~4.7x the fine variant's experts (= d_model)
     share_experts: true
+    n_mtp: 1         # multi-token prediction head (speculative decoding)

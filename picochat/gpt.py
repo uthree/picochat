@@ -474,7 +474,11 @@ class SelfAttention(nn.Module):
         return self._output(attn, gate)
 
     def decode(
-        self, x: Tensor, cache: Tensor | None = None, pos: int = 0
+        self,
+        x: Tensor,
+        cache: Tensor | None = None,
+        pos: int = 0,
+        cache_margin: int = 0,
     ) -> tuple[Tensor, Tensor]:
         # Inference path: append the new keys/values to the cache and attend over
         # the full prefix (the window mask below limits which of those the query
@@ -483,6 +487,10 @@ class SelfAttention(nn.Module):
         # cache is truncated below and can no longer be used to infer it.
         # Always runs eager (see GPT.__init__), so flex_attention would gain
         # nothing here over a plain masked SDPA call; keep the simpler path.
+        # `cache_margin` keeps window_size + margin keys instead of window_size,
+        # so speculative decoding can roll the cache back by up to `margin`
+        # rejected tokens and still have a full window for the accepted position
+        # (see picochat.engine.generate_speculative).
         query, key, value, gate = self._project(x)
         old_len = 0 if cache is None else cache.shape[-2]
         if cache is not None:
@@ -506,8 +514,9 @@ class SelfAttention(nn.Module):
         # above already used the full, untruncated key/value, so a chunk longer
         # than window_size (e.g. a long prefill) is handled correctly for free.
         if self.window_size is not None:
-            key = key[..., -self.window_size :, :]
-            value = value[..., -self.window_size :, :]
+            keep = self.window_size + cache_margin
+            key = key[..., -keep:, :]
+            value = value[..., -keep:, :]
         new_cache = torch.stack([key, value])
         return out, new_cache
 
@@ -634,8 +643,11 @@ class TransformerLayer(nn.Module):
         partial: Tensor | None,
         cache: Tensor | None = None,
         pos: int = 0,
+        cache_margin: int = 0,
     ) -> tuple[Tensor, Tensor]:
-        a, cache = self.attn.decode(self.mix_attn(blocks, partial), cache, pos)
+        a, cache = self.attn.decode(
+            self.mix_attn(blocks, partial), cache, pos, cache_margin
+        )
         partial = a if partial is None else partial + a
         # Mirror forward(): MoE layers must apply their experts at inference too,
         # otherwise generation silently runs a different (FFN-only) network than
@@ -775,7 +787,11 @@ class Transformer(nn.Module):
         return x
 
     def decode(
-        self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
+        self,
+        x: Tensor,
+        cache: list[Tensor | None] | None = None,
+        pos: int = 0,
+        cache_margin: int = 0,
     ) -> tuple[Tensor, list[Tensor], int]:
         # Owns the absolute-position bookkeeping in one place: every layer sees
         # the same `pos` (they all process the same chunk at the same time), and
@@ -783,6 +799,8 @@ class Transformer(nn.Module):
         # position is kept as model state -- both flow through args/returns only.
         # The AttnRes blocks/partial state is per-token and lives only within
         # this call (rebuilt for each chunk), so the cache format is unchanged.
+        # `cache_margin` is forwarded to the windowed layers (see
+        # SelfAttention.decode) for speculative decoding's cache rollback.
         if cache is None:
             cache = [None] * self.n_layers
         q_len = x.shape[-2]
@@ -791,7 +809,7 @@ class Transformer(nn.Module):
             if i > 0 and i % self.layers_per_block == 0:
                 blocks = torch.cat([blocks, partial[None]])
                 partial = None
-            partial, cache[i] = layer.decode(blocks, partial, cache[i], pos)
+            partial, cache[i] = layer.decode(blocks, partial, cache[i], pos, cache_margin)
         x = self.mix_out(blocks, partial)
         x = rms_norm(x)
         return x, cache, pos + q_len  # type: ignore
@@ -817,6 +835,7 @@ class TransformerLM(nn.Module):
         d_expert: int | None = None,
         d_latent: int | None = None,
         share_experts: bool = False,
+        n_mtp: int = 0,
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -824,6 +843,17 @@ class TransformerLM(nn.Module):
 
         self.embed = nn.Embedding(vocab_size, d_model)
         self.lmhead = nn.Linear(d_model, vocab_size, bias=False)
+        # Multi-token prediction (Gloeckle et al., 2024), simplest "several output
+        # heads" form: from the final hidden state h_t the primary lmhead predicts
+        # token t+1, and mtp_heads[j] predicts token t+2+j. So n_mtp extra heads
+        # cover offsets +2..+(1+n_mtp). Trained as an auxiliary loss (see
+        # LMTrainerMixin) and used to draft tokens for self-speculative decoding
+        # (see picochat.engine.generate_speculative). Plain autoregressive decode
+        # ignores them (only the primary head runs). n_mtp=0 -> standard model.
+        self.n_mtp = n_mtp
+        self.mtp_heads = nn.ModuleList(
+            nn.Linear(d_model, vocab_size, bias=False) for _ in range(n_mtp)
+        )
         self.transformer = Transformer(
             d_model,
             n_heads,
@@ -909,6 +939,28 @@ class TransformerLM(nn.Module):
         embeds, cache, pos = self.transformer.decode(embeds, cache, pos)
         return self.lmhead(embeds), cache, pos
 
+    def decode_heads(
+        self,
+        x: Tensor | None = None,
+        cache: list[Tensor | None] | None = None,
+        pos: int = 0,
+        cache_margin: int = 0,
+    ) -> tuple[Tensor, list[Tensor], list[Tensor], int]:
+        """Like decode() but also returns every MTP head's logits, for
+        speculative drafting. Returns (logits, mtp_logits, cache, pos), where
+        logits is (B, q_len, vocab) from the primary head and mtp_logits is a
+        length-n_mtp list of (B, q_len, vocab) tensors (head j -> offset 2+j).
+        Chunked decode is per-position equivalent to sequential decode (attention
+        is causal, MoE runs no_drop), so a whole candidate chunk can be verified
+        in one call. `cache_margin` (>= the draft length) keeps enough windowed
+        KV that the cache can be rolled back past rejected drafts and still hold a
+        full window (see picochat.engine.generate_speculative)."""
+        embeds, cache, pos = self.transformer.decode(
+            self.embed(x), cache, pos, cache_margin
+        )
+        mtp = [head(embeds) for head in self.mtp_heads]
+        return self.lmhead(embeds), mtp, cache, pos
+
 
 def estimate_num_params(
     vocab_size: int,
@@ -922,6 +974,7 @@ def estimate_num_params(
     n_active: int = 2,
     d_latent: int | None = None,
     share_experts: bool = False,
+    n_mtp: int = 0,
     active_only: bool = False,
     **_ignored,
 ) -> int:
@@ -985,9 +1038,14 @@ def estimate_num_params(
 
     embed = vocab_size * d_model
     lmhead = vocab_size * d_model  # separate (untied) output projection
+    # Multi-token-prediction heads: n_mtp extra vocab-projections, each the size
+    # of the lm head. Counted in the total but NOT in active_only -- plain
+    # autoregressive decoding runs only the primary head; the MTP heads fire only
+    # in the optional speculative-decoding path (see TransformerLM.decode_heads).
+    mtp = 0 if active_only else n_mtp * vocab_size * d_model
     layers = n_layers * layer_params
     mix_out = d_model  # final depth-attention query before the head
-    return embed + lmhead + layers + mix_out + shared_bank
+    return embed + lmhead + layers + mix_out + shared_bank + mtp
 
 
 # Scale ladder: total-param rungs 200m/1b/8b/35b/120b, each crossed with a

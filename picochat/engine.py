@@ -129,3 +129,91 @@ def generate(
         yield token_id
         logits, cache, pos = model.decode(next_token, cache, pos)
         next_token = sample(logits[:, -1], cfg)
+
+
+def _truncate_cache(cache: list[Tensor], drop: int) -> list[Tensor]:
+    """Drop the last `drop` positions from every layer's KV cache. The rejected
+    speculative drafts are always the most recently appended entries, so this
+    rolls the cache back to the last accepted token (works for both the full and
+    the sliding-window layers, whose caches all grew by the same chunk length)."""
+    if drop <= 0:
+        return cache
+    return [c[..., : c.shape[-2] - drop, :] for c in cache]
+
+
+@torch.no_grad()
+def generate_speculative(
+    model: torch.nn.Module,
+    tokenizer: Encoding,
+    prompt_ids: list[int],
+    cfg: SamplingConfig,
+    device: torch.device | str = "cpu",
+    max_seq_len: int | None = None,
+) -> Iterator[int]:
+    """Greedy self-speculative decoding driven by the model's own MTP heads.
+
+    Emits exactly the greedy (argmax) token stream -- identical to what
+    generate() would produce at temperature 0 -- but each model forward drafts
+    n_mtp extra tokens (primary head -> next token, MTP head j -> the token 2+j
+    ahead) and *verifies* the whole draft in one chunked forward, accepting the
+    longest correct prefix. When the drafts are right this advances several
+    tokens per forward; when they are wrong it still advances one, so the output
+    never differs from plain greedy decoding.
+
+    Requires model.n_mtp >= 1; otherwise falls back to plain generate(). Sampling
+    knobs in `cfg` are ignored (this path is greedy); use generate() for sampled
+    decoding.
+    """
+    k = getattr(model, "n_mtp", 0)
+    if k == 0:
+        yield from generate(model, tokenizer, prompt_ids, cfg, device, max_seq_len)
+        return
+
+    budget = cfg.max_new_tokens
+    if max_seq_len is not None:
+        budget = min(budget, max_seq_len - len(prompt_ids))
+        if budget <= 0:
+            return
+    stop_ids = {
+        tokenizer.encode_single_token(IM_END),
+        tokenizer.encode_single_token(EOS_TOKEN),
+    }
+
+    # `cache_margin=k` keeps k extra keys per windowed layer so the cache can be
+    # rolled back past up to k rejected drafts and still hold a full window.
+    x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+    logits, mtp, cache, pos = model.decode_heads(x, cache_margin=k)
+    cand = [int(logits[0, -1].argmax())] + [int(m[0, -1].argmax()) for m in mtp]
+
+    emitted = 0
+    while emitted < budget:
+        if max_seq_len is not None:  # keep the verify chunk within the RoPE range
+            cand = cand[: max_seq_len - pos]
+            if not cand:
+                return
+        ct = torch.tensor([cand], dtype=torch.long, device=device)
+        logits, mtp, cache, pos = model.decode_heads(ct, cache, pos, cache_margin=k)
+        # true[i] = the model's real next token after candidate i.
+        true = [int(logits[0, i].argmax()) for i in range(len(cand))]
+        # cand[0] is a verified token; accept drafts while each matches the real
+        # next token of its predecessor.
+        accepted = 0
+        for i in range(1, len(cand)):
+            if cand[i] == true[i - 1]:
+                accepted = i
+            else:
+                break
+        for i in range(accepted + 1):
+            tok = cand[i]
+            if tok in stop_ids:
+                return
+            yield tok
+            emitted += 1
+            if emitted >= budget:
+                return
+        # Roll the cache back past the rejected drafts, then draft afresh: the
+        # correction true[accepted] is the next verified token, and the MTP heads
+        # read at the accepted position propose its successors.
+        cache = _truncate_cache(cache, (len(cand) - 1) - accepted)
+        pos -= (len(cand) - 1) - accepted
+        cand = [true[accepted]] + [int(mtp[j][0, accepted].argmax()) for j in range(k)]
