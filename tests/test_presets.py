@@ -19,11 +19,7 @@ from picochat.gpt import (
 EXPECTED_PRESETS = [
     "200m",
     "1b",
-    "1b-moe",
-    "1b-moe-shared",
     "8b",
-    "8b-moe",
-    "8b-moe-shared",
     "35b-moe",
     "35b-moe-shared",
     "120b-moe",
@@ -58,7 +54,9 @@ def test_preset_names_match_dense_and_moe_axes():
         else:  # dense
             assert "n_experts" not in cfg
     assert "200m" in MODEL_PRESETS and "200m-moe" not in MODEL_PRESETS  # tiny is dense
-    assert "35b" not in MODEL_PRESETS  # no dense past 8b
+    assert "1b" in MODEL_PRESETS and "1b-moe" not in MODEL_PRESETS  # dense-only rung
+    assert "8b" in MODEL_PRESETS and "8b-moe" not in MODEL_PRESETS  # dense-only rung
+    assert "35b" not in MODEL_PRESETS  # 35b/120b are MoE-only (no dense)
     assert "120b" not in MODEL_PRESETS
 
 
@@ -68,7 +66,7 @@ def test_nonshared_moe_is_latent_and_fine_grained():
     for size, cfg in MODEL_PRESETS.items():
         if size.endswith("-moe"):  # non-shared MoE
             assert cfg.get("d_latent"), f"{size} should set d_latent (LatentMoE)"
-            assert cfg["n_active"] >= 8, size  # fine-grained: high top-k
+            assert cfg["n_active"] >= 6, size  # fine-grained: high top-k
 
 
 def test_shared_moe_is_coarse_grained_and_not_latent():
@@ -83,6 +81,17 @@ def test_shared_moe_is_coarse_grained_and_not_latent():
         sibling = MODEL_PRESETS[size[: -len("-shared")]]  # the -moe at this rung
         assert cfg["d_expert"] > sibling["d_expert"]  # coarser (bigger) experts
         assert cfg["n_active"] < sibling["n_active"]
+
+
+def test_moe_presets_activate_under_10_percent():
+    # the MoE rungs (35b/120b) exist to be genuinely sparse: each token must
+    # activate < 10% of the total params (that is why 1b/8b stayed dense).
+    for size, cfg in MODEL_PRESETS.items():
+        if "n_experts" not in cfg:
+            continue
+        total = estimate_preset_params(size)
+        active = estimate_preset_params(size, active_only=True)
+        assert active / total < 0.10, f"{size}: active {active / total:.1%} >= 10%"
 
 
 def test_moe_variants_match_rung_total():

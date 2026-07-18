@@ -7,34 +7,32 @@
 #      roughly the next order-of-magnitude landmark in *total* params.
 #   2. Architecture variant at that rung, matched on *total* params (checkpoint
 #      / memory footprint) so the comparison is "same budget, spent differently":
-#        - <rung>            dense (no MoE)                     -- only up to 8b
-#        - <rung>-moe        LatentMoE, fine-grained, per-layer pools
-#        - <rung>-moe-shared coarse-grained, one pool shared across all layers
+#        - <rung>            dense (no MoE)                     -- 200m / 1b / 8b
+#        - <rung>-moe        LatentMoE, fine-grained, per-layer pools -- 35b / 120b
+#        - <rung>-moe-shared coarse-grained, one shared pool        -- 35b / 120b
 #
-# Dense stops at 8b: 35b and 120b are MoE-only (a dense model that large is not
-# the regime we target). MoE starts at 1b: below that the routing overhead is
-# not worth it (200m is dense-only, and doubles as the tiny full-attention
-# variant below).
+# Dense-only at 200m / 1b / 8b: at those scales the MoE sparsity barely pays off
+# (the always-on backbone -- embedding, attention, the dense/shared FFN -- is a
+# large fraction of the model, so "active" stays a high fraction of total).
+# 35b and 120b are MoE-only, and there the routed pool dominates, so each token
+# activates well under 10% of the total (see the active figures below).
 #
 # The two MoE families are deliberately different points in MoE design space:
 #
 #   -moe        LatentMoE (arXiv:2601.18089): experts run in a compressed
 #               d_latent space (a shared compress/expand pair per layer), which
 #               makes each expert cheap enough to run *fine-grained* -- many
-#               small experts (small d_expert) with a high top-k (n_active 8).
+#               small experts (small d_expert) with a high top-k (n_active 6-8).
 #               Each layer owns its own pool.
 #
-#   -moe-shared *Coarse-grained*: few-but-large experts (d_expert ~ the dense
-#               FFN width, 3*d_model) with a low top-k (n_active 2), and one
-#               pool shared across every layer (share_experts, MoEUT-style), no
-#               latent compression. Per token each layer still fires only
-#               n_active experts, so compute stays sparse; the shared pool is
-#               sized to the rung's total, and gets sparser (active << total) as
-#               the rung grows.
+#   -moe-shared *Coarse-grained*: fewer-but-larger experts with a low top-k
+#               (n_active 2), one pool shared across every layer (share_experts,
+#               MoEUT-style), no latent compression.
 #
-# So at a rung, -moe and -moe-shared match on total params but differ on both
-# granularity (fine vs coarse) and sharing (per-layer vs one pool) -- and hence
-# on active params (compare the "active" figures in the comments below).
+# Both MoE families use a narrow backbone with a small dense/shared FFN and a
+# big routed pool, so the always-on part stays small and per-token activation is
+# < 10% of total. -moe and -moe-shared match on total but differ on granularity
+# (fine vs coarse), sharing (per-layer vs one pool) and hence active params.
 #
 # Sizes assume a 128k vocab with an untied lm head (embedding + head together
 # are 256000*d_model params, which dominates the small presets -- 200m is
@@ -67,32 +65,6 @@
     window_size: 128
     layers_per_block: 4
 
-1b-moe: # ~1.0B total / ~0.6B active (LatentMoE, fine-grained, per-layer pools)
-    d_model: 1024
-    n_layers: 20
-    n_heads: 16
-    n_kv_heads: 4
-    vocab_size: 128000
-    window_size: 128
-    layers_per_block: 4
-    n_experts: 64
-    n_active: 8
-    d_expert: 256    # fine-grained: small experts
-    d_latent: 512    # LatentMoE: experts run in a d_model/2 latent space
-
-1b-moe-shared: # ~1.0B total / ~0.9B active (coarse-grained, one shared pool)
-    d_model: 1024
-    n_layers: 20
-    n_heads: 16
-    n_kv_heads: 4
-    vocab_size: 128000
-    window_size: 128
-    layers_per_block: 4
-    n_experts: 56
-    n_active: 2
-    d_expert: 3072   # coarse: full-FFN-width experts (3*d_model)
-    share_experts: true
-
 # --------------------------------------------------------------------------
 # 8B
 # --------------------------------------------------------------------------
@@ -105,86 +77,66 @@
     window_size: 256
     layers_per_block: 4
 
-8b-moe: # ~7.8B total / ~2.5B active (LatentMoE, fine-grained, per-layer pools)
-    d_model: 2048
-    n_layers: 28
-    n_heads: 16
+# --------------------------------------------------------------------------
+# 35B -- MoE only (no dense past 8b). Narrow backbone (d_model 2560) + small
+# dense/shared FFN + a big routed pool, so per-token activation is ~7-10%.
+# --------------------------------------------------------------------------
+35b-moe: # ~35.5B total / ~2.5B active (7.1%) -- LatentMoE, fine-grained
+    d_model: 2560
+    n_layers: 40
+    n_heads: 20
     n_kv_heads: 4
     vocab_size: 128000
-    window_size: 256
-    layers_per_block: 4
-    n_experts: 128
-    n_active: 8
+    window_size: 512
+    layers_per_block: 6
+    d_ffn: 1024      # small always-on dense/shared FFN (keeps active low)
+    n_experts: 530
+    n_active: 6
     d_expert: 512    # fine-grained
-    d_latent: 1024   # LatentMoE latent space (d_model/2)
+    d_latent: 1024   # LatentMoE: experts run in a d_model/2.5 latent space
 
-8b-moe-shared: # ~7.7B total / ~4.1B active (coarse-grained, one shared pool)
-    d_model: 2048
-    n_layers: 28
-    n_heads: 16
+35b-moe-shared: # ~35.5B total / ~3.4B active (9.6%) -- coarse-grained, shared pool
+    d_model: 2560
+    n_layers: 40
+    n_heads: 20
     n_kv_heads: 4
     vocab_size: 128000
-    window_size: 256
-    layers_per_block: 4
-    n_experts: 152
+    window_size: 512
+    layers_per_block: 6
+    d_ffn: 768       # small always-on dense/shared FFN
+    n_experts: 1894
     n_active: 2
-    d_expert: 6144   # coarse: 3*d_model
+    d_expert: 2304   # coarse: ~4.5x the fine variant's experts
     share_experts: true
 
 # --------------------------------------------------------------------------
-# 35B -- MoE only (no dense past 8b)
+# 120B -- MoE only. Narrow backbone (d_model 3584) + small dense/shared FFN +
+# a big routed pool; per-token activation is ~5-7%.
 # --------------------------------------------------------------------------
-35b-moe: # ~35.5B total / ~9.1B active (LatentMoE, fine-grained, per-layer pools)
+120b-moe: # ~118B total / ~6.2B active (5.2%) -- LatentMoE, fine-grained
     d_model: 3584
-    n_layers: 40
+    n_layers: 48
     n_heads: 28
     n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads (28 % 8 != 0)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
-    n_experts: 168
+    d_ffn: 1792      # small always-on dense/shared FFN
+    n_experts: 572
     n_active: 8
     d_expert: 768    # fine-grained
     d_latent: 1792   # LatentMoE latent space (d_model/2)
 
-35b-moe-shared: # ~35.5B total / ~16.5B active (coarse-grained, one shared pool)
+120b-moe-shared: # ~118B total / ~8.1B active (6.8%) -- coarse-grained, shared pool
     d_model: 3584
-    n_layers: 40
+    n_layers: 48
     n_heads: 28
     n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads (28 % 8 != 0)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
-    n_experts: 244
+    d_ffn: 1792      # small always-on dense/shared FFN
+    n_experts: 2948
     n_active: 2
-    d_expert: 10752  # coarse: 3*d_model
-    share_experts: true
-
-# --------------------------------------------------------------------------
-# 120B -- MoE only
-# --------------------------------------------------------------------------
-120b-moe: # ~118B total / ~14.4B active (LatentMoE, fine-grained, per-layer pools)
-    d_model: 4096
-    n_layers: 48
-    n_heads: 32
-    n_kv_heads: 8
-    vocab_size: 128000
-    window_size: 512
-    layers_per_block: 6
-    n_experts: 352
-    n_active: 8
-    d_expert: 1024   # fine-grained
-    d_latent: 2048   # LatentMoE latent space (d_model/2)
-
-120b-moe-shared: # ~118B total / ~25.8B active (coarse-grained, one shared pool)
-    d_model: 4096
-    n_layers: 48
-    n_heads: 32
-    n_kv_heads: 8
-    vocab_size: 128000
-    window_size: 512
-    layers_per_block: 6
-    n_experts: 708
-    n_active: 2
-    d_expert: 12288  # coarse: 3*d_model
+    d_expert: 3584   # coarse: ~4.7x the fine variant's experts (= d_model)
     share_experts: true
