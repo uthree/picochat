@@ -74,7 +74,7 @@
 # --------------------------------------------------------------------------
 # 8B
 # --------------------------------------------------------------------------
-8b: # ~8.3B params (dense; ~7.8B backbone + one MTP head)
+8b: # ~9.3B params (dense; ~7.8B backbone + 3 MTP heads)
     d_model: 4096
     n_layers: 32
     n_heads: 32
@@ -82,13 +82,13 @@
     vocab_size: 128000
     window_size: 256
     layers_per_block: 4
-    n_mtp: 1  # multi-token prediction head (speculative decoding); 8B and up
+    n_mtp: 3  # multi-token prediction heads (draft up to 4 tokens/step); 8B and up
 
 # --------------------------------------------------------------------------
 # 35B -- MoE only (no dense past 8b). Narrow backbone (d_model 2560) + small
 # dense/shared FFN + a big routed pool, so per-token activation is ~7-10%.
 # --------------------------------------------------------------------------
-35b-moe: # ~35.8B total / ~2.5B active (7.0%) -- LatentMoE, fine-grained
+35b-moe: # ~36.5B total / ~2.5B active (6.9%) -- LatentMoE, fine-grained
     d_model: 2560
     n_layers: 40
     n_heads: 20
@@ -101,9 +101,9 @@
     n_active: 6
     d_expert: 512    # fine-grained
     d_latent: 1024   # LatentMoE: experts run in a d_model/2.5 latent space
-    n_mtp: 1         # multi-token prediction head (speculative decoding)
+    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-35b-moe-shared: # ~35.8B total / ~3.4B active (9.5%) -- coarse-grained, shared pool
+35b-moe-shared: # ~36.5B total / ~3.4B active (9.3%) -- coarse-grained, shared pool
     d_model: 2560
     n_layers: 40
     n_heads: 20
@@ -116,13 +116,13 @@
     n_active: 2
     d_expert: 2304   # coarse: ~4.5x the fine variant's experts
     share_experts: true
-    n_mtp: 1         # multi-token prediction head (speculative decoding)
+    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
 # --------------------------------------------------------------------------
 # 120B -- MoE only. Narrow backbone (d_model 3584) + small dense/shared FFN +
 # a big routed pool; per-token activation is ~5-7%.
 # --------------------------------------------------------------------------
-120b-moe: # ~118B total / ~6.2B active (5.2%) -- LatentMoE, fine-grained
+120b-moe: # ~119B total / ~6.2B active (5.2%) -- LatentMoE, fine-grained
     d_model: 3584
     n_layers: 48
     n_heads: 28
@@ -135,9 +135,9 @@
     n_active: 8
     d_expert: 768    # fine-grained
     d_latent: 1792   # LatentMoE latent space (d_model/2)
-    n_mtp: 1         # multi-token prediction head (speculative decoding)
+    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-120b-moe-shared: # ~118B total / ~8.1B active (6.8%) -- coarse-grained, shared pool
+120b-moe-shared: # ~119B total / ~8.1B active (6.8%) -- coarse-grained, shared pool
     d_model: 3584
     n_layers: 48
     n_heads: 28
@@ -150,4 +150,4 @@
     n_active: 2
     d_expert: 3584   # coarse: ~4.7x the fine variant's experts (= d_model)
     share_experts: true
-    n_mtp: 1         # multi-token prediction head (speculative decoding)
+    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
