@@ -1,8 +1,12 @@
-# Stage 1: Mastering basic English grammar.
+# Stage 1: single mixed base-pretraining corpus (trained from scratch).
+# The old "simple stories" and "knowledge (code/textbooks/wikipedia)" stages are
+# merged here -- at this scale the easy-then-hard curriculum split bought little,
+# so the whole mixture trains together. The long-context multilingual stage
+# stays separate (stage 2), where the context length actually changes.
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/stage1
-init_from: null # first stage trains from scratch
+init_from: null # trains from scratch
 
 model:
     size: 1b
@@ -11,28 +15,46 @@ model:
 
 data:
     data_dir: data # joined with each dataset path/val_bin filename below
-    block_size: 512
+    block_size: 1024
 
     datasets:
+        # simple stories (kept in the mix so the model still sees easy prose;
+        # lower these weights if they crowd out the knowledge data)
         - { path: tinystories, weight: 1.0 }
         - { path: children-stories, weight: 1.0 }
+        # knowledge: code + textbooks + wikipedia
+        - { path: tiny-codes, weight: 1.0 }
+        - { path: python-codes, weight: 1.0 }
+        - { path: the-stack-smol, weight: 1.0 }
+        - { path: tiny-textbooks, weight: 1.0 }
+        - { path: tiny-orca-textbooks, weight: 1.0 }
+        - { path: textbooks, weight: 1.0 }
+        - { path: cosmopedia, weight: 1.0 }
+        - { path: wikipedia-en, weight: 1.0 }
     val_bin: # per-dataset validation splits (see configs/base_setup/stage1.yml)
         - tinystories.val
         - children-stories.val
+        - tiny-codes.val
+        - python-codes.val
+        - tiny-textbooks.val
+        - tiny-orca-textbooks.val
+        - textbooks.val
+        - cosmopedia.val
+        - wikipedia-en.val
 optim:
     lr: 1.0e-4
     weight_decay: 0.1
     warmup_steps: 2000
-    max_steps: 20000
+    max_steps: 100000
     # stochastic_k: [4, 8]  # MoE only: sample the router top-k in this inclusive
     # range each step so top-k becomes an inference-time quality/compute dial (set
     # it post-training with picochat.gpt.set_moe_top_k). No-op on a dense model.
 
 trainer:
-    batch_size: 32
-    accumulate: 1 # In the initial stages of training, I want to prioritize the number of parameter updates over accuracy, so I set gradient accumulation to 1.
+    batch_size: 16
+    accumulate: 1 # prioritize update count over per-step accuracy early on
     grad_clip: 1.0
     precision: bf16-mixed
     num_workers: 4
-    val_check_interval: 2500
+    val_check_interval: 5000
     # compile: null # null=auto (compile only where torch.compile is supported); true/false to force

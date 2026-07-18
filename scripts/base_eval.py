@@ -1,7 +1,7 @@
 """Evaluate a picochat checkpoint on multiple-choice benchmarks.
 
     # base (pretrain-only) checkpoint: plain text-continuation scoring
-    python scripts/base_eval.py --checkpoint weights/stage3/last.ckpt
+    python scripts/base_eval.py --checkpoint weights/stage2/last.ckpt
 
     # SFT checkpoint: render each item as a ChatML user turn instead
     python scripts/base_eval.py --checkpoint weights/sft-stage1/last.ckpt --chat

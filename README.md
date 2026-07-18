@@ -38,16 +38,15 @@ training config) and written as sharded token binaries under `data/`:
 ```bash
 uv run scripts/base_setup.py --config configs/base_setup/stage1.yml
 uv run scripts/base_setup.py --config configs/base_setup/stage2.yml
-uv run scripts/base_setup.py --config configs/base_setup/stage3.yml
 ```
 
-### 4. Pretrain (3-stage curriculum)
-The base model trains through a curriculum; stages 2 and 3 warm-start from
-the previous stage's checkpoint (`init_from` in the config):
+### 4. Pretrain (2-stage)
+Stage 1 is the single mixed base corpus (stories + code + textbooks +
+wikipedia); stage 2 broadens to multilingual/web text and extends the context
+length, warm-starting from stage 1's checkpoint (`init_from` in the config):
 ```bash
-uv run scripts/base_train.py --config configs/base_train/stage1.yml  # simple stories
-uv run scripts/base_train.py --config configs/base_train/stage2.yml  # textbooks + wikipedia
-uv run scripts/base_train.py --config configs/base_train/stage3.yml  # multilingual web text
+uv run scripts/base_train.py --config configs/base_train/stage1.yml  # mixed base corpus
+uv run scripts/base_train.py --config configs/base_train/stage2.yml  # multilingual, longer context
 ```
 Interrupted stages resume automatically from `output_dir/last.ckpt`. Training
 curves and generation samples are logged to TensorBoard (`lightning_logs/`).
@@ -92,7 +91,7 @@ Multiple-choice benchmarks (hellaswag, arc_easy, arc_challenge, openbookqa,
 winogrande, boolq) scored by completion log-likelihood:
 ```bash
 # base checkpoints: plain text-continuation scoring
-uv run scripts/base_eval.py --checkpoint weights/stage3/last.ckpt
+uv run scripts/base_eval.py --checkpoint weights/stage2/last.ckpt
 
 # SFT checkpoints: items rendered as ChatML user turns (comparable numbers)
 uv run scripts/base_eval.py --checkpoint weights/sft-stage1/last.ckpt --chat
@@ -153,7 +152,7 @@ several improvements:
 - [Mixture of Experts](https://arxiv.org/abs/2101.03961) with a
   [shared expert](https://arxiv.org/abs/2401.06066) and
   [DeepSeek-V3-style](https://arxiv.org/abs/2412.19437) sigmoid gating
-  (`medium`/`large` presets)
+  (the `-moe` presets)
 - [MosaicBERT-style sequence packing](https://arxiv.org/abs/2312.17482):
   documents are greedy best-fit packed into fixed-length sequences, and
   attention never crosses document boundaries

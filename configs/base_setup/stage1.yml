@@ -3,16 +3,67 @@ output_dir: data
 streaming: false # small datasets: download once, then iterate from local cache
 # Rows are packed to block_size+1 tokens; must match
 # configs/base_train/stage1.yml's data.block_size.
-block_size: 512
+#
+# Stage 1 is the single mixed base-pretraining corpus: the old "simple stories"
+# and "knowledge (code/textbooks/wikipedia)" stages merged into one. At this
+# scale the easy-then-hard curriculum split bought little, so everything trains
+# together (the long-context multilingual stage stays separate as stage 2).
+block_size: 1024
 
 datasets:
+    # --- simple stories (formerly stage 1) ---
     - { preset: tinystories, output: tinystories }
     - { preset: tinystories, output: tinystories.val, split: validation }
     # children-stories has no dedicated split on the Hub; carve 1% of train
-    # off for validation instead (see scripts/base_setup.py expand_val_fraction)
+    # off for validation instead (see scripts/base_setup.py expand_val_fraction).
     - {
           preset: children-stories,
           output: children-stories,
           val_output: children-stories.val,
           val_fraction: 0.01,
+      }
+    # --- knowledge: code + textbooks + wikipedia (formerly stage 2) ---
+    - {
+          preset: tiny-codes,
+          output: tiny-codes,
+          val_output: tiny-codes.val,
+          val_fraction: 0.01,
+      }
+    - {
+          preset: python-codes,
+          output: python-codes,
+          val_output: python-codes.val,
+          val_fraction: 0.01,
+      }
+    # Raw multi-language source code. The full "-xl" smol dump is multi-GB and
+    # exposes no usable size metadata for val_fraction, so stream a fixed slice
+    # as a train-only source (code val coverage comes from tiny/python-codes).
+    # Raw files are large (~20k tokens each), so 5k docs is already ~100M
+    # tokens; raise the limit for a bigger code share.
+    - { preset: the-stack-smol, output: the-stack-smol, streaming: true, limit: 5000 }
+    - { preset: tiny-textbooks, output: tiny-textbooks }
+    - { preset: tiny-textbooks, output: tiny-textbooks.val, split: test }
+    - {
+          preset: tiny-orca-textbooks,
+          output: tiny-orca-textbooks,
+          val_output: tiny-orca-textbooks.val,
+          val_fraction: 0.01,
+      }
+    - {
+          preset: textbooks,
+          output: textbooks,
+          val_output: textbooks.val,
+          val_fraction: 0.05, # only ~1.8k docs total; 1% would be too few to be meaningful
+      }
+    - {
+          preset: cosmopedia,
+          output: cosmopedia,
+          val_output: cosmopedia.val,
+          val_fraction: 0.001, # ~10M docs total; 1% would be an oversized val set
+      }
+    - {
+          preset: wikipedia-en,
+          output: wikipedia-en,
+          val_output: wikipedia-en.val,
+          val_fraction: 0.001, # ~6.4M articles total
       }

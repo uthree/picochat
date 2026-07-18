@@ -5,7 +5,7 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/sft-stage1
-init_from: weights/stage3/last.ckpt # architecture is rebuilt from this checkpoint
+init_from: weights/stage2/last.ckpt # architecture is rebuilt from this checkpoint
 
 # model:
 #     max_seq_len: 8192 # raise to extend context length beyond the checkpoint's
