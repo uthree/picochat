@@ -1,4 +1,4 @@
-output: weights/tokenizer.json
+output: /workspace/weights/tokenizer.json
 vocab_size: 128000
 
 total_chars: 1000000000

@@ -9,8 +9,17 @@ system: "You are a helpful coding assistant."
 tasks: configs/grpo/sample_tasks.jsonl
 
 # Judge for the untested prompts. 'mock' is deterministic (no GPU); switch to
-# 'http' + a vLLM endpoint in production:
-#   judge: { backend: http, base_url: "http://<host>:8001/v1", model: "Qwen/Qwen2.5-7B-Instruct" }
+# 'http' + a vLLM endpoint in production. The http judge grades with a yes/no
+# checklist and scores the fraction answered yes; override `questions` per task
+# family (omit to use the general defaults in picochat/reward.py):
+#   judge:
+#     backend: http
+#     base_url: "http://<host>:8001/v1"
+#     model: "Qwen/Qwen2.5-7B-Instruct"
+#     questions:
+#       - "Does the response directly address what the task asks for?"
+#       - "Is the response's answer or solution correct?"
+#       - "Is the response complete, without leaving the task half-done?"
 judge:
     backend: mock
 

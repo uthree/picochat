@@ -50,22 +50,36 @@ def test_mock_judge_is_deterministic_and_bounded():
 
 
 def test_http_judge_builds_guided_request():
-    # The request shape is pure (no server): guided_choice constrains the reply
-    # to one integer in [0, max_score], and the task/response go in the messages.
-    j = R.HTTPJudge(max_score=10)
-    assert j._extra_body() == {"guided_choice": [str(i) for i in range(11)]}
+    # The request shape is pure (no server): guided_regex forces exactly one
+    # [YN] per checklist question, and the task/response/checklist go in the
+    # messages.
+    j = R.HTTPJudge(questions=("q1?", "q2?", "q3?"))
+    assert j._extra_body() == {"guided_regex": "[YN]{3}"}
     assert R.HTTPJudge(guided=False)._extra_body() == {}
     msgs = j._messages("add two ints", "def add(a,b): return a+b")
     assert msgs[0]["role"] == "system"
     assert "add two ints" in msgs[1]["content"]
+    assert "1. q1?" in msgs[1]["content"] and "3. q3?" in msgs[1]["content"]
 
 
-def test_http_judge_parses_score(monkeypatch):
+def test_http_judge_scores_fraction_of_yes(monkeypatch):
+    # Five-question checklist; three Y -> 3/5. Guided replies are exactly the
+    # letters, and stray whitespace/case doesn't matter.
     async def fake_complete(self, prompt, response):
-        return "7"
+        return "YNYNY"
 
     monkeypatch.setattr(R.HTTPJudge, "_complete", fake_complete)
-    assert asyncio.run(R.HTTPJudge(max_score=10).score("task", "resp")) == 0.7
+    assert asyncio.run(R.HTTPJudge().score("task", "resp")) == 0.6
+
+
+def test_http_judge_parses_unguided_yes_no_words(monkeypatch):
+    # Best-effort parse of a mildly unguided reply: yes/no words start with the
+    # letter we count. Two questions, one yes -> 0.5.
+    async def fake_complete(self, prompt, response):
+        return "1. Yes\n2. No"
+
+    monkeypatch.setattr(R.HTTPJudge, "_complete", fake_complete)
+    assert asyncio.run(R.HTTPJudge(questions=("a?", "b?")).score("t", "r")) == 0.5
 
 
 def test_http_judge_survives_server_error(monkeypatch):

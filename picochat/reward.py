@@ -111,9 +111,24 @@ class JudgeBackend(Protocol):
 
 
 _DEFAULT_RUBRIC = (
-    "You are a strict grader. Rate how well the response solves the task on an "
-    "integer scale from 0 (useless/incorrect) to 10 (fully correct and clean). "
-    "Reply with ONLY the integer."
+    "You are a strict grader. You are given a task, a response, and a numbered "
+    "checklist of yes/no questions. Judge the response against each question in "
+    "order and answer with a single letter -- Y for yes, N for no. Reply with "
+    "ONLY those letters, one per question, no spaces, punctuation, or other text "
+    "(e.g. 'YNYY')."
+)
+
+# A checklist beats a single 0-10 score: each item is a concrete, near-binary
+# judgement, and summing the yeses is far less noisy than asking one model to
+# pick a calibrated integer. These defaults are general (the judge only grades
+# prompts the tests can't reach); override `questions` in config per task family.
+_DEFAULT_QUESTIONS = (
+    "Does the response directly address what the task asks for?",
+    "Is the response's answer or solution correct?",
+    "Is the response complete, without leaving the task half-done?",
+    "If the response includes code, is it valid and runnable (answer Y if it "
+    "includes no code)?",
+    "Is the response clear, well-structured, and free of irrelevant filler?",
 )
 
 
@@ -122,19 +137,22 @@ class HTTPJudge:
     """Score responses via an external open-weight model on an OpenAI-compatible
     endpoint (vLLM/SGLang/Ollama/hosted -- all the same wire format).
 
-    `max_score` sets the rubric's integer range; when the server supports
-    guided decoding (vLLM), `guided` constrains the reply to exactly one of
-    those integers so parsing can't fail.  temperature=0 keeps rewards stable
-    across identical rollouts.  The `AsyncOpenAI` client is created lazily so
-    constructing an HTTPJudge (e.g. from config) never opens a connection.
+    Grading is a yes/no checklist: the judge answers each of `questions` with Y
+    or N, and the score is the fraction answered Y (already in [0, 1]). When the
+    server supports guided decoding (vLLM), `guided` constrains the reply to
+    exactly one [YN] letter per question via a regex, so parsing can't fail;
+    without it, leading Y/N letters are counted best-effort. temperature=0 keeps
+    rewards stable across identical rollouts. The `AsyncOpenAI` client is created
+    lazily so constructing an HTTPJudge (e.g. from config) never opens a
+    connection.
     """
 
     base_url: str = "http://localhost:8001/v1"
     model: str = "Qwen/Qwen2.5-7B-Instruct"
     api_key: str = "dummy"  # vLLM ignores the value
     rubric: str = _DEFAULT_RUBRIC
-    max_score: int = 10
-    guided: bool = True  # send vLLM's guided_choice; harmless if unsupported
+    questions: tuple[str, ...] = _DEFAULT_QUESTIONS
+    guided: bool = True  # send vLLM's guided_regex; harmless if unsupported
     timeout: float = 30.0
     _client: AsyncOpenAI | None = field(default=None, init=False, repr=False)
 
@@ -147,37 +165,48 @@ class HTTPJudge:
         return self._client
 
     def _messages(self, prompt: str, response: str) -> list[dict]:
+        checklist = "\n".join(f"{i}. {q}" for i, q in enumerate(self.questions, 1))
         return [
             {"role": "system", "content": self.rubric},
-            {"role": "user", "content": f"# Task\n{prompt}\n\n# Response\n{response}"},
+            {
+                "role": "user",
+                "content": (
+                    f"# Task\n{prompt}\n\n# Response\n{response}\n\n"
+                    f"# Checklist\n{checklist}"
+                ),
+            },
         ]
 
     def _extra_body(self) -> dict:
-        # vLLM reads guided_choice to constrain the reply to one integer; other
+        # vLLM reads guided_regex to force exactly one [YN] per question; other
         # servers ignore the unknown key.
         if not self.guided:
             return {}
-        return {"guided_choice": [str(i) for i in range(self.max_score + 1)]}
+        return {"guided_regex": f"[YN]{{{len(self.questions)}}}"}
 
     async def _complete(self, prompt: str, response: str) -> str:
         r = await self.client.chat.completions.create(
             model=self.model,
             messages=self._messages(prompt, response),
             temperature=0,
-            max_tokens=6,
+            max_tokens=len(self.questions) + 4,
             extra_body=self._extra_body(),
         )
         return r.choices[0].message.content or ""
 
     async def score(self, prompt: str, response: str) -> float:
+        n = len(self.questions)
+        if n == 0:
+            return 0.0
         try:
             text = await self._complete(prompt, response)
         except Exception:  # server down / API error -> no reward, never crash
             return 0.0
-        m = re.search(r"-?\d+", text)
-        if not m:
-            return 0.0
-        return max(0.0, min(1.0, int(m.group()) / self.max_score))
+        # Count leading Y/N letters (exact when guided; the words yes/no also
+        # start with the right letter for a mildly unguided reply). Missing
+        # answers count as N: score is (# yes) / (# questions).
+        letters = re.findall(r"[YN]", text.upper())[:n]
+        return sum(c == "Y" for c in letters) / n
 
 
 @dataclass
