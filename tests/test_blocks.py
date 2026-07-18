@@ -1,7 +1,6 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
 from picochat.gpt import (
     DepthAttention,
@@ -335,7 +334,7 @@ def test_window_attention_flex_attention_matches_masked_sdpa_on_cuda():
 
     flex_out = attn(x)
 
-    query, key, value = attn._project(x)
+    query, key, value, gate = attn._project(x)
     query, key = attn._rope(query), attn._rope(key)
     mask = attn._window_mask(
         query.shape[-2], key.shape[-2], q_offset=0, k_offset=0, device=query.device
@@ -343,7 +342,7 @@ def test_window_attention_flex_attention_matches_masked_sdpa_on_cuda():
     ref = F.scaled_dot_product_attention(
         query, key, value, attn_mask=mask, enable_gqa=True
     )
-    ref_out = attn.proj_o(rearrange(ref, "b h l d -> b l (h d)"))
+    ref_out = attn._output(ref, gate)
 
     assert torch.allclose(flex_out, ref_out, atol=1e-3)
 
