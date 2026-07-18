@@ -860,28 +860,42 @@ class TransformerLM(nn.Module):
 
     def encode(
         self,
-        x: Tensor,
+        x: Tensor | None = None,
         doc_ids: Tensor | None = None,
         masks: dict[int | None, BlockMask | Tensor] | None = None,
+        inputs_embeds: Tensor | None = None,
     ) -> Tensor:
         # Shared trunk (embed + transformer) up to the final hidden state, before
         # the lm head. doc_ids/masks: see Transformer.forward (sequence packing).
-        return self.transformer(self.embed(x), doc_ids, masks)
+        # `inputs_embeds` (B, L, d_model) bypasses the token embedding so a
+        # caller can splice in non-text embeddings -- e.g. audio soft tokens at
+        # the AUDIO placeholder positions (see picochat.audio); when given, `x`
+        # is ignored.
+        embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
+        return self.transformer(embeds, doc_ids, masks)
 
     def forward(
         self,
-        x: Tensor,
+        x: Tensor | None = None,
         doc_ids: Tensor | None = None,
         masks: dict[int | None, BlockMask | Tensor] | None = None,
+        inputs_embeds: Tensor | None = None,
     ) -> Tensor:
-        return self.lmhead(self.encode(x, doc_ids, masks))
+        return self.lmhead(self.encode(x, doc_ids, masks, inputs_embeds))
 
     def decode(
-        self, x: Tensor, cache: list[Tensor | None] | None = None, pos: int = 0
+        self,
+        x: Tensor | None = None,
+        cache: list[Tensor | None] | None = None,
+        pos: int = 0,
+        inputs_embeds: Tensor | None = None,
     ) -> tuple[Tensor, list[Tensor], int]:
-        x = self.embed(x)
-        x, cache, pos = self.transformer.decode(x, cache, pos)
-        return self.lmhead(x), cache, pos
+        # `inputs_embeds` prefills the cache from spliced embeddings (e.g. an
+        # audio-conditioned prompt) instead of token ids; subsequent decode
+        # steps pass token ids as usual.
+        embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
+        embeds, cache, pos = self.transformer.decode(embeds, cache, pos)
+        return self.lmhead(embeds), cache, pos
 
 
 def estimate_num_params(

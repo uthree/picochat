@@ -27,6 +27,22 @@ EOS_TOKEN = "<|end_of_text|>"  # end of a document / conversation
 IM_START = "<|im_start|>"  # ChatML: start of a turn (followed by "{role}\n")
 IM_END = "<|im_end|>"  # ChatML: end of a turn (the chat stop token)
 
+# Audio (multimodal input), Qwen2-Audio-style: an audio clip is rendered as
+# AUDIO_BOS + AUDIO_TOKEN * n + AUDIO_EOS, where AUDIO_TOKEN is a placeholder
+# whose embedding is replaced at runtime by the audio encoder's soft tokens
+# (see picochat.audio). n = number of ~100ms audio tokens for the clip.
+AUDIO_BOS_TOKEN = "<|audio_bos|>"
+AUDIO_TOKEN = "<|AUDIO|>"
+AUDIO_EOS_TOKEN = "<|audio_eos|>"
+
+# Image (multimodal input), Qwen2-VL-style: an image is rendered as
+# VISION_START + IMAGE_TOKEN * n + VISION_END, IMAGE_TOKEN being the placeholder
+# whose embedding the vision encoder replaces at runtime. Only the tokens are
+# reserved here; the image encoder itself is future work (audio ships first).
+VISION_START_TOKEN = "<|vision_start|>"
+IMAGE_TOKEN = "<|image_pad|>"
+VISION_END_TOKEN = "<|vision_end|>"
+
 NUM_RESERVED_SPECIAL_TOKENS = 16
 SPECIAL_TOKENS = [
     PAD_TOKEN,
@@ -40,6 +56,12 @@ SPECIAL_TOKENS = [
     # reasoning training.
     "<think>",
     "</think>",
+    AUDIO_BOS_TOKEN,
+    AUDIO_TOKEN,
+    AUDIO_EOS_TOKEN,
+    VISION_START_TOKEN,
+    IMAGE_TOKEN,
+    VISION_END_TOKEN,
 ] + [f"<|reserved_token_{n}|>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
 
 
