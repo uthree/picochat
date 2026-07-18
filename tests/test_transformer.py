@@ -156,6 +156,66 @@ def test_transformer_forward_compiles_fullgraph_cuda():
     assert torch.isfinite(out).all()
 
 
+def _dense_packed_masks(doc_ids, window_sizes):
+    # Ground-truth dense causal+document+window masks (mirrors
+    # _packed_attention_mask's CPU/dense branch), built on CPU then moved to the
+    # doc_ids device. Passing these to the eager forward forces every layer down
+    # the masked-SDPA path instead of flex_attention.
+    dc = doc_ids.cpu()
+    idx = torch.arange(dc.shape[-1])
+    masks = {}
+    for ws in window_sizes:
+        m = (idx[:, None] >= idx[None, :]) & (dc[:, :, None] == dc[:, None, :])
+        if ws is not None:
+            m &= idx[None, :] > idx[:, None] - ws
+        masks[ws] = m[:, None].to(doc_ids.device)  # (b, 1, l, l)
+    return masks
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="torch.compile + flex_attention is CUDA-only"
+)
+def test_compiled_flex_forward_matches_reference_sdpa_cuda():
+    # The compiled forward runs windowed/global attention through flex_attention
+    # (a fused Triton kernel); this checks it computes the SAME thing as a
+    # reference masked-SDPA forward. Reference = eager forward fed DENSE masks
+    # (the SDPA path); candidate = torch.compiled forward fed the flex BlockMasks
+    # from packed_masks(). Dense FFN only (no MoE) so the only nontrivial kernel
+    # under comparison is the attention itself.
+    #
+    # NOTE: the sequence length must be a multiple of flex_attention's 128 block
+    # size. Below that, the compiled flex kernel's partial-block handling diverges
+    # from dense SDPA (~0.5 abs), an edge case real training (seq 1k-4k) never
+    # hits; at block-aligned lengths the two agree to ~1e-6. Do not shrink seq
+    # here to speed the test up -- it would fail spuriously, not catch a bug.
+    torch.manual_seed(0)
+    seq = 128
+    model = (
+        Transformer(
+            d_model=128,
+            n_heads=4,  # d_head = 32
+            n_kv_heads=2,  # exercises GQA in both mask paths
+            n_layers=4,
+            layers_per_block=2,  # mixes windowed and global (last-of-block) layers
+            window_size=64,
+        )
+        .cuda()
+        .eval()
+    )
+    x = torch.randn(1, seq, 128, device="cuda")
+    # Two documents packed into the one sequence, so document masking is exercised.
+    doc_ids = torch.tensor([[0] * 50 + [1] * (seq - 50)], device="cuda")
+
+    window_sizes = {layer.attn.window_size for layer in model.layers}
+    with torch.no_grad():
+        reference = model(x, masks=_dense_packed_masks(doc_ids, window_sizes))
+        flex_masks = model.packed_masks(doc_ids)  # BlockMasks on CUDA
+        compiled = torch.compile(model, fullgraph=True)(x, masks=flex_masks)
+    assert torch.allclose(reference, compiled, atol=1e-4, rtol=1e-4), (
+        (reference - compiled).abs().max()
+    )
+
+
 def test_transformer_packed_backward_with_grad_checkpoint():
     model = Transformer(d_model=32, n_heads=4, n_layers=2, grad_checkpoint=True)
     model.train()
