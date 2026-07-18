@@ -17,9 +17,10 @@ datasets:
           val_output: wikipedia-en.val,
           val_fraction: 0.001,
       }
-    - { preset: fineweb-edu, output: fineweb-edu }
-    - { preset: fineweb-edu-ja, output: fineweb-edu-ja }
-    - { preset: fineweb-ja, output: fineweb-ja }
+    # FineWeb datasets are excluded by default because they are massive.
+    #- { preset: fineweb-edu, output: fineweb-edu }
+    #- { preset: fineweb-edu-ja, output: fineweb-edu-ja }
+    #- { preset: fineweb-ja, output: fineweb-ja }
     - { preset: wikipedia-ja, output: wikipedia-ja }
     - { preset: wikipedia-de, output: wikipedia-de }
     - { preset: wikipedia-es, output: wikipedia-es }
@@ -32,3 +33,4 @@ datasets:
     - { preset: wikipedia-el, output: wikipedia-el }
     - { preset: wikipedia-la, output: wikipedia-la }
     - { preset: wikipedia-ms, output: wikipedia-ms }
+    - { preset: wikipedia-th, output: wikipedia-th }

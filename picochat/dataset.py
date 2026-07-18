@@ -75,6 +75,7 @@ TEXT_PRESETS: dict[str, DatasetSpec] = {
     "wikipedia-el": DatasetSpec("wikimedia/wikipedia", "20231101.el"),
     "wikipedia-la": DatasetSpec("wikimedia/wikipedia", "20231101.la"),
     "wikipedia-ms": DatasetSpec("wikimedia/wikipedia", "20231101.ms"),
+    "wikipedia-th": DatasetSpec("wikimedia/wikipedia", "20231101.th"),
     "fineweb-ja": DatasetSpec("HuggingFaceFW/fineweb-2", "jpn_Jpan"),
     # --- Programming
     "tiny-codes": DatasetSpec("nampdn-ai/tiny-codes", text_key="response"),

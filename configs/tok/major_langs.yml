@@ -18,3 +18,4 @@ data:
     - { preset: wikipedia-el, weight: 1 } # Greek
     - { preset: wikipedia-la, weight: 1 } # Latin
     - { preset: wikipedia-ms, weight: 1 } # Malay
+    - { preset: wikipedia-th, weight: 1 } # Thai

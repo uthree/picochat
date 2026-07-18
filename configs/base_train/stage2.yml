@@ -39,5 +39,5 @@ trainer:
     grad_clip: 1.0
     precision: bf16-mixed
     num_workers: 4
-    val_check_interval: 1000
+    val_check_interval: 5000
     # compile: null # null=auto (compile only where torch.compile is supported); true/false to force
