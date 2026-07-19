@@ -352,7 +352,7 @@ def test_window_attention_flex_attention_matches_masked_sdpa_on_cuda():
 # ---------------------------------------------------------------------------
 def test_rope_table_sized_by_max_seq_len():
     attn = SelfAttention(32, 4, max_seq_len=128)
-    # table length is max_seq_len, not rope_base (10000)
+    # table length is max_seq_len, not rope_base
     assert attn.sin.shape[0] == 128
     assert attn.cos.shape[0] == 128
 

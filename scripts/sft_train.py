@@ -56,10 +56,11 @@ def make_dataset(paths: list[str], weights: list[float] | None = None):
 
 # Fields under `model:` that override the checkpoint's own model_config, e.g.
 # to extend context length via continual learning: RoPE's sin/cos tables are
-# non-persistent buffers rebuilt from these at construction time, not part of
-# the checkpoint, so raising them doesn't affect any learned tensor's shape
-# and the plain load_state_dict below still applies cleanly.
-MODEL_OVERRIDES = ("rope_base", "max_seq_len")
+# non-persistent buffers rebuilt from this at construction time, not part of
+# the checkpoint, so raising it doesn't affect any learned tensor's shape
+# and the plain load_state_dict below still applies cleanly. (rope_base is
+# fixed at 1e6, large enough for any context length this project targets.)
+MODEL_OVERRIDES = ("max_seq_len",)
 
 
 def main():
@@ -119,7 +120,7 @@ def main():
     )
 
     # --- model: rebuilt from the pretrained checkpoint's own architecture,
-    # optionally overriding e.g. max_seq_len/rope_base to extend context ---
+    # optionally overriding max_seq_len to extend context ---
     model_overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
     lm, model_config = load_lm_from_checkpoint(
         init_from, vocab_size, overrides=model_overrides

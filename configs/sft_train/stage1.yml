@@ -9,7 +9,7 @@ init_from: weights/stage2/last.ckpt # architecture is rebuilt from this checkpoi
 
 # model:
 #     max_seq_len: 8192 # raise to extend context length beyond the checkpoint's
-#     rope_base: 1000000 # raise alongside max_seq_len (NTK-style RoPE scaling)
+#                       # (RoPE base is fixed at 1e6, no scaling needed)
 
 data:
     data_dir: data/sft # joined with each dataset path/val_path filename below

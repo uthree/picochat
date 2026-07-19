@@ -591,7 +591,7 @@ def load_lm_from_checkpoint(
     ckpt=None,
 ) -> tuple[TransformerLM, dict]:
     """Rebuild a bare TransformerLM from a checkpoint's saved `model_config`,
-    apply `overrides` (e.g. max_seq_len/rope_base for continual learning), load
+    apply `overrides` (e.g. max_seq_len for continual learning), load
     its weights (stripping GPT's `model.` state_dict prefix), and return
     (lm, model_config). Pass an already-loaded `ckpt` dict when several models
     come from one file (GRPO's policy + reference). Used by sft_train/grpo_train;
