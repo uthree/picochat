@@ -144,7 +144,7 @@ kernel, loaded from the Hub via the optional
 ([kernels-community/liger-kernels](https://huggingface.co/kernels-community/liger-kernels)).
 At a 128k vocab the logits tensor is the largest activation of a training
 step; never materializing it roughly halves peak memory (measured on the
-`pico` preset, batch 8 x 1024 tokens, bf16, L4 24GB: 13.1 → 6.8 GiB) at the
+a ≈0.5B model, batch 8 x 1024 tokens, bf16, L4 24GB: 13.1 → 6.8 GiB) at the
 cost of some step time on smaller GPUs (+20% on that L4; the chunked kernel
 re-reads the lm-head weight per chunk). Turn it on when memory-bound -- a
 bigger model, longer context, or a batch that otherwise OOMs -- and leave it
@@ -174,6 +174,10 @@ several improvements:
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
   chat format
 
-Presets (`configs/presets.yml`): `pico` ≈0.5B, `small` ≈1.0B and `base`
-≈1.9B parameters (dense); `medium` ≈7.5B total / 2.6B active and `large`
-≈23B total / 4.9B active (MoE).
+Presets (`configs/presets.yml`), named by total parameter count: `200m`
+≈0.2B, `1b` ≈1.0B and `8b` ≈7.8B (dense); at 35B/120B the ladder is MoE-only,
+each in two variants matched on total params -- `35b-moe` ≈35.5B total / 2.5B
+active and `120b-moe` ≈118B total / 6.2B active (fine-grained LatentMoE,
+per-layer expert pools), `35b-moe-shared` ≈35.5B / 3.4B active and
+`120b-moe-shared` ≈118B / 8.1B active (coarse-grained, one expert pool shared
+across layers).
