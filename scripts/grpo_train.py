@@ -17,8 +17,6 @@ in production, or the deterministic MockJudge for single-GPU verification.
 """
 
 import argparse
-import json
-from pathlib import Path
 
 import lightning as L
 import torch
@@ -27,34 +25,10 @@ from torch.utils.data import DataLoader
 
 from picochat import sandbox
 from picochat.config import load_config
-from picochat.grpo import GRPOModule, grpo_collate
-from picochat.reward import CodeTask, HTTPJudge, MockJudge, RewardModel, RewardConfig
+from picochat.grpo import GRPOModule, grpo_collate, load_tasks
+from picochat.reward import HTTPJudge, MockJudge, RewardModel, RewardConfig
 from picochat.trainer import load_lm_from_checkpoint
-from picochat.tokenizer import PAD_TOKEN, load_tokenizer, render_chat_prompt
-
-
-def load_tasks(path: str, tokenizer, system: str | None) -> list[dict]:
-    """Read the JSONL task file into GRPO samples: prompt token ids (a ChatML
-    user turn, optionally behind a system turn), the raw prompt text (for the
-    judge), and an optional CodeTask (the verifiable test)."""
-    samples = []
-    for line in Path(path).read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        obj = json.loads(line)
-        messages = ([{"role": "system", "content": system}] if system else []) + [
-            {"role": "user", "content": obj["prompt"]}
-        ]
-        task = CodeTask(test_code=obj["test"]) if obj.get("test") else None
-        samples.append(
-            {
-                "prompt_ids": render_chat_prompt(messages, tokenizer),
-                "prompt_str": obj["prompt"],
-                "task": task,
-            }
-        )
-    return samples
+from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
 
 def build_judge(cfg: dict):

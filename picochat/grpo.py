@@ -34,6 +34,8 @@ KL -- is unchanged. `max_turns == 1` is exactly the original single-turn path.
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 import lightning as L
 import torch
@@ -49,8 +51,34 @@ from picochat.reward import (
     RewardModel,
     trajectory_reward,
 )
-from picochat.tokenizer import EOS_TOKEN, IM_END, render_turn
+from picochat.tokenizer import EOS_TOKEN, IM_END, render_chat_prompt, render_turn
 from picochat.trainer import LMTrainerMixin
+
+
+def load_tasks(path: str, tokenizer, system: str | None) -> list[dict]:
+    """Read a JSONL task file ({"prompt": ..., "test": ...?} per line, see
+    scripts/grpo_train.py) into samples: prompt token ids (a ChatML user turn,
+    optionally behind a system turn), the raw prompt text (for the judge), and
+    an optional CodeTask (the verifiable test). Shared by GRPO training and the
+    generative eval (scripts/code_eval.py), so both read the same task format."""
+    samples = []
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        obj = json.loads(line)
+        messages = ([{"role": "system", "content": system}] if system else []) + [
+            {"role": "user", "content": obj["prompt"]}
+        ]
+        task = CodeTask(test_code=obj["test"]) if obj.get("test") else None
+        samples.append(
+            {
+                "prompt_ids": render_chat_prompt(messages, tokenizer),
+                "prompt_str": obj["prompt"],
+                "task": task,
+            }
+        )
+    return samples
 
 
 @torch.no_grad()

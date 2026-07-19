@@ -105,6 +105,19 @@ uv run scripts/base_eval.py --checkpoint weights/sft-stage1/last.ckpt --chat
 `--limit N` caps the examples per task for a quick smoke run and
 `--tasks a,b` selects a subset.
 
+Generative pass@1 on verifiable code tasks -- the model writes code and the
+reply is executed against each task's unit tests in the isolation sandbox.
+This is what GRPO post-training optimizes, so run it on the checkpoints
+before and after `grpo_train.py` (same JSONL task format) to measure what the
+RL stage bought:
+```bash
+uv run scripts/code_eval.py --checkpoint weights/grpo/last.ckpt \
+    --tasks configs/grpo/sample_tasks.jsonl
+```
+Decoding is greedy by default (deterministic; add `--temperature` etc. to
+sample instead), `--limit N` caps the task count, and `--output results.json`
+writes the per-task records.
+
 ### Tests
 ```bash
 uv run pytest
@@ -132,7 +145,7 @@ A flat package, one file per concern (following
 | `picochat/audio.py` | soft-token audio input path (Qwen-style, for multimodal experiments) |
 | `picochat/kernels.py` | optional [HF `kernels`](https://github.com/huggingface/kernels) integration with plain-PyTorch fallback (see below) |
 | `picochat/api.py` | OpenAI-compatible Chat Completions endpoints |
-| `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `grpo_train` → `base_eval`/`chat`/`api` |
+| `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `grpo_train` → `base_eval`/`code_eval`/`chat`/`api` |
 
 ## Performance
 Training compiles the model with `torch.compile` (FlexAttention fuses the
@@ -169,6 +182,12 @@ several improvements:
 - [MosaicBERT-style sequence packing](https://arxiv.org/abs/2312.17482):
   documents are greedy best-fit packed into fixed-length sequences, and
   attention never crosses document boundaries
+- [Multi-token prediction](https://arxiv.org/abs/2404.19737) heads (`n_mtp`,
+  the 8b+ presets): lightweight extra heads sharing the lm head
+  (Medusa-style), trained as an auxiliary loss and reused for self-speculative
+  decoding -- greedy generation (`generate()` at temperature 0) automatically
+  drafts and verifies several tokens per forward, with a token stream
+  identical to plain greedy decoding
 - [Muon](https://kellerjordan.github.io/posts/muon/) optimizer for the hidden
   matrices, AdamW for embeddings/heads
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
