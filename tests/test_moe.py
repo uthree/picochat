@@ -72,11 +72,11 @@ def test_moe_bias_frozen_in_eval():
     assert torch.equal(moe.expert_bias, before)  # no drift outside training
 
 
-def test_moe_pending_delta_not_in_state_dict():
+def test_moe_pending_load_not_in_state_dict():
     # the staging buffer is per-step scratch, not persistent state
     m = _moe_transformer(grad_checkpoint=False)
     keys = m.state_dict().keys()
-    assert not any(k.endswith("_pending_bias_delta") for k in keys)
+    assert not any(k.endswith("_pending_load") for k in keys)
     assert any(k.endswith("expert_bias") for k in keys)  # the real buffer persists
 
 

@@ -148,6 +148,16 @@ A flat package, one file per concern (following
 | `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `grpo_train` → `base_eval`/`code_eval`/`chat`/`api` |
 
 ## Performance
+Multi-GPU (single node): pass `--devices N` to a training script to run DDP.
+Configs stay written for one GPU -- lr/max_steps are linear-scaled by the
+device count automatically -- while each rank draws its own seeded IID sample
+stream (`seed` in the config, default 42), gradient accumulation syncs
+gradients once per cycle instead of per microbatch, and the MoE
+load-balancing bias follows the global batch's expert load. `--strategy fsdp`
+is accepted but untested; the default Muon optimizer needs whole 2D weight
+matrices, which FSDP's flat sharding breaks, so sharded training of the 8b+
+presets remains future work.
+
 Training compiles the model with `torch.compile` (FlexAttention fuses the
 sliding-window/packed-document attention). On top of that,
 `trainer.fused_loss: true` in a stage config folds the lm-head matmul into

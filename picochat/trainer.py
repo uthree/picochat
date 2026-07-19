@@ -20,6 +20,7 @@ global_step note there).
 """
 
 import math
+from contextlib import nullcontext
 
 import lightning as L
 import tiktoken
@@ -28,6 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+from torch.nn.parallel import DistributedDataParallel
 
 from picochat.gpt import TransformerLM, build_lm
 from picochat.kernels import (
@@ -135,10 +137,26 @@ class LMTrainerMixin:
         backward, then the optimizer/LR-schedule step (see _optimizer_step), and
         log train_loss plus the progress-bar loss. Subclasses compute `loss`
         their own way and may log extra metrics on top."""
-        (loss / self.accumulate).backward()
+        with self._grad_sync_context(batch_idx):
+            (loss / self.accumulate).backward()
         self._optimizer_step(batch_idx)
         self.log("train_loss", loss)
         self.log("loss", loss, prog_bar=True, logger=False)  # for progress bar
+
+    def _grad_sync_context(self, batch_idx: int):
+        """DDP all-reduces gradients on every backward, but while accumulating
+        microbatches only the cycle's last backward needs the reduction --
+        grads keep accumulating locally either way, and _optimizer_step skips
+        the non-boundary batches. Suppress the redundant all-reduces with
+        DDP's no_sync() so an `accumulate: k` cycle pays for one gradient
+        sync, not k. A no-op outside DDP (single device, or no Trainer)."""
+        if (batch_idx + 1) % self.accumulate == 0:
+            return nullcontext()
+        trainer = getattr(self, "_trainer", None)
+        model = getattr(trainer.strategy, "model", None) if trainer else None
+        if isinstance(model, DistributedDataParallel):
+            return model.no_sync()
+        return nullcontext()
 
     def _embedding_param_ids(self) -> set[int]:
         """ids of the embedding parameters -- excluded from weight decay and,

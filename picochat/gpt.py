@@ -244,12 +244,12 @@ class MixtureOfExperts(nn.Module):
         # training step toward under-loaded experts. Not a Parameter -- no
         # gradient, no loss term, just a running buffer.
         self.register_buffer("expert_bias", torch.zeros(n_experts))
-        # The load-balancing update is *staged* here in forward and applied once
-        # by Transformer.forward, outside any gradient-checkpoint boundary --
-        # see forward() / apply_bias_update(). Non-persistent: derived per-step,
-        # not part of the checkpointed state.
+        # The per-expert load counts are *staged* here in forward and turned
+        # into a bias update once by Transformer.forward, outside any
+        # gradient-checkpoint boundary -- see forward() / apply_bias_update().
+        # Non-persistent: derived per-step, not part of the checkpointed state.
         self.register_buffer(
-            "_pending_bias_delta", torch.zeros(n_experts), persistent=False
+            "_pending_load", torch.zeros(n_experts), persistent=False
         )
 
     def forward(self, x: Tensor, no_drop: bool = False) -> Tensor:
@@ -300,15 +300,15 @@ class MixtureOfExperts(nn.Module):
         dest = torch.where(keep, pair_expert * capacity + slot, n_slots)
 
         if self.training:
-            # Stage the load-balancing delta rather than applying it here. Under
-            # gradient checkpointing this forward runs twice (once for real, once
-            # recomputed in backward); staging into a buffer is idempotent, and
-            # Transformer.forward applies it exactly once outside the checkpoint.
+            # Stage the raw load counts rather than updating the bias here.
+            # Under gradient checkpointing this forward runs twice (once for
+            # real, once recomputed in backward); staging into a buffer is
+            # idempotent, and Transformer.forward turns it into exactly one
+            # bias update outside the checkpoint (where the counts are also
+            # summed across DDP ranks -- see apply_bias_update).
             with torch.no_grad():
-                load = counts.sum(0).float()  # tokens routed to each expert
-                self._pending_bias_delta.copy_(
-                    self.bias_update_rate * torch.sign(load.mean() - load)
-                )
+                # tokens routed to each expert
+                self._pending_load.copy_(counts.sum(0).float())
 
         # Dispatch pairs into per-expert buffers, run the expert SwiGLU, combine.
         # With d_latent set (LatentMoE), dispatch, expert computation and the
@@ -336,11 +336,20 @@ class MixtureOfExperts(nn.Module):
 
     @torch.no_grad()
     def apply_bias_update(self) -> None:
-        # Apply the load-balancing delta staged by the most recent forward (see
-        # forward). Called by Transformer.forward once per step, outside the
-        # gradient-checkpoint boundary, so the update lands exactly once whether
-        # or not the layer was recomputed in backward.
-        self.expert_bias += self._pending_bias_delta
+        # Turn the load counts staged by the most recent forward into one bias
+        # step toward under-loaded experts. Called by Transformer.forward once
+        # per step, outside the gradient-checkpoint boundary, so the update
+        # lands exactly once whether or not the layer was recomputed in
+        # backward. Under DDP the counts are summed across ranks first: the
+        # bias then chases the *global* batch's load (as DeepSeek-V3 does) and
+        # stays identical on every rank instead of following rank 0's local
+        # batch only (DDP broadcasts buffers from rank 0 each forward, which
+        # would silently discard the other ranks' updates otherwise).
+        load = self._pending_load
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            load = load.clone()
+            torch.distributed.all_reduce(load)
+        self.expert_bias += self.bias_update_rate * torch.sign(load.mean() - load)
 
 
 class SelfAttention(nn.Module):
