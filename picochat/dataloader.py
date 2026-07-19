@@ -345,12 +345,9 @@ class UniformIndexSampler(Sampler[int]):
 
 
 class PretrainDataModule(L.LightningDataModule):
-    """Wraps train/val datasets with a plain `batch_size` attribute.
-
-    Lightning's Tuner rewrites `batch_size` in place and rebuilds the
-    dataloaders from it (see scripts/base_train.py's auto batch-size search), so
-    the dataloaders must be built from this attribute rather than fixed at
-    construction time.
+    """LightningDataModule over a train dataset and an optional val dataset,
+    used by both the pretraining and SFT training scripts (the datasets differ,
+    the loader/sampler wiring is the same).
 
     Multi-GPU: the Trainer must be built with `use_distributed_sampler=False`
     (the training scripts do this). Lightning's default would wrap the chunked

@@ -6,9 +6,15 @@ from torch.utils.data import Dataset
 
 from picochat.dataloader import PretrainDataModule
 from picochat.dataset import (
+    CHAT_PRESETS,
     TEXT_PRESETS,
+    DatasetSpec,
+    Mixture,
     chat_spec_from_entry,
     holdout_splits,
+    iter_mixture,
+    iter_texts,
+    resolve_text_spec,
     spec_from_entry,
 )
 
@@ -362,3 +368,87 @@ def test_holdout_splits_produces_split_strings_datasets_can_parse():
     train_split, val_split = holdout_splits("train", 0.0005, total_examples=6_407_814)
     assert _SUB_SPEC_RE.match(train_split)
     assert _SUB_SPEC_RE.match(val_split)
+
+
+# ---------------------------------------------------------------------------
+# resolve_text_spec (CLI --preset/--dataset resolution)
+# ---------------------------------------------------------------------------
+def test_resolve_text_spec_preset_returns_a_copy():
+    name = next(iter(TEXT_PRESETS))
+    spec = resolve_text_spec(name, None)
+    assert spec == TEXT_PRESETS[name]
+    assert spec is not TEXT_PRESETS[name]
+    # base_setup.py's --split override mutates the returned spec; the shared
+    # preset must stay untouched
+    original = TEXT_PRESETS[name].split
+    spec.split = "mutated"
+    assert TEXT_PRESETS[name].split == original
+
+
+def test_resolve_text_spec_inline_and_defaults():
+    spec = resolve_text_spec(None, "repo:cfg:val:body")
+    assert (spec.path, spec.name, spec.split, spec.text_key) == (
+        "repo",
+        "cfg",
+        "val",
+        "body",
+    )
+    # omitted segments fall back to defaults
+    spec = resolve_text_spec(None, "repo")
+    assert (spec.name, spec.split, spec.text_key) == (None, "train", "text")
+
+
+def test_resolve_text_spec_errors():
+    with pytest.raises(SystemExit):
+        resolve_text_spec("no-such-preset", None)
+    with pytest.raises(SystemExit):
+        resolve_text_spec(None, None)
+
+
+def test_chat_spec_from_entry_split_override_copies():
+    name = next(iter(CHAT_PRESETS))
+    original = CHAT_PRESETS[name].split
+    spec = chat_spec_from_entry({"preset": name, "split": "held-out"})
+    assert spec.split == "held-out"
+    assert CHAT_PRESETS[name].split == original  # preset untouched
+    with pytest.raises(SystemExit):
+        chat_spec_from_entry({})
+
+
+# ---------------------------------------------------------------------------
+# iter_texts / iter_mixture character budgeting (drives tokenizer byte
+# balancing); load_dataset is faked so no network is touched
+# ---------------------------------------------------------------------------
+def test_iter_texts_max_chars_includes_budget_crossing_doc(monkeypatch):
+    texts = ["aaaa", "bbbb", "cccc"]
+    monkeypatch.setattr(
+        "picochat.dataset.load_dataset",
+        lambda *a, **k: [{"text": t} for t in texts],
+    )
+    spec = DatasetSpec("fake")
+    # yield-then-check: the doc that crosses the budget is still yielded
+    assert list(iter_texts(spec, max_chars=5)) == ["aaaa", "bbbb"]
+    # no budget -> everything (empty/whitespace-only docs are skipped)
+    assert list(iter_texts(spec)) == texts
+
+
+def test_iter_texts_skips_empty_docs(monkeypatch):
+    monkeypatch.setattr(
+        "picochat.dataset.load_dataset",
+        lambda *a, **k: [{"text": "x"}, {"text": ""}, {"text": "  "}, {"text": "y"}],
+    )
+    assert list(iter_texts(DatasetSpec("fake"))) == ["x", "y"]
+
+
+def test_iter_mixture_budgets_chars_per_source(monkeypatch):
+    monkeypatch.setattr(
+        "picochat.dataset.load_dataset",
+        lambda *a, **k: [{"text": "x" * 10} for _ in range(100)],
+    )
+    mix = Mixture(
+        specs=[DatasetSpec("a"), DatasetSpec("b")],
+        weights=[0.75, 0.25],
+    )
+    got = list(iter_mixture(mix, total_chars=80))
+    # source a reads 0.75*80=60 chars -> 6 docs; source b 20 chars -> 2 docs
+    assert len(got) == 8

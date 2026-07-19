@@ -195,7 +195,7 @@ def train_tokenizer(
     vocab_size: int = 32000,
     name: str = "tokenizer",
     save_as: os.PathLike = "tokenizer.json",
-    special_tokens: list[str] | None = None,
+    special_tokens: list[str] = SPECIAL_TOKENS,
 ):
     tokenizer = rustbpe.Tokenizer()
     tokenizer.train_from_iterator(

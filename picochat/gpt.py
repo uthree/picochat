@@ -1,8 +1,8 @@
 """The picochat model (nanochat-style): the building blocks (norm, RoPE, SwiGLU,
 MoE, gated attention, depth-attention residuals) up through TransformerLM. The
 scale-ladder presets and the build_lm factory live in presets.py, the parameter
-estimator in param_estimate.py (both re-exported here for back-compat); the
-LightningModules that train it live in trainer.py.
+estimator in param_estimate.py; the LightningModules that train it live in
+trainer.py.
 """
 
 import math
@@ -951,9 +951,9 @@ class TransformerLM(nn.Module):
         # Shared trunk (embed + transformer) up to the final hidden state, before
         # the lm head. doc_ids/masks: see Transformer.forward (sequence packing).
         # `inputs_embeds` (B, L, d_model) bypasses the token embedding so a
-        # caller can splice in non-text embeddings -- e.g. audio soft tokens at
-        # the AUDIO placeholder positions (see picochat.audio); when given, `x`
-        # is ignored.
+        # caller can splice in non-text embeddings -- e.g. audio soft tokens
+        # scattered over placeholder positions (see
+        # picochat.audio.scatter_audio_embeds); when given, `x` is ignored.
         embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
         return self.transformer(embeds, doc_ids, masks)
 
@@ -1022,15 +1022,3 @@ def moe_modules(model: nn.Module) -> list[MixtureOfExperts]:
     return [m for m in model.modules() if isinstance(m, MixtureOfExperts)]
 
 
-# The parameter-count estimators and the preset/build helpers live in their own
-# modules (model definition vs. sizing vs. config glue); re-exported here so
-# `from picochat.gpt import build_lm, MODEL_PRESETS, estimate_num_params` keeps
-# working across the codebase.
-from picochat.param_estimate import estimate_num_params  # noqa: E402
-from picochat.presets import (  # noqa: E402
-    MODEL_PRESETS,
-    PRESETS_FILE,
-    build_lm,
-    estimate_preset_params,
-    load_presets,
-)

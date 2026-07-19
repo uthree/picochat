@@ -265,3 +265,15 @@ def test_reference_excluded_from_state_dict_and_optimizer():
     (opt,) = module.configure_optimizers()
     opt_params = {id(p) for g in opt.param_groups for p in g["params"]}
     assert all(id(p) not in opt_params for p in module.reference.parameters())
+
+
+def test_rollout_with_exhausted_budget_returns_empty_responses():
+    # A prompt that already fills max_seq_len leaves no token budget: every
+    # rollout must come back empty instead of decoding past the RoPE range.
+    m = _model().eval()
+    cfg = SamplingConfig(temperature=1.0, max_new_tokens=6)
+    prompt = [3, 4, 5]
+    resp = grpo.rollout(
+        m, prompt, group_size=3, cfg=cfg, stop_ids=set(), max_seq_len=len(prompt)
+    )
+    assert resp == [[], [], []]

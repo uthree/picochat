@@ -4,10 +4,13 @@ than silently training differently, and when the kernel is genuinely usable
 the fused loss must match the plain one."""
 
 import copy
+import sys
+import types
 
 import pytest
 import torch
 
+import picochat.kernels as K
 from picochat.gpt import TransformerLM
 from picochat.kernels import fused_linear_cross_entropy_available
 from picochat.trainer import GPT, SFTModule
@@ -64,3 +67,22 @@ def test_fused_loss_matches_plain_loss_on_cuda():
         plain.model.named_parameters(), fused.model.named_parameters()
     ):
         assert torch.allclose(p1.grad, p2.grad, atol=1e-4), name
+
+
+def test_hub_fetch_failure_warns_and_reports_unavailable(monkeypatch):
+    # CUDA present, `kernels` importable, but the Hub fetch fails (offline and
+    # uncached): _liger must warn once and resolve to "not available".
+    fake = types.ModuleType("kernels")
+
+    def get_kernel(repo, version):
+        raise RuntimeError("offline")
+
+    fake.get_kernel = get_kernel
+    monkeypatch.setitem(sys.modules, "kernels", fake)
+    monkeypatch.setattr(K.torch.cuda, "is_available", lambda: True)
+    K._liger.cache_clear()
+    try:
+        with pytest.warns(UserWarning, match="falling back to the plain loss"):
+            assert K.fused_linear_cross_entropy_available() is False
+    finally:
+        K._liger.cache_clear()  # drop the poisoned probe for later tests

@@ -78,7 +78,10 @@ def test_mtp_low_rank_head_is_cheaper():
     # low-rank heads factor the d_model transform through a bottleneck.
     full = _model(50, n_mtp=2)
     low = _model(50, n_mtp=2, mtp_rank=4)
-    n = lambda lm: sum(p.numel() for h in lm.mtp_heads for p in h.parameters())
+
+    def n(lm):
+        return sum(p.numel() for h in lm.mtp_heads for p in h.parameters())
+
     assert n(low) < n(full)
 
 

@@ -7,6 +7,7 @@ shape and drive the fallback path end-to-end."""
 import subprocess
 import sys
 import tempfile
+import warnings
 
 import pytest
 
@@ -98,3 +99,19 @@ def test_run_raises_on_timeout():
                 work_dir=tmp,
                 timeout=1,
             )
+
+
+def test_auto_mode_warns_once_on_bwrap_fallback(monkeypatch, tmp_path):
+    # auto + no bubblewrap: the first run soft-falls back to the hardened
+    # subprocess with a RuntimeWarning; the latch keeps later runs quiet.
+    monkeypatch.setattr(sandbox, "bwrap_works", lambda: False)
+    monkeypatch.setattr(sandbox, "MODE", "auto")
+    monkeypatch.setattr(sandbox, "_warned_fallback", False)
+    argv = [sys.executable, "-c", "print('ok')"]
+    with pytest.warns(RuntimeWarning, match="bubblewrap sandbox unavailable"):
+        result = sandbox.run(argv, str(tmp_path), timeout=30)
+    assert result.stdout.strip() == "ok"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        sandbox.run(argv, str(tmp_path), timeout=30)
+    assert not [w for w in caught if w.category is RuntimeWarning]

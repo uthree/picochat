@@ -42,7 +42,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from picochat.engine import SamplingConfig, sample
+from picochat.engine import SamplingConfig, chat_stop_ids, sample
 from picochat.gpt import TransformerLM
 from picochat.reward import (
     AgentRewardConfig,
@@ -51,7 +51,7 @@ from picochat.reward import (
     RewardModel,
     trajectory_reward,
 )
-from picochat.tokenizer import EOS_TOKEN, IM_END, render_chat_prompt, render_turn
+from picochat.tokenizer import render_chat_prompt, render_turn
 from picochat.trainer import LMTrainerMixin
 
 
@@ -379,10 +379,7 @@ class GRPOModule(LMTrainerMixin, L.LightningModule):
             if self.tokenizer is None:
                 self._stop_ids = set()
             else:
-                self._stop_ids = {
-                    self.tokenizer.encode_single_token(IM_END),
-                    self.tokenizer.encode_single_token(EOS_TOKEN),
-                }
+                self._stop_ids = chat_stop_ids(self.tokenizer)
         return self._stop_ids
 
     def _score(

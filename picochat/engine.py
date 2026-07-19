@@ -66,6 +66,16 @@ class SamplingConfig:
         )
 
 
+def chat_stop_ids(tokenizer: Encoding) -> set[int]:
+    """The token ids that end a generated turn: <|im_end|> (the ChatML stop
+    token) and <|end_of_text|>. Shared by generate/generate_speculative and
+    GRPO rollouts."""
+    return {
+        tokenizer.encode_single_token(IM_END),
+        tokenizer.encode_single_token(EOS_TOKEN),
+    }
+
+
 def sample(logits: Tensor, cfg: SamplingConfig) -> Tensor:
     """logits: (B, V) -> next token ids (B, 1). top-k then top-p filtering,
     both optional; temperature <= 0 short-circuits to greedy."""
@@ -77,10 +87,11 @@ def sample(logits: Tensor, cfg: SamplingConfig) -> Tensor:
         logits = logits.masked_fill(logits < threshold, float("-inf"))
     if cfg.top_p is not None and cfg.top_p < 1.0:
         sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
-        cum = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+        probs = torch.softmax(sorted_logits, dim=-1)
+        cum = probs.cumsum(dim=-1)
         # Drop tokens once the mass *before* them already reaches top_p, so
         # the most probable token always survives.
-        drop = (cum - torch.softmax(sorted_logits, dim=-1)) >= cfg.top_p
+        drop = (cum - probs) >= cfg.top_p
         sorted_logits = sorted_logits.masked_fill(drop, float("-inf"))
         logits = torch.full_like(logits, float("-inf")).scatter(
             -1, sorted_idx, sorted_logits
@@ -106,7 +117,7 @@ def generate(
     `max_seq_len` is the model's positional range (its RoPE tables): decoding
     past it asserts, so the budget is capped to stop generation early instead.
     The caller is responsible for a prompt that already fits (see
-    ChatApp._build_prompt / picochat.tasks.encode_choice).
+    ChatApp._build_prompt in scripts/chat.py).
 
     Greedy decoding (temperature <= 0) on a model with MTP heads routes through
     generate_speculative: the emitted stream is identical (every draft is
@@ -124,10 +135,7 @@ def generate(
         if budget <= 0:
             return
 
-    stop_ids = {
-        tokenizer.encode_single_token(IM_END),
-        tokenizer.encode_single_token(EOS_TOKEN),
-    }
+    stop_ids = chat_stop_ids(tokenizer)
 
     x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     logits, cache, pos = model.decode(x)
@@ -185,10 +193,7 @@ def generate_speculative(
         budget = min(budget, max_seq_len - len(prompt_ids))
         if budget <= 0:
             return
-    stop_ids = {
-        tokenizer.encode_single_token(IM_END),
-        tokenizer.encode_single_token(EOS_TOKEN),
-    }
+    stop_ids = chat_stop_ids(tokenizer)
 
     # `cache_margin=k` keeps k extra keys per windowed layer so the cache can be
     # rolled back past up to k rejected drafts and still hold a full window.
@@ -245,7 +250,8 @@ def resolve_device(spec: str | None) -> torch.device:
 
 def add_sampling_args(parser, *, temperature: float = 0.8, temp_help: str = "0 -> greedy decoding") -> None:
     """Add the shared --temperature/--top-k/--top-p/--max-new-tokens flags to an
-    argparse parser (used by chat.py and api.py); pair with sampling_from_args."""
+    argparse parser (used by chat.py, api.py and code_eval.py); pair with
+    sampling_from_args."""
     parser.add_argument("--temperature", type=float, default=temperature, help=temp_help)
     parser.add_argument("--top-k", type=int, default=50, help="0 -> disabled")
     parser.add_argument("--top-p", type=float, default=1.0, help="1.0 -> disabled")

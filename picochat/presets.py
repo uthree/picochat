@@ -3,8 +3,7 @@
 Config-loading / factory glue kept out of gpt.py (which is just the model
 definition): the {size: hyperparameters} presets live in configs/presets.yml so
 they sit with the other recipes, and `build_lm` / `estimate_preset_params` turn
-a preset name into a model / a parameter count. Re-exported from gpt.py for
-back-compat, so `from picochat.gpt import build_lm, MODEL_PRESETS` still works.
+a preset name into a model / a parameter count.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from picochat.gpt import TransformerLM
 from picochat.param_estimate import estimate_num_params
 
 # Scale ladder: total-param rungs 200m/1b/8b/35b/120b, each crossed with a
@@ -53,8 +53,6 @@ def build_lm(
     """Build a TransformerLM from a preset name. vocab_size defaults to the
     preset's recommended value; pass it explicitly (e.g. the tokenizer's actual
     vocab) to override. Any other field can be overridden via overrides."""
-    from picochat.gpt import TransformerLM  # lazy: avoid a gpt<->presets cycle
-
     cfg = _resolve_preset(size, vocab_size, **overrides)
     return TransformerLM(max_seq_len=max_seq_len, **cfg)
 

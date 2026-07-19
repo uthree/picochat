@@ -1,13 +1,9 @@
 import pytest
 import torch
 
-from picochat.gpt import (
-    MODEL_PRESETS,
-    TransformerLM,
-    build_lm,
-    estimate_num_params,
-    estimate_preset_params,
-)
+from picochat.gpt import TransformerLM
+from picochat.param_estimate import estimate_num_params
+from picochat.presets import MODEL_PRESETS, build_lm, estimate_preset_params
 
 
 # ---------------------------------------------------------------------------
@@ -306,3 +302,24 @@ def test_estimate_preset_active_params_smaller_than_total():
         if "n_experts" in MODEL_PRESETS[size]:
             # every preset is a MoE model, so active is a strict subset
             assert 0 < active < total
+
+
+def test_estimate_active_params_shared_latent_bank():
+    # share_experts + d_latent together: the bank's experts live in the latent
+    # io dimension, and only n_layers * n_active of them count as active.
+    cfg = dict(
+        vocab_size=64,
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        n_experts=32,
+        d_expert=16,
+        n_active=2,
+        d_latent=8,
+        share_experts=True,
+    )
+    total = estimate_num_params(**cfg)
+    active = estimate_num_params(**cfg, active_only=True)
+    # inactive experts: 32 - min(n_layers * n_active, 32) = 28, each
+    # 3 matrices of d_expert x d_latent
+    assert total - active == 28 * 3 * 16 * 8

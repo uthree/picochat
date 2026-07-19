@@ -173,13 +173,15 @@ def resolve_text_spec(preset: str | None, dataset: str | None) -> DatasetSpec:
     """Resolve a DatasetSpec from CLI arguments.
 
     Either --preset <name> or --dataset "path[:name[:split[:text_key]]]".
+    Returns a copy, so callers may mutate it (e.g. base_setup.py's --split
+    override) without corrupting the shared TEXT_PRESETS entry.
     """
     if preset is not None:
         if preset not in TEXT_PRESETS:
             raise SystemExit(
                 f"unknown preset '{preset}'. choices: {', '.join(TEXT_PRESETS)}"
             )
-        return TEXT_PRESETS[preset]
+        return replace(TEXT_PRESETS[preset])
     if dataset is not None:
         path, *rest = dataset.split(":")
         name = rest[0] if len(rest) > 0 and rest[0] else None

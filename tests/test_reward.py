@@ -167,3 +167,23 @@ def test_score_group_runs_concurrently():
     scores = asyncio.run(rm.score_group(prompts, responses, tasks))
     assert len(scores) == 4
     assert scores[0] > scores[1]  # passing rollout out-rewards failing one
+
+
+def test_judge_when_tested_blends_judge_into_tested_tasks():
+    class HalfJudge:
+        async def score(self, prompt, response):
+            return 0.5
+
+    rm = R.RewardModel(judge=HalfJudge(), cfg=R.RewardConfig(judge_when_tested=True))
+    task = R.CodeTask(test_code="assert add(2, 2) == 4")
+    resp = "```python\ndef add(a, b):\n    return a + b\n```"
+    score = asyncio.run(rm.score("add two numbers", resp, task))
+    # base = 0.5 * 1.0 (tests pass) + 0.5 * 0.5 (judge); + w_format * 1 (valid)
+    assert score == pytest.approx(1.0 * 0.75 + 0.1 * 1.0)
+
+
+def test_http_judge_empty_questions_scores_zero():
+    # No questions -> nothing to grade; must return 0.0 without any request
+    # (this branch also guards the fraction-of-yes divide-by-zero).
+    judge = R.HTTPJudge(questions=())
+    assert asyncio.run(judge.score("task", "response")) == 0.0

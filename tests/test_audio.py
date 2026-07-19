@@ -3,6 +3,7 @@ at ~100 ms/token, Qwen-style prompt rendering with expanded AUDIO placeholders,
 and an end-to-end forward where gradients reach the encoder through the spliced
 soft tokens."""
 
+import pytest
 import torch
 
 from picochat import audio
@@ -130,3 +131,33 @@ def test_end_to_end_forward_grads_reach_encoder(tmp_path):
     # gradient must flow back through the spliced soft tokens into the encoder
     grads = [p.grad for p in enc.parameters() if p.grad is not None]
     assert grads and any(g.abs().sum() > 0 for g in grads)
+
+
+def test_downsample_rejects_sub_frame_ms_per_token():
+    # 5 ms per token < the 10 ms mel hop: zero frames per token is impossible
+    with pytest.raises(ValueError):
+        AudioConfig(ms_per_token=5).downsample
+
+
+def test_render_audio_prompt_rejects_unknown_part_type(tmp_path):
+    tok = _tokenizer(tmp_path)
+    proc = AudioProcessor(AudioConfig(ms_per_token=100))
+    messages = [{"role": "user", "content": [{"type": "video", "video": None}]}]
+    with pytest.raises(ValueError, match="unknown content part type"):
+        audio.render_audio_prompt(messages, tok, proc)
+
+
+def test_decode_prefill_from_inputs_embeds_matches_forward():
+    # The audio-conditioned generation path: prefill the KV cache from spliced
+    # embeddings instead of token ids, then check the logits agree with a plain
+    # forward over the same embeddings.
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=32, d_model=16, n_heads=2, n_layers=2).eval()
+    ids = torch.randint(0, 32, (1, 8))
+    embeds = lm.embed(ids)
+    with torch.no_grad():
+        ref = lm(inputs_embeds=embeds)
+        logits, cache, pos = lm.decode(inputs_embeds=embeds)
+    assert pos == 8
+    assert len(cache) > 0
+    torch.testing.assert_close(logits, ref, rtol=1e-4, atol=1e-5)

@@ -2,6 +2,7 @@
 and SFTModule (supervised fine-tuning), plus the LMTrainerMixin scaffolding
 they share -- Muon/AdamW optimizer wiring, the warmup+cosine LR schedule
 applied by hand under manual optimization, and greedy KV-cache generation.
+(GRPOModule in picochat.grpo builds on the same mixin.)
 The two modules differ only in how they build the batch into a next-token
 cross-entropy loss, so that part stays in each class:
 
@@ -31,7 +32,8 @@ from einops import rearrange
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel
 
-from picochat.gpt import TransformerLM, build_lm
+from picochat.gpt import TransformerLM
+from picochat.presets import build_lm
 from picochat.kernels import (
     fused_linear_cross_entropy,
     fused_linear_cross_entropy_available,

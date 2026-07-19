@@ -27,7 +27,7 @@ from picochat.config import (
     scale_for_devices,
 )
 from picochat.dataloader import PackedDataset, PretrainDataModule
-from picochat.gpt import build_lm
+from picochat.presets import build_lm
 from picochat.trainer import GPT
 from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 

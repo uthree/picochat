@@ -7,8 +7,8 @@ bytes/token per dataset -- a higher number means the tokenizer packs that
 dataset's text into fewer tokens (denser fit for that language/domain).
 
     python scripts/tok_eval.py                              # every configs/tok/*.yml
-    python scripts/tok_eval.py --config configs/tok/en_ja.yml
-    python scripts/tok_eval.py --config configs/tok/en_ja.yml -n 20000
+    python scripts/tok_eval.py --config configs/tok/default.yml
+    python scripts/tok_eval.py --config configs/tok/default.yml -n 20000
 """
 
 import argparse
