@@ -476,7 +476,9 @@ class GPT(LMTrainerMixin, L.LightningModule):
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
-        self.log("val_loss", loss, prog_bar=True)
+        # sync_dist: under DDP each rank sees its own shard of the val set, so
+        # the checkpoint monitor would otherwise rank on rank 0's local mean.
+        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
         if batch_idx <= self.sample_batches:
             # Sanity-check what the model actually generates: prefill the first
             # half of the sequence and let it autoregress the second half, then
@@ -485,6 +487,15 @@ class GPT(LMTrainerMixin, L.LightningModule):
         return loss
 
     def _log_generation_sample(self, batch: Tensor, batch_idx: int) -> None:
+        # Rank 0 only: on other ranks the logger's experiment is a
+        # DummyExperiment whose no-op add_text still passes the hasattr check
+        # below, so without this guard every rank would pay for the slow
+        # greedy decode just to throw the text away. Safe to return early --
+        # nothing below involves a collective (decode runs in eval mode, so
+        # the MoE bias all-reduce is not hit).
+        trainer = getattr(self, "_trainer", None)
+        if trainer is not None and not trainer.is_global_zero:
+            return
         # Need a tokenizer to render text and a TensorBoard writer to log it.
         writer = getattr(self.logger, "experiment", None)
         if self.tokenizer is None or writer is None or not hasattr(writer, "add_text"):
@@ -583,7 +594,9 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
 
     def validation_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
         loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))
-        self.log("val_loss", loss, prog_bar=True)
+        # sync_dist: see GPT.validation_step -- the checkpoint monitor should
+        # rank on the all-rank mean, not rank 0's shard.
+        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
         return loss
 
 

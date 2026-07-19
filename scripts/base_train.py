@@ -20,7 +20,12 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
-from picochat.config import load_config, resolve_num_devices, scale_for_devices
+from picochat.config import (
+    check_strategy,
+    load_config,
+    resolve_num_devices,
+    scale_for_devices,
+)
 from picochat.dataloader import PackedDataset, PretrainDataModule
 from picochat.gpt import build_lm
 from picochat.trainer import GPT
@@ -93,9 +98,13 @@ def main():
         "--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'"
     )
     p.add_argument(
-        "--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'"
+        "--num-nodes", type=int, default=1, help="number of nodes for multi-node DDP"
     )
+    # DDP only -- sharded strategies (fsdp/deepspeed) are rejected, see
+    # picochat.config.check_strategy.
+    p.add_argument("--strategy", type=str, default="auto", help="e.g. 'auto' or 'ddp'")
     args = p.parse_args()
+    check_strategy(args.strategy)
 
     cfg = load_config(args.config)
 
@@ -166,18 +175,19 @@ def main():
     )
 
     # Config values are per-GPU (batch_size is per-device, lr/max_steps are
-    # tuned for a single-device effective batch). Scale them by the device
-    # count so a multi-GPU run matches the single-GPU training dynamics the
-    # config was written for: lr scales up linearly with the larger effective
-    # batch (linear scaling rule), and max_steps scales down so the run still
-    # sees the same total number of tokens.
-    num_devices = resolve_num_devices(args.devices)
-    lr, muon_lr, max_steps = scale_for_devices(
+    # tuned for a single-device effective batch). Scale them by the world size
+    # so a multi-GPU run matches the single-GPU training dynamics the config
+    # was written for: lr scales up linearly with the larger effective batch
+    # (linear scaling rule), and max_steps/warmup_steps scale down so the run
+    # still sees the same total number of tokens with the same warmup share.
+    world_size = resolve_num_devices(args.devices, args.accelerator) * args.num_nodes
+    lr, muon_lr, max_steps, warmup_steps = scale_for_devices(
         optim_cfg,
-        num_devices,
+        world_size,
         lr_default=3e-4,
         muon_lr_default=0.02,
         max_steps_default=10000,
+        warmup_steps_default=2000,
     )
     gpt = GPT(
         lm,
@@ -201,7 +211,7 @@ def main():
         # and accumulation are owned by the module, not the Trainer.
         grad_clip=trainer_cfg.get("grad_clip", 1.0),
         accumulate=trainer_cfg.get("accumulate", 1),
-        warmup_steps=optim_cfg.get("warmup_steps", 2000),
+        warmup_steps=warmup_steps,
         max_steps=max_steps,
         # None -> auto (compile only where torch.compile is supported).
         compile=trainer_cfg.get("compile", None),
@@ -247,6 +257,7 @@ def main():
     trainer = L.Trainer(
         accelerator=args.accelerator,
         devices=args.devices,
+        num_nodes=args.num_nodes,
         strategy=args.strategy,
         max_steps=max_steps,
         precision=trainer_cfg.get("precision", "bf16-mixed"),

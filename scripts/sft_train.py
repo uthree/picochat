@@ -18,7 +18,12 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import ConcatDataset
 
-from picochat.config import load_config, resolve_num_devices, scale_for_devices
+from picochat.config import (
+    check_strategy,
+    load_config,
+    resolve_num_devices,
+    scale_for_devices,
+)
 from picochat.dataloader import PretrainDataModule, SFTTensorDataset
 from picochat.trainer import SFTModule, load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
@@ -77,9 +82,13 @@ def main():
         "--devices", type=str, default="auto", help="e.g. 'auto', '2', or '0,1'"
     )
     p.add_argument(
-        "--strategy", type=str, default="auto", help="e.g. 'auto', 'ddp', 'fsdp'"
+        "--num-nodes", type=int, default=1, help="number of nodes for multi-node DDP"
     )
+    # DDP only -- sharded strategies (fsdp/deepspeed) are rejected, see
+    # picochat.config.check_strategy.
+    p.add_argument("--strategy", type=str, default="auto", help="e.g. 'auto' or 'ddp'")
     args = p.parse_args()
+    check_strategy(args.strategy)
 
     cfg = load_config(args.config)
 
@@ -133,13 +142,14 @@ def main():
     print(f"fine-tuning from {init_from} (model_config: {model_config})", flush=True)
 
     # Same per-device-config / linear-scaling convention as base_train.py.
-    num_devices = resolve_num_devices(args.devices)
-    lr, muon_lr, max_steps = scale_for_devices(
+    world_size = resolve_num_devices(args.devices, args.accelerator) * args.num_nodes
+    lr, muon_lr, max_steps, warmup_steps = scale_for_devices(
         optim_cfg,
-        num_devices,
+        world_size,
         lr_default=1e-5,
         muon_lr_default=0.005,
         max_steps_default=2000,
+        warmup_steps_default=100,
     )
 
     sft = SFTModule(
@@ -157,7 +167,7 @@ def main():
         muon_weight_decay=optim_cfg.get("muon_weight_decay", 0.01),
         grad_clip=trainer_cfg.get("grad_clip", 1.0),
         accumulate=trainer_cfg.get("accumulate", 1),
-        warmup_steps=optim_cfg.get("warmup_steps", 100),
+        warmup_steps=warmup_steps,
         max_steps=max_steps,
         compile=trainer_cfg.get("compile", None),
         # Opt-in memory saver: Liger fused cross-entropy (see picochat.kernels
@@ -190,6 +200,7 @@ def main():
     trainer = L.Trainer(
         accelerator=args.accelerator,
         devices=args.devices,
+        num_nodes=args.num_nodes,
         strategy=args.strategy,
         max_steps=max_steps,
         precision=trainer_cfg.get("precision", "bf16-mixed"),

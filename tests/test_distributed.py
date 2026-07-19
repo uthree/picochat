@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import lightning as L
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -86,6 +87,20 @@ def test_grad_sync_context_noop_outside_ddp():
 
 
 # ---------------------------------------------------------------------------
+# Validation generation samples run on rank 0 only
+# ---------------------------------------------------------------------------
+def test_generation_sample_skipped_on_nonzero_rank():
+    # On ranks != 0 the logger's experiment is a no-op DummyExperiment, so
+    # without the guard every rank would pay for the slow greedy decode just
+    # to discard the text. _generate raising proves the early return.
+    lm = TransformerLM(vocab_size=16, d_model=8, n_heads=2, n_layers=1)
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    gpt._generate = lambda *a, **k: pytest.fail("decode ran on a nonzero rank")
+    gpt._trainer = SimpleNamespace(is_global_zero=False)
+    gpt._log_generation_sample(torch.zeros(1, 8, dtype=torch.long), batch_idx=0)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: 2-process CPU DDP fit with the scripts' Trainer wiring
 # ---------------------------------------------------------------------------
 class _PackedRows(Dataset):
@@ -133,7 +148,9 @@ def test_two_process_ddp_fit_with_rank_aware_sampler(tmp_path):
     )
     dm = PretrainDataModule(
         _PackedRows(64, 17, n=64, bos=1),
-        None,
+        # A val set too: exercises the datamodule's own DistributedSampler and
+        # the sync_dist'd val_loss reduction across ranks in a real fit.
+        _PackedRows(64, 17, n=8, bos=1),
         batch_size=2,
         num_workers=0,
         seed=7,
@@ -143,6 +160,7 @@ def test_two_process_ddp_fit_with_rank_aware_sampler(tmp_path):
         devices=2,
         strategy="ddp_spawn",
         max_steps=2,
+        limit_val_batches=2,
         use_distributed_sampler=False,
         logger=False,
         enable_checkpointing=False,
