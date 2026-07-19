@@ -52,6 +52,12 @@ def main():
 
     cfg = load_config(args.config)
 
+    # Same seed on every rank. GRPO's DataLoader is a plain shuffled list of
+    # prompts, so Lightning's default DistributedSampler injection shards it
+    # correctly under DDP; rollout sampling then differs per rank because the
+    # prompts do.
+    L.seed_everything(cfg.get("seed", 42), workers=True)
+
     # Untrusted policy-generated code runs under the sandbox; resolve the policy
     # and fail fast if 'bwrap' is required but unavailable (before any training).
     sandbox.configure(cfg.get("sandbox", "auto"))

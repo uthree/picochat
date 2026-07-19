@@ -32,7 +32,13 @@ import numpy as np
 import tiktoken
 import torch
 from torch import Tensor
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
+from torch.utils.data import (
+    ConcatDataset,
+    DataLoader,
+    Dataset,
+    DistributedSampler,
+    Sampler,
+)
 
 from picochat.tokenizer import encode_conversation
 
@@ -241,6 +247,21 @@ class PackedDataset(Dataset):
 _SAMPLE_CHUNK = 1 << 20
 
 
+def _sampler_generator(sampler) -> torch.Generator | None:
+    """The RNG a chunked sampler draws from. seed=None -> the global RNG
+    (single-process convenience). With a seed, a torch.Generator created on
+    first use and kept across __iter__ calls, so a re-iterated "epoch"
+    continues the stream instead of replaying it. Created lazily (not in
+    __init__) so a sampler pickled into a spawned DDP process seeds its
+    generator there, not in the parent."""
+    if sampler.seed is None:
+        return None
+    if sampler._generator is None:
+        sampler._generator = torch.Generator()
+        sampler._generator.manual_seed(sampler.seed)
+    return sampler._generator
+
+
 class GroupWeightedIndexSampler(Sampler[int]):
     """Draws indices from a ConcatDataset's groups with replacement so each
     group's total sampling mass matches its configured weight, regardless of
@@ -258,24 +279,34 @@ class GroupWeightedIndexSampler(Sampler[int]):
     """
 
     def __init__(
-        self, group_sizes: list[int], group_weights: list[float], num_samples: int
+        self,
+        group_sizes: list[int],
+        group_weights: list[float],
+        num_samples: int,
+        seed: int | None = None,
     ):
         self.num_samples = num_samples
         self.group_weights = torch.as_tensor(group_weights, dtype=torch.double)
         sizes = torch.as_tensor(group_sizes, dtype=torch.long)
         self.group_sizes = sizes
         self.group_offsets = torch.cumsum(sizes, dim=0) - sizes
+        self.seed = seed
+        self._generator: torch.Generator | None = None
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __iter__(self):
+        g = _sampler_generator(self)
         remaining = self.num_samples
         while remaining > 0:
             n = min(_SAMPLE_CHUNK, remaining)
-            group_ids = torch.multinomial(self.group_weights, n, replacement=True)
+            group_ids = torch.multinomial(
+                self.group_weights, n, replacement=True, generator=g
+            )
             local = (
-                torch.rand(n, dtype=torch.double) * self.group_sizes[group_ids]
+                torch.rand(n, dtype=torch.double, generator=g)
+                * self.group_sizes[group_ids]
             ).long()
             idx = self.group_offsets[group_ids] + local
             yield from idx.tolist()
@@ -294,18 +325,21 @@ class UniformIndexSampler(Sampler[int]):
     num_samples is drawn.
     """
 
-    def __init__(self, dataset_len: int, num_samples: int):
+    def __init__(self, dataset_len: int, num_samples: int, seed: int | None = None):
         self.dataset_len = dataset_len
         self.num_samples = num_samples
+        self.seed = seed
+        self._generator: torch.Generator | None = None
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __iter__(self):
+        g = _sampler_generator(self)
         remaining = self.num_samples
         while remaining > 0:
             n = min(_SAMPLE_CHUNK, remaining)
-            idx = torch.randint(self.dataset_len, (n,))
+            idx = torch.randint(self.dataset_len, (n,), generator=g)
             yield from idx.tolist()
             remaining -= n
 
@@ -317,6 +351,16 @@ class PretrainDataModule(L.LightningDataModule):
     dataloaders from it (see scripts/base_train.py's auto batch-size search), so
     the dataloaders must be built from this attribute rather than fixed at
     construction time.
+
+    Multi-GPU: the Trainer must be built with `use_distributed_sampler=False`
+    (the training scripts do this). Lightning's default would wrap the chunked
+    samplers above in its DistributedSamplerWrapper, which materializes the
+    whole len(train_ds)-long index stream as a Python list on every rank --
+    exactly the host-memory blowup the chunked samplers exist to avoid.
+    Sharding isn't needed anyway: the samplers draw IID with replacement, so
+    each rank drawing from its own per-rank seed (`seed + rank`, see
+    train_dataloader) is statistically equivalent. The val loader, which does
+    want each example visited once, gets a standard DistributedSampler here.
     """
 
     def __init__(
@@ -326,6 +370,7 @@ class PretrainDataModule(L.LightningDataModule):
         batch_size: int,
         num_workers: int = 4,
         train_group_weights: list[float] | None = None,
+        seed: int | None = None,
     ):
         """
         Args:
@@ -334,6 +379,10 @@ class PretrainDataModule(L.LightningDataModule):
                 group's total sampling mass equals its configured weight
                 regardless of its example count. None -> plain uniform
                 shuffling.
+            seed: base seed for the train sampler; rank r draws from seed + r
+                (identical streams across ranks would give every rank the same
+                batches, silently dividing the effective batch by world_size).
+                None -> the global RNG, single-process runs only.
         """
         super().__init__()
         self.train_ds = train_ds
@@ -341,6 +390,7 @@ class PretrainDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.train_group_weights = train_group_weights
+        self.seed = seed
         if train_group_weights is not None:
             assert isinstance(train_ds, ConcatDataset), (
                 "train_group_weights requires train_ds to be a ConcatDataset"
@@ -350,6 +400,20 @@ class PretrainDataModule(L.LightningDataModule):
             # an instance attribute of None as "hook not provided".
             self.val_dataloader = None  # type: ignore[assignment]
 
+    @staticmethod
+    def _dist_info() -> tuple[int, int]:
+        """(rank, world_size), (0, 1) outside distributed runs. Read at
+        dataloader-build time: Lightning calls the *_dataloader hooks after the
+        process group is initialized on every rank."""
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank(), torch.distributed.get_world_size()
+        return 0, 1
+
+    def _sampler_seed(self) -> int | None:
+        if self.seed is None:
+            return None
+        return self.seed + self._dist_info()[0]
+
     def train_dataloader(self) -> DataLoader:
         if self.train_group_weights is not None:
             group_sizes = [len(d) for d in self.train_ds.datasets]
@@ -357,6 +421,7 @@ class PretrainDataModule(L.LightningDataModule):
                 group_sizes,
                 self.train_group_weights,
                 num_samples=len(self.train_ds),
+                seed=self._sampler_seed(),
             )
             return DataLoader(
                 self.train_ds,
@@ -372,7 +437,9 @@ class PretrainDataModule(L.LightningDataModule):
         # for the same reason the weighted path did. UniformIndexSampler draws
         # the same uniform indices lazily in bounded-size chunks.
         sampler = UniformIndexSampler(
-            len(self.train_ds), num_samples=len(self.train_ds)
+            len(self.train_ds),
+            num_samples=len(self.train_ds),
+            seed=self._sampler_seed(),
         )
         return DataLoader(
             self.train_ds,
@@ -385,9 +452,22 @@ class PretrainDataModule(L.LightningDataModule):
         )
 
     def val_dataloader(self) -> DataLoader:
+        # Unlike training (IID draws), validation wants each example counted
+        # once, so under DDP the set is sharded with a standard
+        # DistributedSampler (built here because use_distributed_sampler is
+        # False, see the class docstring). It pads the last batch to keep
+        # ranks in step, so the aggregated val_loss can count a few examples
+        # twice -- the standard, slightly-approximate trade.
+        _, world_size = self._dist_info()
+        sampler = (
+            DistributedSampler(self.val_ds, shuffle=False)
+            if world_size > 1
+            else None
+        )
         return DataLoader(
             self.val_ds,
             batch_size=self.batch_size,
+            sampler=sampler,
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
             pin_memory=True,

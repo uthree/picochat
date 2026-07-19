@@ -99,6 +99,11 @@ def main():
 
     cfg = load_config(args.config)
 
+    # Same seed on every rank (model init/DDP expect that); the data samplers
+    # decorrelate ranks themselves by drawing from seed + rank (see
+    # PretrainDataModule). workers=True also seeds dataloader workers.
+    L.seed_everything(cfg.get("seed", 42), workers=True)
+
     model_cfg = dict(cfg.get("model", {}))
     data_cfg = cfg.get("data", {})
     optim_cfg = cfg.get("optim", {})
@@ -146,6 +151,7 @@ def main():
         batch_size=batch_size,
         num_workers=num_workers,
         train_group_weights=train_group_weights,
+        seed=cfg.get("seed", 42),
     )
 
     # --- model ---
@@ -248,6 +254,11 @@ def main():
         # GPT does manual optimization and Lightning forbids the Trainer from
         # managing them in that mode. They are passed to GPT above instead.
         val_check_interval=val_check_interval if val_ds is not None else 1.0,
+        # The chunked train samplers are rank-aware themselves (per-rank seeds,
+        # IID with replacement) and the val loader builds its own
+        # DistributedSampler; Lightning's wrapper would materialize the whole
+        # index stream per rank (see PretrainDataModule).
+        use_distributed_sampler=False,
         callbacks=[ckpt_cb],
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)

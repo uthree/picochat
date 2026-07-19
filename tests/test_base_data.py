@@ -95,6 +95,50 @@ def test_train_dataloader_unweighted_uses_chunked_uniform_sampler():
     assert all(0 <= i < len(ds) for i in drawn)
 
 
+def test_samplers_seeded_streams_are_deterministic_and_rank_distinct():
+    # Per-rank seeding is how multi-GPU decorrelates the IID samplers (see
+    # PretrainDataModule): same seed -> same stream, different seed (rank) ->
+    # a different stream.
+    from picochat.dataloader import GroupWeightedIndexSampler, UniformIndexSampler
+
+    def uniform(seed):
+        return list(iter(UniformIndexSampler(1000, 64, seed=seed)))
+
+    assert uniform(7) == uniform(7)
+    assert uniform(7) != uniform(8)
+
+    def weighted(seed):
+        return list(
+            iter(GroupWeightedIndexSampler([10, 990], [1.0, 1.0], 64, seed=seed))
+        )
+
+    assert weighted(7) == weighted(7)
+    assert weighted(7) != weighted(8)
+
+
+def test_sampler_reiteration_continues_the_stream():
+    # A second "epoch" must not replay the first: the generator persists across
+    # __iter__ calls (a replayed stream would train on the same batches twice).
+    from picochat.dataloader import UniformIndexSampler
+
+    sampler = UniformIndexSampler(1000, 32, seed=7)
+    assert list(iter(sampler)) != list(iter(sampler))
+
+
+def test_datamodule_passes_per_rank_seed(monkeypatch):
+    # Outside distributed runs the sampler gets the base seed; under a
+    # (mocked) 2-rank process group, rank 1 draws from seed + 1.
+    ds = _RandomTokenDataset(40, 6, n=32)
+    dm = PretrainDataModule(ds, None, batch_size=4, num_workers=0, seed=7)
+    assert dm.train_dataloader().sampler.seed == 7
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    assert dm.train_dataloader().sampler.seed == 8
+
+
 def test_val_dataloader_uses_batch_size():
     train_ds = _RandomTokenDataset(40, 6, n=32)
     val_ds = _RandomTokenDataset(40, 6, n=32)
