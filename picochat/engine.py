@@ -106,7 +106,18 @@ def generate(
     `max_seq_len` is the model's positional range (its RoPE tables): decoding
     past it asserts, so the budget is capped to stop generation early instead.
     The caller is responsible for a prompt that already fits (see
-    ChatApp._build_prompt / picochat.tasks.encode_choice)."""
+    ChatApp._build_prompt / picochat.tasks.encode_choice).
+
+    Greedy decoding (temperature <= 0) on a model with MTP heads routes through
+    generate_speculative: the emitted stream is identical (every draft is
+    verified against the model's own next-token argmax), it just arrives in
+    fewer forwards -- so every caller gets the speedup for free."""
+    if cfg.temperature <= 0 and getattr(model, "n_mtp", 0) > 0:
+        yield from generate_speculative(
+            model, tokenizer, prompt_ids, cfg, device, max_seq_len
+        )
+        return
+
     budget = cfg.max_new_tokens
     if max_seq_len is not None:
         budget = min(budget, max_seq_len - len(prompt_ids))

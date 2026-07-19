@@ -118,6 +118,47 @@ def test_speculative_respects_max_seq_len(tmp_path):
     assert len(prompt) + len(out) <= 20
 
 
+def test_generate_routes_greedy_to_speculative(tmp_path):
+    # temperature 0 + MTP heads: generate() itself defers to the speculative
+    # path (observable via decode_heads, which the plain path never calls) and
+    # still emits the exact greedy stream -- chat/API/eval get the speedup
+    # without calling generate_speculative themselves.
+    torch.manual_seed(0)
+    tok = _tokenizer(tmp_path)
+    model = _model(tok.n_vocab, n_mtp=2)
+    prompt = tok.encode_ordinary("the quick brown fox")
+    stop = {tok.encode_single_token(IM_END), tok.encode_single_token(EOS_TOKEN)}
+    ref = _greedy_reference(model, prompt, budget=25, stop_ids=stop)
+
+    calls = {"decode_heads": 0}
+    orig = model.decode_heads
+
+    def spy(*args, **kwargs):
+        calls["decode_heads"] += 1
+        return orig(*args, **kwargs)
+
+    model.decode_heads = spy
+    cfg = SamplingConfig(temperature=0.0, max_new_tokens=25)
+    out = list(generate(model, tok, prompt, cfg, max_seq_len=128))
+    assert out == ref
+    assert calls["decode_heads"] > 0
+
+
+def test_generate_sampling_stays_on_plain_path(tmp_path):
+    # temperature > 0: speculative decoding would change the sampled
+    # distribution (it is greedy-only), so generate() must not route there.
+    torch.manual_seed(0)
+    tok = _tokenizer(tmp_path)
+    model = _model(tok.n_vocab, n_mtp=2)
+    model.decode_heads = lambda *a, **kw: pytest.fail(
+        "speculative path used for sampled decoding"
+    )
+    cfg = SamplingConfig(temperature=1.0, top_k=None, max_new_tokens=5)
+    prompt = tok.encode_ordinary("the quick")
+    out = list(generate(model, tok, prompt, cfg, max_seq_len=128))
+    assert len(out) <= 5
+
+
 def test_speculative_falls_back_without_mtp_heads(tmp_path):
     # n_mtp == 0: defer to plain greedy generate() (same stream).
     torch.manual_seed(0)
