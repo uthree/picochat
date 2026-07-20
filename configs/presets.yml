@@ -56,13 +56,15 @@
 # in the active figure. Smaller presets omit them.
 #
 # Sizes assume a 64k (65536) vocab with an untied lm head (embedding + head
-# together are 131072*d_model params, which still dominates the small presets --
-# 200m is mostly its embeddings). The vocab was halved from 128k precisely
-# because at 1b it was ~40% of all params; 64k brings it to ~26% and CJK now
-# splits per-character in the tokenizer, so the vocab needs no kanji-compound
-# merges (see configs/tok/default.yml). Totals below are estimate_num_params()
-# figures. The model's real vocab_size comes from the trained tokenizer's
-# n_vocab at train time; these values must match it.
+# together are 131072*d_model params). The vocab was halved from 128k because
+# at 1b it was ~40% of all params (64k brings it to ~26%; CJK now splits
+# per-character in the tokenizer, so the vocab needs no kanji-compound merges --
+# see configs/tok/default.yml). The freed embedding budget was reinvested into
+# each rung's backbone so the total-param nameplates still hold: the dense
+# presets grew depth/width (200m 576->768 wide, 1b/8b deeper), the MoE presets
+# added a few routed experts (total up, active ~unchanged). Totals below are
+# estimate_num_params() figures. The model's real vocab_size comes from the
+# trained tokenizer's n_vocab at train time; these values must match it.
 
 # --------------------------------------------------------------------------
 # 200M -- dense, the minimal "$100" config. n_layers 12 / lpb 4 gives 9 Gated
@@ -70,21 +72,22 @@
 # sequence modeling cheaply and the few NSA layers add global recall.
 # Also the default target for the smoke test and base pretraining.
 # --------------------------------------------------------------------------
-200m: # ~0.12B params (dense)
-    d_model: 576
-    n_layers: 12
-    n_heads: 16  # d_head 36; multiple of 16 so the NSA kernel group (MQA) fits
+200m: # ~0.20B params (dense)
+    d_model: 768
+    n_layers: 16
+    n_heads: 16  # d_head 48; multiple of 16 so the NSA kernel group (MQA) fits
     n_kv_heads: 4
     vocab_size: 65536
+    d_ffn: 1920  # 2.5*d_model (down from the 3*d_model default) to land on ~0.2B
     layers_per_block: 4
     window_size: 256
 
 # --------------------------------------------------------------------------
 # 1B
 # --------------------------------------------------------------------------
-1b: # ~0.78B params (dense)
+1b: # ~1.0B params (dense)
     d_model: 1536
-    n_layers: 20
+    n_layers: 28
     n_heads: 16  # d_head 96; multiple of 16 so the NSA kernel group (MQA) fits
     n_kv_heads: 4
     vocab_size: 65536
@@ -94,9 +97,9 @@
 # --------------------------------------------------------------------------
 # 8B
 # --------------------------------------------------------------------------
-8b: # ~7.1B params (dense; + 3 lightweight MTP heads)
+8b: # ~7.9B params (dense; + 3 lightweight MTP heads)
     d_model: 4096
-    n_layers: 32
+    n_layers: 36
     n_heads: 32
     n_kv_heads: 8
     nsa_kv_heads: 2  # NSA GQA-16 (32/2); GDN keeps n_kv_heads
@@ -109,7 +112,7 @@
 # 35B -- MoE only (no dense past 8b). Narrow backbone (d_model 2560) + small
 # dense/shared FFN + a big routed pool, so per-token activation is ~7-10%.
 # --------------------------------------------------------------------------
-35b-moe: # ~35.1B total / ~2.1B active -- LatentMoE, fine-grained
+35b-moe: # ~35.7B total / ~2.1B active -- LatentMoE, fine-grained
     d_model: 2560
     n_layers: 40
     n_heads: 32  # d_head 80; multiple of 16 for the NSA kernel group
@@ -119,13 +122,13 @@
     window_size: 512
     layers_per_block: 6
     d_ffn: 1024      # small always-on dense/shared FFN (keeps active low)
-    n_experts: 530
+    n_experts: 540   # +10 vs the freed-embedding baseline, restoring the ~35.5B rung
     n_active: 6
     d_expert: 512    # fine-grained
     d_latent: 1024   # LatentMoE: experts run in a d_model/2.5 latent space
     n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-35b-moe-shared: # ~35.1B total / ~3.0B active -- coarse-grained, shared pool
+35b-moe-shared: # ~35.6B total / ~3.0B active -- coarse-grained, shared pool
     d_model: 2560
     n_layers: 40
     n_heads: 32  # d_head 80; multiple of 16 for the NSA kernel group
@@ -135,7 +138,7 @@
     window_size: 512
     layers_per_block: 6
     d_ffn: 768       # small always-on dense/shared FFN
-    n_experts: 1894
+    n_experts: 1920  # +26 vs the freed-embedding baseline, restoring the ~35.5B rung
     n_active: 2
     d_expert: 2304   # coarse: ~4.5x the fine variant's experts
     share_experts: true
@@ -145,7 +148,7 @@
 # 120B -- MoE only. Narrow backbone (d_model 3584) + small dense/shared FFN +
 # a big routed pool; per-token activation is ~5-7%.
 # --------------------------------------------------------------------------
-120b-moe: # ~117B total / ~5.6B active -- LatentMoE, fine-grained
+120b-moe: # ~118B total / ~5.6B active -- LatentMoE, fine-grained
     d_model: 3584
     n_layers: 48
     n_heads: 32  # d_head 112; multiple of 16 for the NSA kernel group
@@ -155,13 +158,13 @@
     window_size: 512
     layers_per_block: 6
     d_ffn: 1792      # small always-on dense/shared FFN
-    n_experts: 572
+    n_experts: 576   # +4 vs the freed-embedding baseline, restoring the ~118B rung
     n_active: 8
     d_expert: 768    # fine-grained
     d_latent: 1792   # LatentMoE latent space (d_model/2)
     n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-120b-moe-shared: # ~117B total / ~7.5B active -- coarse-grained, shared pool
+120b-moe-shared: # ~118B total / ~7.5B active -- coarse-grained, shared pool
     d_model: 3584
     n_layers: 48
     n_heads: 32  # d_head 112; multiple of 16 for the NSA kernel group
@@ -171,7 +174,7 @@
     window_size: 512
     layers_per_block: 6
     d_ffn: 1792      # small always-on dense/shared FFN
-    n_experts: 2948
+    n_experts: 2976  # +28 vs the freed-embedding baseline, restoring the ~118B rung
     n_active: 2
     d_expert: 3584   # coarse: ~4.7x the fine variant's experts (= d_model)
     share_experts: true
