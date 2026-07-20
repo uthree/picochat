@@ -1,8 +1,12 @@
 # picochat
 ![logo](assets/logo.png)
 
-A project inspired by [nanochat](https://github.com/karpathy/nanochat):
-training a small chat LLM from scratch on a budget of roughly $100.
+A project inspired by [nanochat](https://github.com/karpathy/nanochat): a
+minimal chat-LLM stack you can train from scratch for roughly $100 at the
+smallest rung, built so the same code scales up unchanged to much larger models.
+The sequence mixer is a hybrid of [Gated DeltaNet](https://arxiv.org/abs/2412.06464)
+linear-attention layers and [Native Sparse Attention](https://arxiv.org/abs/2502.11089)
+layers (3:1) for long context at a fraction of the KV cost.
 
 ## Requirements
 - Python 3.11
@@ -129,7 +133,9 @@ A flat package, one file per concern (following
 
 | Module | Responsibility |
 |---|---|
-| `picochat/gpt.py` | the model: blocks (RMSNorm, RoPE, SwiGLU, MoE, attention) up through `TransformerLM` |
+| `picochat/gpt.py` | the model: blocks (RMSNorm, SwiGLU, MoE, depth-attention residuals) up through `TransformerLM`, interleaving the two mixers |
+| `picochat/linear_attn.py` | Gated DeltaNet: the linear-attention (recurrent) mixer -- chunkwise-parallel training + O(1) decode, pure-PyTorch with optional `fla` kernels |
+| `picochat/sparse_attn.py` | Native Sparse Attention: the sparse-softmax (compressed / selected / window) mixer with partial RoPE |
 | `picochat/presets.py` | the scale-ladder presets (`configs/presets.yml`) and the `build_lm` factory |
 | `picochat/param_estimate.py` | `estimate_num_params`: size a config without building the model |
 | `picochat/trainer.py` | the LightningModules that train it (`GPT` for pretraining, `SFTModule` for SFT) and the shared Muon/AdamW + LR-schedule scaffolding |
@@ -161,8 +167,10 @@ all-reduce), and the default Muon optimizer needs whole 2D weight matrices,
 which flat sharding breaks -- sharded training of the 8b+ presets remains
 future work.
 
-Training compiles the model with `torch.compile` (FlexAttention fuses the
-sliding-window/packed-document attention). On top of that,
+Training compiles the model with `torch.compile`. Installing the optional `fla`
+extra (`uv pip install -e ".[fla]"`) swaps in flash-linear-attention's Triton
+kernels for the Gated DeltaNet layers on CUDA (the pure-PyTorch chunk kernel is
+the fallback and the CPU/test path). On top of that,
 `trainer.fused_loss: true` in a stage config folds the lm-head matmul into
 [Liger's](https://github.com/linkedin/Liger-Kernel) fused cross-entropy
 kernel, loaded from the Hub via the optional
@@ -178,16 +186,29 @@ off when raw throughput matters more. It is exactly loss-equivalent (same
 values and gradients as the plain loss; verified in `tests/test_kernels.py`).
 
 ## Model Architecture
-A decoder-only Transformer (pre-RMSNorm, no biases, untied embeddings) with
-several improvements:
-- [RoPE](https://arxiv.org/abs/2104.09864)
+A decoder-only Transformer (pre-RMSNorm, no biases, untied embeddings) whose
+sequence mixer is a **hybrid** stack: within each block of `layers_per_block`
+layers, the first layers are [Gated DeltaNet](https://arxiv.org/abs/2412.06464)
+linear-attention mixers and the block-tail layer is
+[Native Sparse Attention](https://arxiv.org/abs/2502.11089) -- a 3:1 GDN:NSA
+ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
+- [Gated DeltaNet](https://arxiv.org/abs/2412.06464): a recurrent linear-
+  attention mixer (Mamba2 gating + the delta rule) with a fixed-size state
+  instead of a growing KV cache. It learns positions implicitly from its
+  recurrence, so these layers use **no RoPE**. Chunkwise-parallel training and
+  O(1)-per-token decode, with exact pure-PyTorch kernels and optional
+  [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
+  Triton kernels on CUDA.
+- [Native Sparse Attention](https://arxiv.org/abs/2502.11089): sparse softmax
+  over three branches -- a compressed (block-pooled) branch, a top-n
+  block-*selected* branch (its scores reuse the compressed branch, so selection
+  is trained end-to-end), and a sliding window -- combined by a learned per-head
+  gate. These layers keep **partial** [RoPE](https://arxiv.org/abs/2104.09864)
+  (a fraction of each head's dims rotated) as their positional signal.
 - [RMS Normalization](https://arxiv.org/abs/1910.07467)
-- [QK Normalization](https://arxiv.org/abs/2010.04245)
+- [QK Normalization](https://arxiv.org/abs/2010.04245) (L2-normalized q/k in GDN)
 - [SwiGLU](https://arxiv.org/abs/2002.05202)
-- [Grouped-Query Attention](https://arxiv.org/abs/2305.13245)
-- [Sliding Window Attention](https://arxiv.org/abs/2502.18845) with periodic
-  global layers, via
-  [FlexAttention](https://pytorch.org/blog/flexattention/) on CUDA
+- [Grouped-Query Attention](https://arxiv.org/abs/2305.13245) (both mixers)
 - [Mixture of Experts](https://arxiv.org/abs/2101.03961) with a
   [shared expert](https://arxiv.org/abs/2401.06066) and
   [DeepSeek-V3-style](https://arxiv.org/abs/2412.19437) sigmoid gating

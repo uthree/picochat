@@ -161,24 +161,27 @@ def test_gpt_pad_targets_are_ignored(gpt_module):
 
 def test_gpt_loss_derives_doc_ids_from_bos():
     # with bos_idx set, _loss numbers the documents packed into the window by
-    # counting <s> markers and builds their attention masks outside the
-    # compiled forward (sequence packing)
+    # counting <s> markers and derives the packing tensors (doc_ids for the NSA
+    # layers, cu_seqlens for the GDN state resets) outside the compiled forward
     lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
     gpt = GPT(lm, pad_idx=0, bos_idx=5, compile=False)
     seen = {}
-    real = lm.transformer.packed_masks
+    real = gpt._next_token_loss
 
-    def spy(doc_ids):
+    def spy(input_ids, targets, doc_ids, cu_seqlens):
         seen["doc_ids"] = doc_ids
-        return real(doc_ids)
+        seen["cu_seqlens"] = cu_seqlens
+        return real(input_ids, targets, doc_ids, cu_seqlens)
 
-    lm.transformer.packed_masks = spy
+    gpt._next_token_loss = spy
     loss = gpt._loss(torch.tensor([[3, 5, 4, 4, 5, 6]]))
     assert torch.isfinite(loss)
     assert seen["doc_ids"].tolist() == [[0, 1, 1, 1, 2, 2]]
+    # one row, three documents -> segment boundaries at each <s> plus the end
+    assert seen["cu_seqlens"].tolist() == [0, 1, 4, 6]
 
 
-def test_gpt_without_bos_idx_passes_no_masks():
+def test_gpt_without_bos_idx_passes_no_packing():
     # fused_loss=False: the spy stands in for _forward and returns logits,
     # which is the unfused contract (fused expects hidden states -- see
     # LMTrainerMixin._next_token_loss).
@@ -186,15 +189,16 @@ def test_gpt_without_bos_idx_passes_no_masks():
     gpt_module = GPT(lm, pad_idx=0, fused_loss=False)
     seen = {}
 
-    def spy(x, doc_ids=None, masks=None):
-        seen["masks"] = masks
-        return gpt_module.model(x, doc_ids, masks)
+    def spy(x, doc_ids=None, cu_seqlens=None):
+        seen["doc_ids"] = doc_ids
+        seen["cu_seqlens"] = cu_seqlens
+        return gpt_module.model(x, doc_ids, cu_seqlens)
 
     # object.__setattr__ mirrors how __init__ stores _forward (kept out of
     # nn.Module's submodule registry, see GPT.__init__)
     object.__setattr__(gpt_module, "_forward", spy)
     gpt_module._loss(torch.randint(1, 40, (2, 6)))
-    assert seen["masks"] is None
+    assert seen["doc_ids"] is None and seen["cu_seqlens"] is None
 
 
 def test_gpt_doc_mask_blocks_cross_document_loss_leak():
@@ -257,21 +261,24 @@ def test_gpt_overfits_single_batch(gpt_module):
     assert loss.item() < first
 
 
-def test_gpt_generate_beyond_window_size_with_kv_cache():
+def test_gpt_generate_long_with_kv_cache():
     # GPT._generate drives Transformer/TransformerLM.decode through a long
-    # prefill followed by many single-token steps; this must not crash and must
-    # keep every windowed layer's KV cache bounded, even generating past
-    # window_size (though still within max_seq_len, per the max_seq_len-is-a-
-    # hard-ceiling design decision).
+    # prefill followed by many single-token steps over the hybrid stack (GDN
+    # recurrent state carry + NSA windowed decode), generating well past the NSA
+    # window_size; this must not crash and must stay within max_seq_len.
     lm = TransformerLM(
         vocab_size=40,
         d_model=32,
         n_heads=4,
         n_layers=4,
+        layers_per_block=2,  # GDN + NSA
+        window_size=3,
+        cmp_block=4,
+        cmp_stride=2,
+        sel_block=4,
+        n_selected=4,
         max_seq_len=64,
     )
-    for i, layer in enumerate(lm.transformer.layers):
-        layer.attn.window_size = 3 if i % 2 == 0 else None
     gpt = GPT(lm, pad_idx=0, compile=False).eval()
 
     prompt = torch.randint(1, 40, (1, 10))

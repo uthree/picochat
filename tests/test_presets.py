@@ -112,7 +112,7 @@ def test_preset_dims_are_consistent(size):
     cfg = MODEL_PRESETS[size]
     assert cfg["d_model"] % cfg["n_heads"] == 0  # heads tile d_model
     assert cfg["n_heads"] % cfg["n_kv_heads"] == 0  # GQA grouping
-    assert (cfg["d_model"] // cfg["n_heads"]) % 2 == 0  # d_head even (RoPE)
+    assert (cfg["d_model"] // cfg["n_heads"]) % 2 == 0  # even d_head (partial-RoPE friendly)
 
 
 def test_build_lm_smallest_forward():

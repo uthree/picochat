@@ -32,7 +32,7 @@ from einops import rearrange
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel
 
-from picochat.gpt import TransformerLM
+from picochat.gpt import TransformerLM, doc_ids_to_cu_seqlens
 from picochat.presets import build_lm
 from picochat.kernels import (
     fused_linear_cross_entropy,
@@ -187,16 +187,32 @@ class LMTrainerMixin:
             {"params": no_decay, "weight_decay": 0.0},
         ]
 
+    def _non_muon_param_ids(self) -> set[int]:
+        # Params that must NOT go to Muon even though they are 2D: the Native
+        # Sparse Attention intra-block position encoding (cmp_pos) is a learned
+        # positional table, not a hidden linear map -- route it to AdamW
+        # (no-decay) like the embeddings. (Depthwise conv weights are 3D and are
+        # excluded by the ndim check below; Muon accepts only 2D matrices.)
+        from picochat.sparse_attn import NativeSparseAttention
+
+        return {
+            id(m.cmp_pos)
+            for m in self.model.modules()
+            if isinstance(m, NativeSparseAttention)
+        }
+
     def _muon_param_split(self) -> tuple[list, list[dict]]:
         # Muon orthogonalizes matrix-shaped *hidden* weights. The embedding and
-        # lm heads (input/output layers, per the Muon authors) and 1-dim params
-        # (biases) go to the AdamW running alongside it instead, keeping the
-        # same decay split as _param_groups: no decay for embeddings/1-dim,
-        # decay for the lm-head matrices. Everything else -- attention/FFN
-        # projections, the router, and the fused MoE expert weights (stored 2D
-        # exactly because torch.optim.Muon accepts nothing else, see
-        # MixtureOfExperts) -- is optimized by Muon.
+        # lm heads (input/output layers, per the Muon authors), 1-dim params
+        # (biases, norms, gates, A_log/dt_bias), 3-dim depthwise conv weights,
+        # and the NSA positional table go to the AdamW running alongside it
+        # instead, keeping the same decay split as _param_groups: no decay for
+        # embeddings/1-dim/positional, decay for lm-head and conv matrices.
+        # Everything else -- attention/FFN/mixer projections, the router, the
+        # NSA gate/compression MLPs, and the fused MoE expert weights (stored 2D
+        # exactly because torch.optim.Muon accepts nothing else) -- is Muon's.
         embed_ids = self._embedding_param_ids()
+        no_decay_ids = embed_ids | self._non_muon_param_ids()
         # The lm head is the model's output projection -> AdamW, not Muon (Muon
         # skips input/output layers). The MTP heads' transforms are hidden
         # d_model x d_model matrices (they reuse this same output projection), so
@@ -206,9 +222,10 @@ class LMTrainerMixin:
         for p in self.model.parameters():
             if not p.requires_grad:
                 continue
-            if p.ndim < 2 or id(p) in embed_ids:
+            if p.ndim < 2 or id(p) in no_decay_ids:
                 adam_no_decay.append(p)
-            elif id(p) in head_ids:
+            elif id(p) in head_ids or p.ndim != 2:
+                # lm head, and any >2D weight (depthwise conv) Muon can't take
                 adam_decay.append(p)
             else:
                 muon.append(p)
@@ -318,11 +335,17 @@ class LMTrainerMixin:
             hidden @ weight.T, target_ids, ignore_index=self.pad_idx
         )
 
-    def _next_token_loss(self, input_ids: Tensor, targets: Tensor, masks) -> Tensor:
+    def _next_token_loss(
+        self, input_ids: Tensor, targets: Tensor, doc_ids, cu_seqlens
+    ) -> Tensor:
         """Next-token cross-entropy: position i's prediction is scored against
         targets[i+1] (`targets` is input-aligned, not pre-shifted; it is
         simply `input_ids` for pretraining, the masked labels for SFT).
         Positions whose target is pad_idx are ignored.
+
+        `doc_ids`/`cu_seqlens` carry sequence packing (see Transformer.forward);
+        both are built by the caller outside the compiled forward and passed in
+        as traceable tensor inputs.
 
         With multi-token prediction (model.n_mtp > 0) the primary next-token
         loss is joined by one auxiliary cross-entropy per MTP head: head j reads
@@ -335,13 +358,13 @@ class LMTrainerMixin:
         its primary logits.
         """
         if not self._trunk_hidden:
-            logits = self._forward(input_ids, masks=masks)[:, :-1]
+            logits = self._forward(input_ids, doc_ids, cu_seqlens)[:, :-1]
             return F.cross_entropy(
                 rearrange(logits, "b l v -> (b l) v"),
                 rearrange(targets[:, 1:], "b l -> (b l)"),
                 ignore_index=self.pad_idx,
             )
-        hidden = self._forward(input_ids, masks=masks)
+        hidden = self._forward(input_ids, doc_ids, cu_seqlens)
         # Primary head: offset +1. hidden[:, :-1] predicts targets[:, 1:].
         loss = self._head_ce(hidden[:, :-1], self.model.lmhead.weight, targets[:, 1:])
         if self.model.n_mtp == 0:
@@ -456,20 +479,20 @@ class GPT(LMTrainerMixin, L.LightningModule):
     def _loss(self, x: Tensor) -> Tensor:
         # Next-token prediction: position i's logits predict token i+1, so
         # compare the logits against the input shifted left by one.
-        masks = None
+        doc_ids, cu_seqlens = None, None
         if self.bos_idx is not None:
             # Every <|begin_of_text|> starts a new document, so a running count of them
-            # numbers the documents packed into this row. The attention masks
-            # are built here, outside the compiled forward, and passed in as
-            # inputs -- see Transformer.packed_masks.
+            # numbers the documents packed into this row. doc_ids (for the NSA
+            # layers) and cu_seqlens (for the GDN state resets) are built here,
+            # outside the compiled forward, and passed in as inputs.
             doc_ids = (x == self.bos_idx).cumsum(-1)
             # Rows packed by base_setup.py end in a <|pad|> tail; count pads
             # too so no pad position attends into the last document (their
             # targets are already ignore_index'd below).
             doc_ids = doc_ids + (x == self.pad_idx).cumsum(-1)
-            masks = self.model.transformer.packed_masks(doc_ids)
+            cu_seqlens = doc_ids_to_cu_seqlens(doc_ids)
         # Pretraining targets are the input itself (shifted inside the helper).
-        return self._next_token_loss(x, x, masks)
+        return self._next_token_loss(x, x, doc_ids, cu_seqlens)
 
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
         loss = self._loss(batch)
@@ -584,10 +607,10 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         # belongs to (see picochat.dataloader.pack_examples) so attention
         # stays within one conversation; its masks are built here, outside
         # the compiled forward -- see Transformer.packed_masks.
-        masks = None
+        cu_seqlens = None
         if doc_ids is not None:
-            masks = self.model.transformer.packed_masks(doc_ids)
-        return self._next_token_loss(input_ids, labels, masks)
+            cu_seqlens = doc_ids_to_cu_seqlens(doc_ids)
+        return self._next_token_loss(input_ids, labels, doc_ids, cu_seqlens)
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
         loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))

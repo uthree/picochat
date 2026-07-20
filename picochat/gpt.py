@@ -1,8 +1,10 @@
-"""The picochat model (nanochat-style): the building blocks (norm, RoPE, SwiGLU,
-MoE, gated attention, depth-attention residuals) up through TransformerLM. The
-scale-ladder presets and the build_lm factory live in presets.py, the parameter
-estimator in param_estimate.py; the LightningModules that train it live in
-trainer.py.
+"""The picochat model (nanochat-style): the building blocks (norm, SwiGLU, MoE,
+depth-attention residuals) up through TransformerLM. The two sequence mixers
+live in their own modules -- Gated DeltaNet (linear attention) in linear_attn.py
+and Native Sparse Attention in sparse_attn.py -- and are interleaved here (3 GDN
+: 1 NSA per block). The scale-ladder presets and the build_lm factory live in
+presets.py, the parameter estimator in param_estimate.py; the LightningModules
+that train it live in trainer.py.
 """
 
 import math
@@ -10,13 +12,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+import torch.utils.checkpoint
 from torch import Tensor
-from torch.nn.attention.flex_attention import (
-    BlockMask,
-    create_block_mask,
-    flex_attention,
-)
+
+from picochat.linear_attn import GatedDeltaNet
+from picochat.sparse_attn import NativeSparseAttention
 
 
 def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
@@ -24,88 +24,22 @@ def rms_norm(x: Tensor, eps: float = 1e-8) -> Tensor:
         return x / (x.square().mean(-1, keepdim=True).sqrt() + eps)
 
 
-_block_mask_cache: dict[tuple, BlockMask] = {}
-
-
-@torch._dynamo.disable()
-def _sliding_window_block_mask(
-    window_size: int, q_len: int, k_len: int, device: torch.device
-) -> BlockMask:
-    # Building a BlockMask involves plain-Python/vmap machinery that dynamo
-    # can't trace through, and doing so from inside a checkpointed layer (a
-    # graph break inside a for-loop) makes torch.compile give up on the whole
-    # forward and fall back to eager. `torch._dynamo.disable` keeps this call
-    # opaque to the tracer so the surrounding flex_attention call still gets
-    # compiled into a fused kernel; caching means it only actually runs once
-    # per (window_size, q_len, k_len, device) instead of every forward call.
-    key = (window_size, q_len, k_len, str(device))
-    if key not in _block_mask_cache:
-
-        def mask_mod(b, h, q_idx, kv_idx):
-            return (kv_idx <= q_idx) & (kv_idx > q_idx - window_size)
-
-        _block_mask_cache[key] = create_block_mask(
-            mask_mod, B=None, H=None, Q_LEN=q_len, KV_LEN=k_len, device=device
-        )
-    return _block_mask_cache[key]
-
-
-@torch._dynamo.disable()
-def _packed_attention_mask(
-    doc_ids: Tensor, window_size: int | None
-) -> BlockMask | Tensor:
-    """Causal mask that keeps attention within one packed document
-    (MosaicBERT-style sequence packing): several documents share one training
-    sequence, and a token may only attend to earlier tokens carrying the same
-    doc id (further limited to the sliding window when window_size is set).
-
-    Unlike _sliding_window_block_mask this is data-dependent (doc_ids changes
-    every batch), so it can't be cached; Transformer.packed_masks builds it
-    once per step per distinct window size. CUDA gets a flex_attention
-    BlockMask (block-granular, cheap relative to the attention itself);
-    elsewhere a dense (b, 1, l, l) bool mask for SDPA, since flex_attention
-    has no CPU backward. RoPE is relative, so masking is all packing needs --
-    no per-document position reset.
-
-    dynamo-disabled because create_block_mask isn't traceable; but note that
-    calling this *inside* a compiled forward silently drops the surrounding
-    layers out of torch.compile once the returned BlockMask sits in a
-    container across the graph break, which runs flex_attention unfused (it
-    materializes the full scores matrix). The training modules therefore call
-    packed_masks() outside the compiled callable and pass the masks in as
-    inputs (BlockMask is a pytree, so it traces cleanly as a graph input);
-    the in-forward fallback below is for eager/CPU use only.
-    """
-    if doc_ids.is_cuda:
-
-        def mask_mod(b, h, q_idx, kv_idx):
-            ok = (kv_idx <= q_idx) & (doc_ids[b, q_idx] == doc_ids[b, kv_idx])
-            if window_size is not None:
-                ok = ok & (kv_idx > q_idx - window_size)
-            return ok
-
-        batch, seq_len = doc_ids.shape
-        return create_block_mask(
-            mask_mod,
-            B=batch,
-            H=None,
-            Q_LEN=seq_len,
-            KV_LEN=seq_len,
-            device=doc_ids.device,
-        )
-    idx = torch.arange(doc_ids.shape[-1], device=doc_ids.device)
-    mask = (idx[:, None] >= idx[None, :]) & (doc_ids[:, :, None] == doc_ids[:, None, :])
-    if window_size is not None:
-        mask &= idx[None, :] > idx[:, None] - window_size
-    return mask[:, None]  # (b, 1, l, l): broadcasts over heads
-
-
-def rotate_half(x: Tensor) -> Tensor:
-    x = rearrange(x, "... (d r) -> ... d r", r=2)
-    x1, x2 = x[..., 0], x[..., 1]
-    x = torch.stack([-x2, x1], dim=-1)
-    x = rearrange(x, "... d r -> ... (d r)")
-    return x
+def doc_ids_to_cu_seqlens(doc_ids: Tensor) -> Tensor:
+    """Segment boundaries (into the flattened batch*seq layout) at which a Gated
+    DeltaNet layer must reset its recurrent state: every document boundary within
+    a packed row, plus every row boundary (so flattening rows never lets the
+    recurrence leak across them). Returns a 1D LongTensor starting at 0 and
+    ending at batch*seq. Data-dependent, so built outside the compiled forward
+    (like the old packed_masks)."""
+    b, seq = doc_ids.shape
+    flat = doc_ids.clone()
+    # make doc ids unique per row so a row boundary always reads as a change
+    flat = flat + (torch.arange(b, device=doc_ids.device)[:, None] * (doc_ids.max() + 1))
+    flat = flat.reshape(-1)
+    change = torch.ones(b * seq, dtype=torch.bool, device=doc_ids.device)
+    change[1:] = flat[1:] != flat[:-1]
+    bounds = torch.nonzero(change, as_tuple=False).squeeze(-1)
+    return torch.cat([bounds, bounds.new_tensor([b * seq])])
 
 
 class SwiGLU(nn.Module):
@@ -352,204 +286,6 @@ class MixtureOfExperts(nn.Module):
         self.expert_bias += self.bias_update_rate * torch.sign(load.mean() - load)
 
 
-class SelfAttention(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        n_kv_heads: int | None = None,
-        rope_base: int = 1_000_000,
-        max_seq_len: int = 4096,
-        window_size: int | None = None,  # If None is given, full attention
-    ):
-        super().__init__()
-        self.rope_base = rope_base
-        self.max_seq_len = max_seq_len
-        self.d_model = d_model
-        # Specify the number of query heads; the per-head dim is derived so proj_q
-        # stays square (d_head * n_heads == d_model). GQA is set by n_kv_heads.
-        self.n_heads = n_heads
-        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
-        self.d_head = d_model // n_heads
-        self.window_size = window_size
-        assert d_model % n_heads == 0  # heads tile d_model
-        assert n_heads % self.n_kv_heads == 0  # GQA grouping
-        assert self.d_head % 2 == 0  # RoPE rotates dimension pairs
-
-        self.proj_q = nn.Linear(d_model, self.d_head * n_heads, bias=False)
-        self.proj_k = nn.Linear(d_model, self.d_head * self.n_kv_heads, bias=False)
-        self.proj_v = nn.Linear(d_model, self.d_head * self.n_kv_heads, bias=False)
-        # Gated attention (arXiv:2505.06708, G1 variant): an input-dependent
-        # elementwise sigmoid gate on the attention output, per query head,
-        # applied before proj_o. Adds non-linearity between the value/output
-        # projections and lets a head cleanly zero its contribution, which the
-        # paper shows removes attention sinks and improves stability/quality.
-        self.proj_g = nn.Linear(d_model, self.d_head * n_heads, bias=False)
-        self.proj_o = nn.Linear(self.d_head * n_heads, d_model, bias=False)
-
-        sin, cos = self._rope_tables(max_seq_len)
-        self.register_buffer("sin", sin, persistent=False)
-        self.register_buffer("cos", cos, persistent=False)
-
-    def _project(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        # Shared q/k/v/gate projection (with QK-norm) for both forward and
-        # decode. The gate is computed from the same normalized input as q/k/v
-        # and multiplies the attention output elementwise in _output.
-        x = rms_norm(x)
-        query = rearrange(self.proj_q(x), "b l (h d) -> b h l d", d=self.d_head)
-        key = rms_norm(rearrange(self.proj_k(x), "b l (g d) -> b g l d", d=self.d_head))
-        value = rms_norm(
-            rearrange(self.proj_v(x), "b l (g d) -> b g l d", d=self.d_head)
-        )
-        gate = torch.sigmoid(self.proj_g(x))  # (b, l, h*d)
-        return query, key, value, gate
-
-    def _output(self, attn: Tensor, gate: Tensor) -> Tensor:
-        # Gate the attention output elementwise, then project back to d_model.
-        return self.proj_o(rearrange(attn, "b h l d -> b l (h d)") * gate)
-
-    def _window_mask(
-        self,
-        q_len: int,
-        k_len: int,
-        q_offset: int,
-        k_offset: int,
-        device: torch.device,
-    ) -> Tensor:
-        # Bottom-right aligned causal mask: query at absolute position i+q_offset
-        # attends to keys at absolute position <= i+q_offset (reduces to plain
-        # causal when both offsets are 0). Keys need their own offset separately
-        # from queries because a truncated KV cache no longer starts at absolute
-        # position 0 (see SelfAttention.decode). When window_size is set,
-        # additionally drop keys older than window_size positions back, so each
-        # query only sees a local trailing slice.
-        q_idx = torch.arange(q_len, device=device).unsqueeze(1) + q_offset
-        k_idx = torch.arange(k_len, device=device).unsqueeze(0) + k_offset
-        mask = k_idx <= q_idx
-        if self.window_size is not None:
-            mask &= k_idx > q_idx - self.window_size
-        return mask
-
-    def forward(self, x: Tensor, attn_mask: BlockMask | Tensor | None = None) -> Tensor:
-        # Training path: causal attention over the whole sequence, no cache.
-        # `attn_mask` is the packed-document mask built by Transformer.forward
-        # (a flex_attention BlockMask on CUDA, a dense bool mask elsewhere); it
-        # already encodes causality, document boundaries and this layer's
-        # window, so it replaces the plain causal/windowed paths below.
-        query, key, value, gate = self._project(x)
-        query, key = self._rope(query), self._rope(key)
-        if isinstance(attn_mask, BlockMask):
-            attn = flex_attention(
-                query, key, value, block_mask=attn_mask, enable_gqa=True
-            )
-        elif attn_mask is not None:
-            attn = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=attn_mask, enable_gqa=True
-            )
-        elif self.window_size is None:
-            # Fast path: let SDPA use its native causal kernel instead of a
-            # materialized mask.
-            attn = F.scaled_dot_product_attention(
-                query, key, value, is_causal=True, enable_gqa=True
-            )
-        elif query.is_cuda:
-            # flex_attention lowers to a fused, block-sparse Triton kernel (the
-            # same flash-attention family of algorithms as SDPA's fused
-            # backends) when this forward runs under torch.compile, so windowed
-            # layers skip whole blocks outside the window instead of
-            # materializing an L x L mask like a naive implementation would.
-            # (flex_attention has no CPU backward support, so this path is
-            # CUDA-only; see the else branch below.)
-            block_mask = _sliding_window_block_mask(
-                self.window_size, query.shape[-2], key.shape[-2], query.device
-            )
-            attn = flex_attention(
-                query, key, value, block_mask=block_mask, enable_gqa=True
-            )
-        else:
-            mask = self._window_mask(
-                query.shape[-2],
-                key.shape[-2],
-                q_offset=0,
-                k_offset=0,
-                device=query.device,
-            )
-            attn = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=mask, enable_gqa=True
-            )
-        return self._output(attn, gate)
-
-    def decode(
-        self,
-        x: Tensor,
-        cache: Tensor | None = None,
-        pos: int = 0,
-        cache_margin: int = 0,
-    ) -> tuple[Tensor, Tensor]:
-        # Inference path: append the new keys/values to the cache and attend over
-        # the full prefix (the window mask below limits which of those the query
-        # actually attends to). `pos` is the absolute position of the first token
-        # of `x`; the caller (Transformer.decode) owns this bookkeeping, since the
-        # cache is truncated below and can no longer be used to infer it.
-        # Always runs eager (see GPT.__init__), so flex_attention would gain
-        # nothing here over a plain masked SDPA call; keep the simpler path.
-        # `cache_margin` keeps window_size + margin keys instead of window_size,
-        # so speculative decoding can roll the cache back by up to `margin`
-        # rejected tokens and still have a full window for the accepted position
-        # (see picochat.engine.generate_speculative).
-        query, key, value, gate = self._project(x)
-        old_len = 0 if cache is None else cache.shape[-2]
-        if cache is not None:
-            key = torch.cat([cache[0], key], dim=-2)
-            value = torch.cat([cache[1], value], dim=-2)
-        # Absolute position of the first (untruncated) key involved in this call.
-        key_offset = pos - old_len
-        q_len, k_len = query.shape[-2], key.shape[-2]
-        query_r, key_r = (
-            self._rope(query, offset=pos),
-            self._rope(key, offset=key_offset),
-        )
-        mask = self._window_mask(
-            q_len, k_len, q_offset=pos, k_offset=key_offset, device=query.device
-        )
-        attn = F.scaled_dot_product_attention(
-            query_r, key_r, value, attn_mask=mask, enable_gqa=True
-        )
-        out = self._output(attn, gate)
-        # Truncate only what's carried into the *next* call's cache; the attention
-        # above already used the full, untruncated key/value, so a chunk longer
-        # than window_size (e.g. a long prefill) is handled correctly for free.
-        if self.window_size is not None:
-            keep = self.window_size + cache_margin
-            key = key[..., -keep:, :]
-            value = value[..., -keep:, :]
-        new_cache = torch.stack([key, value])
-        return out, new_cache
-
-    def _rope_tables(self, max_seq_len: int) -> tuple[Tensor, Tensor]:
-        # Build sin/cos for absolute positions 0..max_seq_len-1 (offset is handled
-        # later when slicing).
-        t = torch.arange(max_seq_len)[:, None].float()
-        f = (
-            self.rope_base
-            ** (torch.linspace(0.0, 1.0, self.d_head // 2).repeat_interleave(2))
-        )[None, :]
-        theta = t / f
-        return torch.sin(theta), torch.cos(theta)
-
-    def _rope(self, x, offset: int = 0) -> Tensor:
-        seq_len = x.shape[-2]
-        assert offset + seq_len <= self.max_seq_len, (
-            f"position {offset + seq_len} exceeds max_seq_len={self.max_seq_len}"
-        )
-        # Apply RoPE in float32 to keep positional precision under bf16 autocast.
-        with torch.amp.autocast(device_type="cuda", enabled=False):
-            sin = self.sin[offset : offset + seq_len, :]
-            cos = self.cos[offset : offset + seq_len, :]
-            x = x * cos + rotate_half(x) * sin
-        return x
-
-
 class DepthAttention(nn.Module):
     """Depth-wise softmax attention over block representations -- the residual
     mixing of Block Attention Residuals (arXiv:2603.15031). Replaces the
@@ -586,11 +322,18 @@ class TransformerLayer(nn.Module):
         self,
         d_model: int,
         n_heads: int,
+        linear: bool,
         n_kv_heads: int | None = None,
-        rope_base: int = 1_000_000,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
-        window_size: int | None = None,
+        window_size: int = 512,
+        rope_base: float = 1_000_000.0,
+        rope_factor: float = 0.25,
+        cmp_block: int = 32,
+        cmp_stride: int = 16,
+        sel_block: int = 64,
+        n_selected: int = 16,
+        conv_size: int = 4,
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
@@ -598,16 +341,32 @@ class TransformerLayer(nn.Module):
         expert_bank: ExpertBank | None = None,
     ):
         super().__init__()
+        # `linear` picks the sequence mixer: a Gated DeltaNet (linear attention,
+        # recurrent, no RoPE) for the intra-block layers, or Native Sparse
+        # Attention (sparse softmax, partial RoPE) for the block-tail global
+        # layer. The two carry different cache formats at decode (a recurrent
+        # state vs. a growing per-branch KV), so `linear` also routes decode().
+        self.linear = linear
         self.mix_attn = DepthAttention(d_model)
         self.mix_ffn = DepthAttention(d_model)
-        self.attn = SelfAttention(
-            d_model,
-            n_heads,
-            n_kv_heads=n_kv_heads,
-            rope_base=rope_base,
-            max_seq_len=max_seq_len,
-            window_size=window_size,
-        )
+        if linear:
+            self.attn = GatedDeltaNet(
+                d_model, n_heads, n_kv_heads=n_kv_heads, conv_size=conv_size
+            )
+        else:
+            self.attn = NativeSparseAttention(
+                d_model,
+                n_heads,
+                n_kv_heads=n_kv_heads,
+                cmp_block=cmp_block,
+                cmp_stride=cmp_stride,
+                sel_block=sel_block,
+                n_selected=n_selected,
+                window=window_size,
+                rope_factor=rope_factor,
+                rope_base=rope_base,
+                max_seq_len=max_seq_len,
+            )
         if d_expert is None:
             d_expert = d_ffn
         self.ffn = SwiGLU(d_model, d_hidden=d_ffn)
@@ -621,20 +380,27 @@ class TransformerLayer(nn.Module):
                 bank=expert_bank,
             )
 
+    def _mix(self, mixed: Tensor, doc_ids: Tensor | None, cu_seqlens: Tensor | None):
+        # Dispatch the mixed input to the layer's sequence mixer: GDN resets its
+        # recurrence at cu_seqlens boundaries; NSA masks within doc_ids.
+        if self.linear:
+            return self.attn(mixed, cu_seqlens=cu_seqlens, doc_ids=doc_ids)
+        return self.attn(mixed, doc_ids=doc_ids)
+
     def forward(
         self,
         blocks: Tensor,
         partial: Tensor | None,
-        attn_mask: BlockMask | Tensor | None = None,
+        doc_ids: Tensor | None = None,
+        cu_seqlens: Tensor | None = None,
     ) -> Tensor:
         # Block AttnRes protocol (see Transformer.forward): instead of adding
         # onto a single residual stream, each sublayer reads its input as depth
         # attention over the block representations plus the current block's
-        # partial sum, and accumulates its output into that partial sum.
-        # attn/ffn still apply their pre-norm (rms_norm) internally. The MoE
+        # partial sum, and accumulates its output into that partial sum. The MoE
         # branch shares the FFN's mix: the two run in parallel from the same
         # input, forming one MLP sublayer.
-        a = self.attn(self.mix_attn(blocks, partial), attn_mask)
+        a = self._mix(self.mix_attn(blocks, partial), doc_ids, cu_seqlens)
         partial = a if partial is None else partial + a
         return self._mlp(blocks, partial, no_drop=False)
 
@@ -642,13 +408,14 @@ class TransformerLayer(nn.Module):
         self,
         blocks: Tensor,
         partial: Tensor | None,
-        cache: Tensor | None = None,
+        cache=None,
         pos: int = 0,
-        cache_margin: int = 0,
-    ) -> tuple[Tensor, Tensor]:
-        a, cache = self.attn.decode(
-            self.mix_attn(blocks, partial), cache, pos, cache_margin
-        )
+    ) -> tuple[Tensor, object]:
+        mixed = self.mix_attn(blocks, partial)
+        if self.linear:
+            a, cache = self.attn.decode(mixed, cache)  # (rec_state, conv_state)
+        else:
+            a, cache = self.attn.decode(mixed, cache, pos)  # per-branch KV dict
         partial = a if partial is None else partial + a
         # no_drop=True mirrors forward()'s MoE but never drops a token, so
         # generation runs the same network as training (see MoE.forward).
@@ -673,12 +440,18 @@ class Transformer(nn.Module):
         n_heads: int,
         n_layers: int,
         n_kv_heads: int | None = None,
-        rope_base: int = 1_000_000,
+        rope_base: float = 1_000_000.0,
+        rope_factor: float = 0.25,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
         grad_checkpoint: bool = False,
-        window_size: int = 64,
+        window_size: int = 512,
         layers_per_block: int = 4,
+        cmp_block: int = 32,
+        cmp_stride: int = 16,
+        sel_block: int = 64,
+        n_selected: int = 16,
+        conv_size: int = 4,
         n_experts: int | None = None,
         d_expert: int | None = None,
         n_active: int = 2,
@@ -687,14 +460,13 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.n_layers = n_layers
-        # layers_per_block groups the layers into blocks that serve two roles
-        # at once: the last layer of each block uses full (global) attention
-        # while the rest use the sliding window, and each block is one unit of
-        # the Block AttnRes residual (see DepthAttention / forward) -- the
-        # block representation is committed right after its global layer has
-        # integrated long-range context. layers_per_block=1 makes every layer
-        # global and its own block (i.e. Full AttnRes). When n_layers isn't
-        # divisible, the trailing remainder forms a final, windowed-only block.
+        # layers_per_block groups the layers into blocks that serve two roles at
+        # once: the last layer of each block is a Native Sparse Attention
+        # (global) layer while the rest are Gated DeltaNet (linear) layers -- a
+        # 3-GDN : 1-NSA hybrid at the default lpb=4 -- and each block is one unit
+        # of the Block AttnRes residual (see DepthAttention / forward), committed
+        # right after its NSA layer has integrated long-range context.
+        # layers_per_block=1 makes every layer an NSA layer and its own block.
         self.layers_per_block = layers_per_block
         # Trade compute for memory during training: don't keep each layer's
         # activations for the backward pass, recompute them instead. Lets us fit
@@ -709,14 +481,23 @@ class Transformer(nn.Module):
         # (d_expert -> d_ffn -> 3*d_model); the rest receive that instance.
         expert_bank = None
         for i in range(n_layers):
+            # block tail (every layers_per_block-th layer) -> NSA; rest -> GDN
+            linear = (i + 1) % layers_per_block != 0
             layer = TransformerLayer(
                 d_model,
                 n_heads,
+                linear,
                 n_kv_heads=n_kv_heads,
-                rope_base=rope_base,
                 d_ffn=d_ffn,
                 max_seq_len=max_seq_len,
-                window_size=None if (i + 1) % layers_per_block == 0 else window_size,
+                window_size=window_size,
+                rope_base=rope_base,
+                rope_factor=rope_factor,
+                cmp_block=cmp_block,
+                cmp_stride=cmp_stride,
+                sel_block=sel_block,
+                n_selected=n_selected,
+                conv_size=conv_size,
                 n_experts=n_experts,
                 d_expert=d_expert,
                 n_active=n_active,
@@ -729,32 +510,20 @@ class Transformer(nn.Module):
         # Final aggregation over all block representations before the head.
         self.mix_out = DepthAttention(d_model)
 
-    def packed_masks(self, doc_ids: Tensor) -> dict[int | None, BlockMask | Tensor]:
-        # One packed-document mask per distinct window size among the layers
-        # (see _packed_attention_mask). Called by the training modules once
-        # per step, *outside* the compiled forward: built inside it, the
-        # graph break around the dynamo-disabled builder would drop the
-        # layers out of torch.compile and run flex_attention unfused.
-        masks: dict[int | None, BlockMask | Tensor] = {}
-        for layer in self.layers:
-            ws = layer.attn.window_size
-            if ws not in masks:
-                masks[ws] = _packed_attention_mask(doc_ids, ws)
-        return masks
-
     def forward(
         self,
         x: Tensor,
         doc_ids: Tensor | None = None,
-        masks: dict[int | None, BlockMask | Tensor] | None = None,
+        cu_seqlens: Tensor | None = None,
     ) -> Tensor:
-        # doc_ids (b, l): id of the packed document each token belongs to.
-        # When given, attention is confined within documents (sequence
-        # packing). `masks` is the precomputed packed_masks(doc_ids) -- pass
-        # it when this forward runs under torch.compile (see packed_masks);
-        # otherwise it is built here for eager/CPU convenience.
-        if masks is None and doc_ids is not None:
-            masks = self.packed_masks(doc_ids)
+        # doc_ids (b, l): id of the packed document each token belongs to. When
+        # given, the NSA layers mask attention within documents and the GDN
+        # layers reset their recurrent state at document/row boundaries via
+        # `cu_seqlens` -- derived here (eager convenience) when only doc_ids is
+        # passed, or precomputed by the training modules outside the compiled
+        # forward and passed in (both are traceable tensor inputs).
+        if doc_ids is not None and cu_seqlens is None:
+            cu_seqlens = doc_ids_to_cu_seqlens(doc_ids)
         # Block AttnRes state: `blocks` stacks the committed block
         # representations (starting with the token embedding as blocks[0]),
         # `partial` is the running sum of the current block's sublayer outputs.
@@ -765,13 +534,12 @@ class Transformer(nn.Module):
         blocks, partial = x[None], None
         for i, layer in enumerate(self.layers):
             blocks, partial = self._open_block(blocks, partial, i)
-            mask = masks[layer.attn.window_size] if masks is not None else None
             if self.grad_checkpoint and self.training:
                 partial = torch.utils.checkpoint.checkpoint(
-                    layer, blocks, partial, mask, use_reentrant=False
+                    layer, blocks, partial, doc_ids, cu_seqlens, use_reentrant=False
                 )
             else:
-                partial = layer(blocks, partial, mask)
+                partial = layer(blocks, partial, doc_ids, cu_seqlens)
 
         if self.training:
             # Apply each MoE's staged load-balancing bias update here -- once,
@@ -802,25 +570,24 @@ class Transformer(nn.Module):
     def decode(
         self,
         x: Tensor,
-        cache: list[Tensor | None] | None = None,
+        cache: list | None = None,
         pos: int = 0,
-        cache_margin: int = 0,
-    ) -> tuple[Tensor, list[Tensor], int]:
+    ) -> tuple[Tensor, list, int]:
         # Owns the absolute-position bookkeeping in one place: every layer sees
         # the same `pos` (they all process the same chunk at the same time), and
         # only this method computes/advances it. Neither the cache nor the
         # position is kept as model state -- both flow through args/returns only.
         # The AttnRes blocks/partial state is per-token and lives only within
-        # this call (rebuilt for each chunk), so the cache format is unchanged.
-        # `cache_margin` is forwarded to the windowed layers (see
-        # SelfAttention.decode) for speculative decoding's cache rollback.
+        # this call (rebuilt for each chunk). `cache[i]` is whatever the layer's
+        # mixer returns: a Gated DeltaNet (recurrent_state, conv_state) tuple, or
+        # a Native Sparse Attention per-branch KV dict.
         if cache is None:
             cache = [None] * self.n_layers
         q_len = x.shape[-2]
         blocks, partial = x[None], None
         for i, layer in enumerate(self.layers):
             blocks, partial = self._open_block(blocks, partial, i)
-            partial, cache[i] = layer.decode(blocks, partial, cache[i], pos, cache_margin)
+            partial, cache[i] = layer.decode(blocks, partial, cache[i], pos)
         return self._finalize(blocks, partial), cache, pos + q_len  # type: ignore
 
 
@@ -856,13 +623,19 @@ class TransformerLM(nn.Module):
         n_heads: int,
         n_layers: int,
         n_kv_heads: int | None = None,
-        rope_base: int = 1_000_000,
+        rope_base: float = 1_000_000.0,
+        rope_factor: float = 0.25,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
         init_std: float = 0.02,
         grad_checkpoint: bool = True,
-        window_size: int = 64,
+        window_size: int = 512,
         layers_per_block: int = 4,
+        cmp_block: int = 32,
+        cmp_stride: int = 16,
+        sel_block: int = 64,
+        n_selected: int = 16,
+        conv_size: int = 4,
         n_experts: int | None = None,
         n_active: int = 2,
         d_expert: int | None = None,
@@ -896,11 +669,17 @@ class TransformerLM(nn.Module):
             n_layers,
             n_kv_heads=n_kv_heads,
             rope_base=rope_base,
+            rope_factor=rope_factor,
             d_ffn=d_ffn,
             max_seq_len=max_seq_len,
             grad_checkpoint=grad_checkpoint,
             window_size=window_size,
             layers_per_block=layers_per_block,
+            cmp_block=cmp_block,
+            cmp_stride=cmp_stride,
+            sel_block=sel_block,
+            n_selected=n_selected,
+            conv_size=conv_size,
             n_experts=n_experts,
             n_active=n_active,
             d_expert=d_expert,
@@ -922,8 +701,13 @@ class TransformerLM(nn.Module):
                     nn.init.zeros_(m.bias)
         scaled_std = self.init_std / math.sqrt(2 * self.n_layers)
         for m in self.modules():
-            if isinstance(m, SelfAttention):
+            if isinstance(m, (GatedDeltaNet, NativeSparseAttention)):
+                # both mixers write into the residual stream through proj_o
                 nn.init.normal_(m.proj_o.weight, mean=0.0, std=scaled_std)
+                if isinstance(m, GatedDeltaNet):
+                    # restore the gate parameters' non-normal init (the generic
+                    # loop above only touched Linear/Embedding weights)
+                    m.reset_parameters()
             elif isinstance(m, SwiGLU):
                 nn.init.normal_(m.proj_down.weight, mean=0.0, std=scaled_std)
             elif isinstance(m, MixtureOfExperts):
@@ -945,71 +729,67 @@ class TransformerLM(nn.Module):
         self,
         x: Tensor | None = None,
         doc_ids: Tensor | None = None,
-        masks: dict[int | None, BlockMask | Tensor] | None = None,
+        cu_seqlens: Tensor | None = None,
         inputs_embeds: Tensor | None = None,
     ) -> Tensor:
         # Shared trunk (embed + transformer) up to the final hidden state, before
-        # the lm head. doc_ids/masks: see Transformer.forward (sequence packing).
-        # `inputs_embeds` (B, L, d_model) bypasses the token embedding so a
-        # caller can splice in non-text embeddings -- e.g. audio soft tokens
+        # the lm head. doc_ids/cu_seqlens: see Transformer.forward (sequence
+        # packing). `inputs_embeds` (B, L, d_model) bypasses the token embedding
+        # so a caller can splice in non-text embeddings -- e.g. audio soft tokens
         # scattered over placeholder positions (see
         # picochat.audio.scatter_audio_embeds); when given, `x` is ignored.
         embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
-        return self.transformer(embeds, doc_ids, masks)
+        return self.transformer(embeds, doc_ids, cu_seqlens)
 
     def forward(
         self,
         x: Tensor | None = None,
         doc_ids: Tensor | None = None,
-        masks: dict[int | None, BlockMask | Tensor] | None = None,
+        cu_seqlens: Tensor | None = None,
         inputs_embeds: Tensor | None = None,
     ) -> Tensor:
-        return self.lmhead(self.encode(x, doc_ids, masks, inputs_embeds))
+        return self.lmhead(self.encode(x, doc_ids, cu_seqlens, inputs_embeds))
 
     def _decode_trunk(
         self,
         x: Tensor | None,
-        cache: list[Tensor | None] | None,
+        cache: list | None,
         pos: int,
-        cache_margin: int,
         inputs_embeds: Tensor | None,
-    ) -> tuple[Tensor, list[Tensor], int]:
+    ) -> tuple[Tensor, list, int]:
         # Shared decode trunk (embed + cached transformer) up to the final hidden
         # states. `inputs_embeds` prefills the cache from spliced embeddings
         # (e.g. an audio-conditioned prompt) instead of token ids; later steps
         # pass token ids as usual.
         embeds = inputs_embeds if inputs_embeds is not None else self.embed(x)
-        return self.transformer.decode(embeds, cache, pos, cache_margin)
+        return self.transformer.decode(embeds, cache, pos)
 
     def decode(
         self,
         x: Tensor | None = None,
-        cache: list[Tensor | None] | None = None,
+        cache: list | None = None,
         pos: int = 0,
-        cache_margin: int = 0,
         inputs_embeds: Tensor | None = None,
-    ) -> tuple[Tensor, list[Tensor], int]:
-        embeds, cache, pos = self._decode_trunk(x, cache, pos, cache_margin, inputs_embeds)
+    ) -> tuple[Tensor, list, int]:
+        embeds, cache, pos = self._decode_trunk(x, cache, pos, inputs_embeds)
         return self.lmhead(embeds), cache, pos
 
     def decode_heads(
         self,
         x: Tensor | None = None,
-        cache: list[Tensor | None] | None = None,
+        cache: list | None = None,
         pos: int = 0,
-        cache_margin: int = 0,
         inputs_embeds: Tensor | None = None,
-    ) -> tuple[Tensor, list[Tensor], list[Tensor], int]:
+    ) -> tuple[Tensor, list[Tensor], list, int]:
         """Like decode() but also returns every MTP head's logits, for
         speculative drafting. Returns (logits, mtp_logits, cache, pos), where
         logits is (B, q_len, vocab) from the primary head and mtp_logits is a
         length-n_mtp list of (B, q_len, vocab) tensors (head j -> offset 2+j).
         Chunked decode is per-position equivalent to sequential decode (attention
         is causal, MoE runs no_drop), so a whole candidate chunk can be verified
-        in one call. `cache_margin` (>= the draft length) keeps enough windowed
-        KV that the cache can be rolled back past rejected drafts and still hold a
-        full window (see picochat.engine.generate_speculative)."""
-        embeds, cache, pos = self._decode_trunk(x, cache, pos, cache_margin, inputs_embeds)
+        in one call. The caller snapshots the cache before drafting so rejected
+        drafts can be rolled back (see picochat.engine.generate_speculative)."""
+        embeds, cache, pos = self._decode_trunk(x, cache, pos, inputs_embeds)
         # each MTP head transforms the hidden state, then the SHARED lm head
         # decodes it to vocab logits.
         logits = self.lmhead(embeds)

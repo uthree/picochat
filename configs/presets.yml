@@ -1,21 +1,40 @@
-# Model scale ladder, loaded by picochat.gpt (MODEL_PRESETS /
+# Model scale ladder, loaded by picochat.presets (MODEL_PRESETS /
 # build_lm / estimate_preset_params).
 #
-# Two independent axes, so a recipe can pick size and architecture separately:
+# picochat is a *minimal* language-model stack you can pretrain for roughly $100
+# at the smallest rung, that also scales up unchanged to much larger models. Two
+# independent axes let a recipe pick size and architecture separately:
 #
 #   1. Total-parameter rung: 200m / 1b / 8b / 35b / 120b. Each step up is
-#      roughly the next order-of-magnitude landmark in *total* params.
+#      roughly the next order-of-magnitude landmark in *total* params. 200m/1b
+#      are the "$100-budget" end; 8b and the MoE rungs are the same code scaled.
 #   2. Architecture variant at that rung, matched on *total* params (checkpoint
 #      / memory footprint) so the comparison is "same budget, spent differently":
 #        - <rung>            dense (no MoE)                     -- 200m / 1b / 8b
 #        - <rung>-moe        LatentMoE, fine-grained, per-layer pools -- 35b / 120b
 #        - <rung>-moe-shared coarse-grained, one shared pool        -- 35b / 120b
 #
-# Dense-only at 200m / 1b / 8b: at those scales the MoE sparsity barely pays off
-# (the always-on backbone -- embedding, attention, the dense/shared FFN -- is a
-# large fraction of the model, so "active" stays a high fraction of total).
-# 35b and 120b are MoE-only, and there the routed pool dominates, so each token
-# activates well under 10% of the total (see the active figures below).
+# Sequence mixer (all rungs): a hybrid stack interleaving, per block of
+# `layers_per_block` layers, (layers_per_block - 1) Gated DeltaNet linear-
+# attention layers with 1 Native Sparse Attention layer as the block tail --
+# a 3:1 GDN:NSA ratio at the default lpb=4 (Qwen3-Next-style).
+#
+#   - Gated DeltaNet (arXiv:2412.06464): a recurrent linear-attention mixer with
+#     a fixed-size state (no growing KV cache) that learns positions implicitly
+#     from its recurrence -- so these layers use NO RoPE.
+#   - Native Sparse Attention (arXiv:2502.11089): sparse softmax over a
+#     compressed + top-n-selected + sliding-window set of keys, for long context
+#     at a fraction of the KV cost. These layers keep *partial* RoPE
+#     (rope_factor of the head dim rotated) as their positional signal.
+#
+# NSA hyperparameters not set here fall back to the module defaults
+# (cmp_block=32, cmp_stride=16, sel_block=64, n_selected=16, rope_factor=0.25);
+# `window_size` is the NSA sliding-window branch. GDN uses a fixed conv_size=4.
+#
+# Dense-only at 200m / 1b / 8b: at those scales MoE sparsity barely pays off
+# (the always-on backbone -- embedding, the mixers, the dense/shared FFN -- is a
+# large fraction of the model). 35b and 120b are MoE-only, where the routed pool
+# dominates so each token activates well under 10% of the total.
 #
 # The two MoE families are deliberately different points in MoE design space:
 #
@@ -29,60 +48,52 @@
 #               (n_active 2), one pool shared across every layer (share_experts,
 #               MoEUT-style), no latent compression.
 #
-# Both MoE families use a narrow backbone with a small dense/shared FFN and a
-# big routed pool, so the always-on part stays small and per-token activation is
-# < 10% of total. -moe and -moe-shared match on total but differ on granularity
-# (fine vs coarse), sharing (per-layer vs one pool) and hence active params.
-#
 # Multi-token prediction: 8b and every larger preset carry n_mtp extra heads
-# (offsets +2.., simplest "several heads" form) for self-speculative decoding
-# (picochat.engine.generate_speculative). Each is a light d_model-space residual
-# transform that reuses the *shared* lm head to reach vocab (Medusa-style), so it
-# costs ~d_model^2 rather than a full vocab*d_model layer (mtp_rank shrinks it
-# further). Counted in the total but NOT in the active figure -- plain
-# autoregressive decoding runs only the primary head. Smaller presets omit them.
+# (offsets +2.., Medusa-style, reusing the shared lm head) for self-speculative
+# decoding (picochat.engine.generate_speculative). Counted in the total but NOT
+# in the active figure. Smaller presets omit them.
 #
 # Sizes assume a 128k vocab with an untied lm head (embedding + head together
-# are 256000*d_model params, which dominates the small presets -- 200m is
-# mostly its embeddings). Totals below are estimate_num_params() figures.
+# are 256000*d_model params, which dominates the small presets -- 200m is mostly
+# its embeddings). Totals below are estimate_num_params() figures.
 
 # --------------------------------------------------------------------------
-# 200M -- dense, and deliberately the simplest topology: layers_per_block: 1
-# makes every layer full (global) attention and its own Block-AttnRes block
-# (i.e. no sliding window, no attention-residual blocking). At this scale the
-# windowing/blocking machinery buys nothing, so the tiny model runs the plain
-# variant. Also the default target for the smoke test and base pretraining.
+# 200M -- dense, the minimal "$100" config. n_layers 12 / lpb 4 gives 9 Gated
+# DeltaNet layers + 3 NSA layers. At this scale the GDN layers carry most of the
+# sequence modeling cheaply and the few NSA layers add global recall.
+# Also the default target for the smoke test and base pretraining.
 # --------------------------------------------------------------------------
-200m: # ~0.20B params (dense, full attention)
+200m: # ~0.20B params (dense)
     d_model: 576
     n_layers: 12
     n_heads: 9
     n_kv_heads: 3
     vocab_size: 128000
-    layers_per_block: 1  # full attention every layer; residual not blocked
+    layers_per_block: 4
+    window_size: 256
 
 # --------------------------------------------------------------------------
 # 1B
 # --------------------------------------------------------------------------
-1b: # ~0.98B params (dense)
+1b: # ~0.99B params (dense)
     d_model: 1536
     n_layers: 20
     n_heads: 12
     n_kv_heads: 3
     vocab_size: 128000
-    window_size: 128
+    window_size: 512
     layers_per_block: 4
 
 # --------------------------------------------------------------------------
 # 8B
 # --------------------------------------------------------------------------
-8b: # ~7.8B params (dense; + 3 lightweight MTP heads, ~0.05B)
+8b: # ~7.8B params (dense; + 3 lightweight MTP heads)
     d_model: 4096
     n_layers: 32
     n_heads: 32
     n_kv_heads: 8
     vocab_size: 128000
-    window_size: 256
+    window_size: 512
     layers_per_block: 4
     n_mtp: 3  # multi-token prediction heads (draft up to 4 tokens/step); 8B and up
 
@@ -90,7 +101,7 @@
 # 35B -- MoE only (no dense past 8b). Narrow backbone (d_model 2560) + small
 # dense/shared FFN + a big routed pool, so per-token activation is ~7-10%.
 # --------------------------------------------------------------------------
-35b-moe: # ~35.5B total / ~2.5B active (7.0%) -- LatentMoE, fine-grained
+35b-moe: # ~35.5B total / ~2.5B active -- LatentMoE, fine-grained
     d_model: 2560
     n_layers: 40
     n_heads: 20
@@ -105,7 +116,7 @@
     d_latent: 1024   # LatentMoE: experts run in a d_model/2.5 latent space
     n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-35b-moe-shared: # ~35.5B total / ~3.4B active (9.6%) -- coarse-grained, shared pool
+35b-moe-shared: # ~35.5B total / ~3.4B active -- coarse-grained, shared pool
     d_model: 2560
     n_layers: 40
     n_heads: 20
@@ -124,11 +135,11 @@
 # 120B -- MoE only. Narrow backbone (d_model 3584) + small dense/shared FFN +
 # a big routed pool; per-token activation is ~5-7%.
 # --------------------------------------------------------------------------
-120b-moe: # ~118B total / ~6.2B active (5.2%) -- LatentMoE, fine-grained
+120b-moe: # ~118B total / ~6.2B active -- LatentMoE, fine-grained
     d_model: 3584
     n_layers: 48
     n_heads: 28
-    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads (28 % 8 != 0)
+    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
@@ -139,11 +150,11 @@
     d_latent: 1792   # LatentMoE latent space (d_model/2)
     n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-120b-moe-shared: # ~118B total / ~8.1B active (6.8%) -- coarse-grained, shared pool
+120b-moe-shared: # ~118B total / ~8.1B active -- coarse-grained, shared pool
     d_model: 3584
     n_layers: 48
     n_heads: 28
-    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads (28 % 8 != 0)
+    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6

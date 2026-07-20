@@ -150,14 +150,14 @@ def generate(
         next_token = sample(logits[:, -1], cfg)
 
 
-def _truncate_cache(cache: list[Tensor], drop: int) -> list[Tensor]:
-    """Drop the last `drop` positions from every layer's KV cache. The rejected
-    speculative drafts are always the most recently appended entries, so this
-    rolls the cache back to the last accepted token (works for both the full and
-    the sliding-window layers, whose caches all grew by the same chunk length)."""
-    if drop <= 0:
-        return cache
-    return [c[..., : c.shape[-2] - drop, :] for c in cache]
+def _snapshot_cache(cache: list | None) -> list | None:
+    """A cheap rollback point for speculative decoding: a shallow copy of the
+    per-layer cache list. The mixers' decode() never mutates cached tensors in
+    place -- a Gated DeltaNet returns a fresh (recurrent_state, conv_state) and a
+    Native Sparse Attention returns a new per-branch KV dict (torch.cat makes new
+    tensors) -- so preserving the old element references is enough to restore the
+    pre-draft state, without cloning any tensor."""
+    return None if cache is None else list(cache)
 
 
 @torch.no_grad()
@@ -179,6 +179,13 @@ def generate_speculative(
     tokens per forward; when they are wrong it still advances one, so the output
     never differs from plain greedy decoding.
 
+    Cache rollback works for the hybrid GDN/NSA stack by snapshotting the cache
+    before each verify forward (see _snapshot_cache) and, only when a draft is
+    rejected, restoring it and re-committing the accepted prefix in one extra
+    forward -- the recurrent GDN state cannot be sliced back like a KV cache, so
+    it is re-derived. When every draft is accepted no recommit is needed, so the
+    fast path stays one forward per step.
+
     Requires model.n_mtp >= 1; otherwise falls back to plain generate(). Sampling
     knobs in `cfg` are ignored (this path is greedy); use generate() for sampled
     decoding.
@@ -195,10 +202,8 @@ def generate_speculative(
             return
     stop_ids = chat_stop_ids(tokenizer)
 
-    # `cache_margin=k` keeps k extra keys per windowed layer so the cache can be
-    # rolled back past up to k rejected drafts and still hold a full window.
     x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    logits, mtp, cache, pos = model.decode_heads(x, cache_margin=k)
+    logits, mtp, cache, pos = model.decode_heads(x)
     cand = [int(logits[0, -1].argmax())] + [int(m[0, -1].argmax()) for m in mtp]
 
     emitted = 0
@@ -208,7 +213,8 @@ def generate_speculative(
             if not cand:
                 return
         ct = torch.tensor([cand], dtype=torch.long, device=device)
-        logits, mtp, cache, pos = model.decode_heads(ct, cache, pos, cache_margin=k)
+        base, base_pos = _snapshot_cache(cache), pos
+        logits, mtp, cache, pos = model.decode_heads(ct, cache, pos)
         # true[i] = the model's real next token after candidate i.
         true = [int(logits[0, i].argmax()) for i in range(len(cand))]
         # cand[0] is a verified token; accept drafts while each matches the real
@@ -227,12 +233,19 @@ def generate_speculative(
             emitted += 1
             if emitted >= budget:
                 return
-        # Roll the cache back past the rejected drafts, then draft afresh: the
-        # correction true[accepted] is the next verified token, and the MTP heads
-        # read at the accepted position propose its successors.
-        cache = _truncate_cache(cache, (len(cand) - 1) - accepted)
-        pos -= (len(cand) - 1) - accepted
-        cand = [true[accepted]] + [int(mtp[j][0, accepted].argmax()) for j in range(k)]
+        if (len(cand) - 1) - accepted > 0:
+            # some drafts rejected: restore the pre-verify cache and re-commit
+            # exactly the accepted prefix so the recurrent state ends up at the
+            # last accepted token (the correction true[accepted] and the fresh
+            # drafts then come from this recommit forward).
+            cache, pos = base, base_pos
+            commit = torch.tensor([cand[: accepted + 1]], dtype=torch.long, device=device)
+            logits, mtp, cache, pos = model.decode_heads(commit, cache, pos)
+        # draft afresh from the last committed position (index `accepted` in the
+        # chunk that produced the current logits/mtp).
+        cand = [int(logits[0, accepted].argmax())] + [
+            int(mtp[j][0, accepted].argmax()) for j in range(k)
+        ]
 
 
 def resolve_device(spec: str | None) -> torch.device:

@@ -115,10 +115,13 @@ def test_loss_doc_ids_isolate_packed_conversations():
     perturbed[:, 1:4] = (perturbed[:, 1:4] + 7) % 39 + 1
     out = module._loss(perturbed, labels, doc_ids)
     assert torch.allclose(base, out, atol=1e-6)
-    # without doc_ids the perturbation leaks into conversation 1's loss
-    assert not torch.allclose(
-        module._loss(input_ids, labels), module._loss(perturbed, labels), atol=1e-6
-    )
+    # without doc_ids the perturbation leaks into conversation 1: its logits
+    # change. (Checked at the logits, not the scalar loss -- at fresh init the
+    # linear-attention layers propagate only a tiny signal, so the averaged loss
+    # barely moves, but the leak is unambiguous per-position.)
+    lm = module.model
+    leaked = (lm(input_ids)[:, 4:] - lm(perturbed)[:, 4:]).abs().max()
+    assert leaked > 1e-6
 
 
 def test_configure_optimizers_muon(sft_module):

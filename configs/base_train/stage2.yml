@@ -7,7 +7,7 @@ init_from: weights/stage1/last.ckpt
 
 model:
     size: 1b
-    max_seq_len: 4096 # raise to extend context length (RoPE base is fixed at 1e6)
+    max_seq_len: 4096 # raise to extend context length (sizes the NSA layers' partial-RoPE tables; GDN layers are position-agnostic)
     grad_checkpoint: true
 
 data:

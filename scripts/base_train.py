@@ -38,7 +38,13 @@ MODEL_OVERRIDES = (
     "n_kv_heads",
     "n_layers",
     "grad_checkpoint",
-    "window_size",
+    "layers_per_block",  # GDN:NSA block size (lpb-1 GDN + 1 NSA per block)
+    "window_size",  # NSA sliding-window branch
+    "cmp_block",  # NSA compression block size
+    "cmp_stride",  # NSA compression stride
+    "sel_block",  # NSA selection block size
+    "n_selected",  # NSA number of selected blocks
+    "rope_factor",  # NSA partial-RoPE fraction
 )
 
 

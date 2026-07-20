@@ -1,7 +1,7 @@
 [project]
 name = "picochat"
 version = "0.1.0"
-description = "Train a small chat LLM from scratch for ~$100 (nanochat-inspired)"
+description = "A minimal chat-LLM stack trainable from scratch for ~$100, scalable to larger models (nanochat-inspired)"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
@@ -25,6 +25,13 @@ dependencies = [
 # Hub-loaded Triton kernels (Liger fused cross-entropy; see picochat/kernels.py).
 # Optional: training falls back to the plain loss without it.
 kernels = ["kernels>=0.16.0"]
+# flash-linear-attention: CUDA Triton kernels for the Gated DeltaNet mixer
+# (chunk / fused-recurrent gated delta rule) and, optionally, Native Sparse
+# Attention. Optional -- the model ships exact pure-PyTorch implementations of
+# both (see picochat/linear_attn.py, picochat/sparse_attn.py) that run on CPU
+# and CUDA; fla only makes the CUDA path faster. causal-conv1d fuses the GDN
+# short convolution on CUDA. Install for fast large-scale training.
+fla = ["flash-linear-attention>=0.1.0", "causal-conv1d>=1.4.0"]
 
 
 # CUDA 12 (cu126) torch wheels; PyPI ships CUDA 13 builds for torch >= 2.12
