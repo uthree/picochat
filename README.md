@@ -10,7 +10,13 @@ layers (3:1) for long context at a fraction of the KV cost.
 
 ## Requirements
 - Python 3.11
-- Training: a CUDA GPU (CUDA 12.6 or later in the 12.x series), PyTorch 2.12.1 or later (cu126 wheels)
+- Training: a CUDA GPU. PyTorch resolves from PyPI as CUDA 13 (cu130) wheels,
+  which need an r580+ NVIDIA driver. On a data-center GPU (e.g. L4) with an
+  older, still-supported driver branch (e.g. r570), install NVIDIA's
+  [forward-compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/)
+  package instead of upgrading the driver: `apt install cuda-compat-13-0`, then
+  put `/usr/local/cuda-13.0/compat` on the loader path (e.g.
+  `echo /usr/local/cuda-13.0/compat > /etc/ld.so.conf.d/00-cuda-compat.conf && ldconfig`)
 - Tests and evaluation also run on CPU
 - RL post-training (`scripts/grpo_train.py`) executes untrusted, model-generated
   code to score it. Install [bubblewrap](https://github.com/containers/bubblewrap)
