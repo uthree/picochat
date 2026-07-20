@@ -56,15 +56,15 @@ The datasets are tokenized, packed into fixed-length rows (MosaicBERT-style
 sequence packing; the config's `block_size` must match the training config)
 and written as sharded token binaries under `data/`:
 ```bash
-uv run scripts/base_setup.py --config configs/base_setup/base.yml
+uv run scripts/base_setup.py --config configs/base_setup/default.yml
 ```
 
 ### 4. Pretrain
 A single merged run (STEM / educational + computing & coding, 16k-token rows
 for long context, plus conversational-level multilingual coverage -- see
-`configs/base_setup/base.yml` for the corpus rationale):
+`configs/base_setup/default.yml` for the corpus rationale):
 ```bash
-uv run scripts/base_train.py --config configs/base_train/base.yml
+uv run scripts/base_train.py --config configs/base_train/default.yml
 ```
 Interrupted runs resume automatically from `output_dir/last.ckpt`. Training
 curves and generation samples are logged to TensorBoard (`lightning_logs/`).
