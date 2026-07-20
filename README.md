@@ -31,6 +31,10 @@ uv pip install -e .    # install dependencies
 # lower-memory training on CUDA; everything runs without it
 uv pip install -e ".[kernels]"
 ```
+On Linux the base install pulls in `fla-core` (flash-linear-attention's Triton
+kernels) for the Gated DeltaNet layers; on macOS/Windows it is skipped and the
+model uses the built-in pure-PyTorch implementation (also the CPU path
+everywhere). Both compute the same result.
 
 ### 2. Train the tokenizer
 Train a BPE tokenizer (128k vocab, ChatML special tokens) from a YAML recipe:

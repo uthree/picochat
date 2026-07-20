@@ -30,7 +30,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-try:  # optional CUDA acceleration; everything works without it
+try:  # CUDA Triton acceleration (fla-core, a Linux dependency); guarded so
+    # macOS/Windows -- where triton isn't installed -- fall back cleanly, and
+    # everything still works CPU-side without it (see the pure-PyTorch kernels
+    # below, used whenever fla is absent or the tensors aren't on CUDA).
     from fla.ops.gated_delta_rule import (  # type: ignore
         chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
         fused_recurrent_gated_delta_rule as _fla_recurrent_gated_delta_rule,
