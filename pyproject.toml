@@ -34,16 +34,10 @@ dependencies = [
 kernels = ["kernels>=0.16.0"]
 
 
-# CUDA 12 (cu126) torch wheels; PyPI ships CUDA 13 builds for torch >= 2.12
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
+# torch resolves from the default PyPI index, which ships CUDA 13 wheels for
+# torch >= 2.12 on Linux/Windows (H100 / Blackwell target) and CPU/MPS wheels on
+# macOS -- so no custom torch index is needed. (The fla-core[cuda] triton
+# kernels above run on CUDA 13 just as on 12.x.)
 
 [build-system]
 requires = ["hatchling"]
