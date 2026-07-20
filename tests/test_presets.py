@@ -115,6 +115,24 @@ def test_preset_dims_are_consistent(size):
     assert (cfg["d_model"] // cfg["n_heads"]) % 2 == 0  # even d_head (partial-RoPE friendly)
 
 
+def test_dense_growth_chain_is_width_compatible():
+    # 200m -> 1b -> 8b are meant to grow by HyperCloning (picochat.grow): each
+    # step keeps d_head fixed and multiplies every width field by one integer
+    # factor r. A preset edit that breaks that (e.g. a stray d_head) must fail
+    # here, not at grow time.
+    from picochat.grow import _norm_cfg
+
+    chain = ["200m", "1b", "8b"]
+    for lo, hi in zip(chain, chain[1:]):
+        a, b = _norm_cfg(MODEL_PRESETS[lo]), _norm_cfg(MODEL_PRESETS[hi])
+        assert a["d_head"] == b["d_head"], f"{lo}->{hi}: d_head must match"
+        assert b["d_model"] % a["d_model"] == 0, f"{lo}->{hi}: d_model not an integer multiple"
+        r = b["d_model"] // a["d_model"]
+        for f in ("n_heads", "n_kv_heads", "nsa_kv_heads", "d_ffn"):
+            assert b[f] == r * a[f], f"{lo}->{hi}: {f} must scale x{r} for width growth"
+        assert b["n_layers"] % a["layers_per_block"] == 0  # depth grows whole blocks
+
+
 def test_build_lm_smallest_forward():
     lm = build_lm("200m", vocab_size=50, max_seq_len=64)
     logits = lm(torch.randint(0, 50, (2, 16)))

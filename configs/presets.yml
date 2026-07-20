@@ -30,8 +30,8 @@
 # NSA hyperparameters not set here fall back to the module defaults
 # (nsa_kv_heads=1, sel_block=64, n_selected=16, rope_factor=0.25); `window_size`
 # is the NSA sliding-window branch. The fla Triton kernels need the NSA GQA
-# group (n_heads / nsa_kv_heads) to be a multiple of 16 -- every preset keeps
-# that (16/1 or 32/2). GDN uses a fixed conv_size=4.
+# group (n_heads / nsa_kv_heads) to be a multiple of 16 -- every preset keeps it
+# at exactly 16 (16/1, 32/2, 64/4). GDN uses a fixed conv_size=4.
 #
 # Dense-only at 200m / 1b / 8b: at those scales MoE sparsity barely pays off
 # (the always-on backbone -- embedding, the mixers, the dense/shared FFN -- is a
@@ -56,54 +56,70 @@
 # in the active figure. Smaller presets omit them.
 #
 # Sizes assume a 64k (65536) vocab with an untied lm head (embedding + head
-# together are 131072*d_model params). The vocab was halved from 128k because
-# at 1b it was ~40% of all params (64k brings it to ~26%; CJK now splits
-# per-character in the tokenizer, so the vocab needs no kanji-compound merges --
-# see configs/tok/default.yml). The freed embedding budget was reinvested into
-# each rung's backbone so the total-param nameplates still hold: the dense
-# presets grew depth/width (200m 576->768 wide, 1b/8b deeper), the MoE presets
-# added a few routed experts (total up, active ~unchanged). Totals below are
-# estimate_num_params() figures. The model's real vocab_size comes from the
-# trained tokenizer's n_vocab at train time; these values must match it.
+# together are 131072*d_model params). CJK splits per-character in the tokenizer
+# so the vocab needs no kanji-compound merges (see configs/tok/default.yml).
+#
+# Growth chain (picochat.grow / a config's grow_from): the dense rungs share a
+# constant d_head of 64 and step d_model x2 (1024 -> 2048 -> 4096), so a trained
+# rung *grows* into the next instead of training from scratch -- HyperCloning
+# widens it (replicating heads, d_head fixed) then whole blocks are stacked for
+# depth:  200m (1024, 8L) -> 1b (2048, 20L) -> 8b (4096, 48L). Constant d_head is
+# what makes the width step function-preserving (per-head attention is bit-for-
+# bit unchanged), so every width field -- n_heads, n_kv_heads, nsa_kv_heads and
+# d_ffn -- also steps x2 along the chain (d_ffn is pinned to 2*d_model for that
+# reason). The MoE rungs are a separate (sparse, narrow-backbone) design point,
+# reached by upcycling a matching-shaped dense model (grow.upcycle_to_moe), not
+# by widening 8b -- upcycling 8b's fat backbone would give a non-sparse MoE.
+# Totals below are estimate_num_params() figures. The model's real vocab_size
+# comes from the trained tokenizer's n_vocab at train time; these must match it.
 
 # --------------------------------------------------------------------------
-# 200M -- dense, the minimal "$100" config. n_layers 12 / lpb 4 gives 9 Gated
-# DeltaNet layers + 3 NSA layers. At this scale the GDN layers carry most of the
-# sequence modeling cheaply and the few NSA layers add global recall.
-# Also the default target for the smoke test and base pretraining.
+# 200M -- dense, the minimal "$100" config, and the seed of the width-growth
+# chain: d_model 1024 / n_heads 16 (d_head 64), 8 layers / lpb 4 = 2 blocks
+# (6 GDN + 2 NSA). Wide-and-shallow on purpose -- a 64k untied vocab spends
+# ~134M of the 0.2B on the embedding + head, so little is left for depth here;
+# depth arrives when it grows into 1b. Also the default target for the smoke
+# test and base pretraining.
 # --------------------------------------------------------------------------
-200m: # ~0.20B params (dense)
-    d_model: 768
-    n_layers: 16
-    n_heads: 16  # d_head 48; multiple of 16 so the NSA kernel group (MQA) fits
+200m: # ~0.21B params (dense)
+    d_model: 1024
+    n_layers: 8
+    n_heads: 16  # d_head 64; multiple of 16 so the NSA kernel group (MQA) fits
     n_kv_heads: 4
+    nsa_kv_heads: 1  # NSA group 16/1; steps x2 up the growth chain (1 -> 2 -> 4)
     vocab_size: 65536
-    d_ffn: 1920  # 2.5*d_model (down from the 3*d_model default) to land on ~0.2B
+    d_ffn: 2048  # 2*d_model; a lean SwiGLU ratio, kept x2-consistent up the chain
     layers_per_block: 4
     window_size: 256
 
 # --------------------------------------------------------------------------
-# 1B
+# 1B -- one width-double + a depth grow above 200m (grow_state_dict: 200m ->
+# width x2 -> 8 layers @ d_model 2048 -> stack blocks -> 20 layers). d_head 64.
 # --------------------------------------------------------------------------
 1b: # ~1.0B params (dense)
-    d_model: 1536
-    n_layers: 28
-    n_heads: 16  # d_head 96; multiple of 16 so the NSA kernel group (MQA) fits
-    n_kv_heads: 4
+    d_model: 2048
+    n_layers: 20
+    n_heads: 32  # d_head 64; NSA kernel group 32/2 = 16
+    n_kv_heads: 8
+    nsa_kv_heads: 2
     vocab_size: 65536
+    d_ffn: 4096  # 2*d_model (x2 of 200m's 2048, for HyperCloning width growth)
     window_size: 512
     layers_per_block: 4
 
 # --------------------------------------------------------------------------
-# 8B
+# 8B -- a second width-double + depth grow above 1b (1b -> width x2 -> 20 layers
+# @ d_model 4096 -> stack blocks -> 48 layers). d_head 64; top of the dense
+# growth chain.
 # --------------------------------------------------------------------------
-8b: # ~7.9B params (dense; + 3 lightweight MTP heads)
+8b: # ~8.0B params (dense; + 3 lightweight MTP heads)
     d_model: 4096
-    n_layers: 36
-    n_heads: 32
-    n_kv_heads: 8
-    nsa_kv_heads: 2  # NSA GQA-16 (32/2); GDN keeps n_kv_heads
+    n_layers: 48
+    n_heads: 64  # d_head 64; NSA kernel group 64/4 = 16
+    n_kv_heads: 16
+    nsa_kv_heads: 4
     vocab_size: 65536
+    d_ffn: 8192  # 2*d_model (x2 of 1b's 4096)
     window_size: 512
     layers_per_block: 4
     n_mtp: 3  # multi-token prediction heads (draft up to 4 tokens/step); 8B and up

@@ -27,8 +27,9 @@ from picochat.config import (
     scale_for_devices,
 )
 from picochat.dataloader import PackedDataset, PretrainDataModule
-from picochat.presets import build_lm
-from picochat.trainer import GPT
+from picochat.grow import grow_state_dict
+from picochat.presets import build_lm, resolve_config
+from picochat.trainer import GPT, _model_config_from_ckpt
 from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
@@ -89,6 +90,41 @@ def make_dataset(bins, block_size: int, weights=None):
     return dataset, list(weights)
 
 
+def grow_init(gpt, grow_from, target_model_config: dict) -> None:
+    """Warm-start `gpt`'s weights by *growing* a smaller trained checkpoint into
+    this (larger) architecture -- transfer learning across scales instead of
+    training the bigger model from scratch (see picochat.grow).
+
+    `grow_from` is the source checkpoint path, or a dict {path, noise?, seed?}.
+    The source architecture is read from its own saved `model_config`, so only
+    the path is required; the target shape is this run's resolved config. Loaded
+    strict=True, so any shape mismatch fails loudly."""
+    opts = grow_from if isinstance(grow_from, dict) else {"path": grow_from}
+    path = opts["path"]
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    src_mc = _model_config_from_ckpt(ckpt, path)
+    # GPT wraps the TransformerLM under a "model." prefix; strip it to a bare lm.
+    prefix = "model."
+    src_state = {
+        k[len(prefix) :]: v
+        for k, v in ckpt["state_dict"].items()
+        if k.startswith(prefix)
+    }
+    grown = grow_state_dict(
+        src_state,
+        resolve_config(**src_mc),
+        resolve_config(**target_model_config),
+        noise=opts.get("noise", 0.01),
+        seed=opts.get("seed", 0),
+    )
+    gpt.model.load_state_dict(grown, strict=True)
+    print(
+        f"grew weights from {path} ({src_mc.get('size')} -> "
+        f"{target_model_config.get('size')})",
+        flush=True,
+    )
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, required=True, help="stage recipe (YAML)")
@@ -125,6 +161,9 @@ def main():
     tokenizer_path = cfg.get("tokenizer", "weights/tokenizer.json")
     output_dir = cfg.get("output_dir", "weights")
     init_from = args.init_from or cfg.get("init_from")
+    # Grow a smaller trained checkpoint into this (larger) architecture instead
+    # of warm-starting same-shape weights -- see grow_init / picochat.grow.
+    grow_from = cfg.get("grow_from")
 
     tokenizer = load_tokenizer(tokenizer_path)
     vocab_size = tokenizer.n_vocab
@@ -242,8 +281,15 @@ def main():
         print(f"resuming stage from {resume_ckpt}", flush=True)
     else:
         resume_ckpt = None
-        # --- continual learning: warm-start weights from a previous stage ---
-        if init_from:
+        # --- warm-start weights from a previous checkpoint ---
+        if grow_from:
+            # transfer learning across scales: initialize this larger model from
+            # a smaller trained one (grows width/depth, upcycles dense->MoE).
+            if init_from:
+                print("both grow_from and init_from set; using grow_from", flush=True)
+            grow_init(gpt, grow_from, model_config)
+        elif init_from:
+            # continual learning: same-architecture warm-start from a prior stage
             ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
             state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
             gpt.load_state_dict(state)

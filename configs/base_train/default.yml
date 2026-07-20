@@ -6,7 +6,13 @@
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/base
-init_from: null # trains from scratch
+init_from: null # same-architecture warm-start (continual learning); null = from scratch
+# grow_from: weights/200m/last.ckpt  # transfer-learn across scales: grow a SMALLER
+#   # trained checkpoint into this preset (picochat.grow) -- HyperCloning width,
+#   # block-stacked depth, dense->MoE upcycle, as the shapes require. The source
+#   # architecture is read from its own saved model_config, so only the path is
+#   # needed; takes precedence over init_from. Dict form for tuning:
+#   #   grow_from: { path: weights/200m/last.ckpt, noise: 0.01, seed: 0 }
 
 model:
     size: 1b

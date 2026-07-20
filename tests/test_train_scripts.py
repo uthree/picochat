@@ -148,6 +148,40 @@ def test_load_lm_from_checkpoint_applies_overrides(tmp_path):
     assert cfg["max_seq_len"] == 64
 
 
+def test_grow_init_warm_starts_from_smaller_checkpoint(tmp_path):
+    # scripts.base_train.grow_init should widen a smaller saved model into a
+    # larger one (HyperCloning) -- exactly function-preserving at init.
+    src_cfg = dict(
+        size="1b", vocab_size=64, max_seq_len=32,
+        d_model=16, n_heads=2, n_kv_heads=1, nsa_kv_heads=1,
+        n_layers=4, layers_per_block=2, d_ffn=48,
+    )
+    path, src_lm = _save_ckpt(tmp_path, src_cfg)
+    src_lm.eval()
+
+    tgt_cfg = dict(  # width x2: d_head stays 8
+        src_cfg, d_model=32, n_heads=4, n_kv_heads=2, nsa_kv_heads=2, d_ffn=96,
+    )
+    tgt_gpt = GPT(build_lm(**tgt_cfg), compile=False, model_config=tgt_cfg)
+    base_train.grow_init(tgt_gpt, path, tgt_cfg)
+    tgt_gpt.eval()
+
+    x = torch.randint(0, 64, (2, 16))
+    with torch.no_grad():
+        src_o, tgt_o = src_lm(x), tgt_gpt.model(x)
+    assert (tgt_o - src_o).norm() / src_o.norm() < 1e-4
+
+
+def test_grow_init_accepts_dict_form(tmp_path):
+    # grow_from may be a dict with tuning options (noise/seed), not just a path
+    cfg = _tiny_model_config()
+    path, _ = _save_ckpt(tmp_path, cfg)
+    tgt_gpt = GPT(build_lm(**cfg), compile=False, model_config=cfg)
+    base_train.grow_init(tgt_gpt, {"path": path, "noise": 0.0, "seed": 3}, cfg)
+    # same shape in and out -> a no-op growth that still loads cleanly
+    assert next(tgt_gpt.model.parameters()) is not None
+
+
 def test_load_lm_from_checkpoint_rejects_bad_files(tmp_path):
     not_lightning = tmp_path / "plain.pt"
     torch.save({"weights": 1}, not_lightning)

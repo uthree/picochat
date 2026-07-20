@@ -72,6 +72,11 @@ curves and generation samples are logged to TensorBoard (`lightning_logs/`).
 If you hit out-of-memory errors, reduce `block_size` (repack) or raise
 `accumulate` in the config.
 
+To **grow a bigger model** from a smaller trained one instead of pretraining it
+from scratch, set `grow_from: <smaller-checkpoint>` in the target preset's config
+(see the growth chain under Model Architecture). The larger model starts as
+(nearly) the same function the small one learned, then continues training.
+
 ### 5. Supervised fine-tuning (SFT)
 Preprocess the chat corpus, then fine-tune the final pretraining checkpoint:
 ```bash
@@ -243,9 +248,17 @@ ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
   chat format
 
 Presets (`configs/presets.yml`), named by total parameter count: `200m`
-≈0.2B, `1b` ≈1.0B and `8b` ≈7.8B (dense); at 35B/120B the ladder is MoE-only,
+≈0.2B, `1b` ≈1.0B and `8b` ≈8.0B (dense); at 35B/120B the ladder is MoE-only,
 each in two variants matched on total params -- `35b-moe` ≈35.5B total / 2.5B
 active and `120b-moe` ≈118B total / 6.2B active (fine-grained LatentMoE,
 per-layer expert pools), `35b-moe-shared` ≈35.5B / 3.4B active and
 `120b-moe-shared` ≈118B / 8.1B active (coarse-grained, one expert pool shared
 across layers).
+
+The dense rungs form a **growth chain**: they share a constant `d_head` of 64
+and step `d_model` ×2 (1024 → 2048 → 4096), so a trained rung can *grow* into
+the next instead of pretraining from scratch (`picochat.grow`) -- HyperCloning
+widens it (replicating heads at a fixed head size, exactly function-preserving),
+then whole blocks are stacked for depth. A config's `grow_from` points at the
+smaller checkpoint; dense→MoE upcycling adds a zero-initialized routed branch to
+each layer (also function-preserving) for warm-starting an MoE model.

@@ -44,6 +44,15 @@ def _resolve_preset(
     return cfg
 
 
+def resolve_config(
+    size: str, vocab_size: int | None = None, **overrides
+) -> dict:
+    """The full model-config dict build_lm(size, ...) would construct (preset +
+    overrides + vocab), without building anything. picochat.grow uses it to read
+    a source/target model's shapes when warm-starting one from the other."""
+    return _resolve_preset(size, vocab_size, **overrides)
+
+
 def build_lm(
     size: str,
     vocab_size: int | None = None,
