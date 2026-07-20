@@ -22,7 +22,7 @@ Two ways to run:
   python scripts/base_setup.py -p tinystories -o data/tinystories --block-size 512
 
   # many datasets from a recipe (configs/base_setup/*.yml)
-  python scripts/base_setup.py --config configs/base_setup/stage1.yml
+  python scripts/base_setup.py --config configs/base_setup/base.yml
 """
 
 import argparse

@@ -52,26 +52,24 @@ uv run scripts/tok_eval.py
 ```
 
 ### 3. Preprocess the pretraining data
-Each stage's datasets are tokenized, packed into fixed-length rows
-(MosaicBERT-style sequence packing; each config's `block_size` must match its
-training config) and written as sharded token binaries under `data/`:
+The datasets are tokenized, packed into fixed-length rows (MosaicBERT-style
+sequence packing; the config's `block_size` must match the training config)
+and written as sharded token binaries under `data/`:
 ```bash
-uv run scripts/base_setup.py --config configs/base_setup/stage1.yml
-uv run scripts/base_setup.py --config configs/base_setup/stage2.yml
+uv run scripts/base_setup.py --config configs/base_setup/base.yml
 ```
 
-### 4. Pretrain (2-stage)
-Stage 1 is the single knowledge-oriented base corpus (code + textbooks +
-wikipedia); stage 2 broadens to multilingual/web text and extends the context
-length, warm-starting from stage 1's checkpoint (`init_from` in the config):
+### 4. Pretrain
+A single merged run (STEM / educational + computing & coding, 16k-token rows
+for long context, plus conversational-level multilingual coverage -- see
+`configs/base_setup/base.yml` for the corpus rationale):
 ```bash
-uv run scripts/base_train.py --config configs/base_train/stage1.yml  # knowledge base corpus
-uv run scripts/base_train.py --config configs/base_train/stage2.yml  # multilingual, longer context
+uv run scripts/base_train.py --config configs/base_train/base.yml
 ```
-Interrupted stages resume automatically from `output_dir/last.ckpt`. Training
+Interrupted runs resume automatically from `output_dir/last.ckpt`. Training
 curves and generation samples are logged to TensorBoard (`lightning_logs/`).
-If you hit out-of-memory errors, reduce `batch_size` (or raise `accumulate`)
-in the stage config.
+If you hit out-of-memory errors, reduce `block_size` (repack) or raise
+`accumulate` in the config.
 
 ### 5. Supervised fine-tuning (SFT)
 Preprocess the chat corpus, then fine-tune the final pretraining checkpoint:
@@ -111,7 +109,7 @@ Multiple-choice benchmarks (hellaswag, arc_easy, arc_challenge, openbookqa,
 winogrande, boolq) scored by completion log-likelihood:
 ```bash
 # base checkpoints: plain text-continuation scoring
-uv run scripts/base_eval.py --checkpoint weights/stage2/last.ckpt
+uv run scripts/base_eval.py --checkpoint weights/base/last.ckpt
 
 # SFT checkpoints: items rendered as ChatML user turns (comparable numbers)
 uv run scripts/base_eval.py --checkpoint weights/sft-stage1/last.ckpt --chat

@@ -1,0 +1,98 @@
+tokenizer: weights/tokenizer.json
+output_dir: data
+streaming: false # small datasets: download once, then iterate from local cache
+# Rows are packed to block_size+1 tokens; must match
+# configs/base_train/base.yml's data.block_size.
+#
+# Single-stage base pretraining corpus (the old stage 1 / stage 2 split is
+# merged: one setup, one training run, one checkpoint). Selection criteria:
+#   - STEM / educational: textbook-style sets (tiny-/orca-/open-phi textbooks,
+#     cosmopedia) plus edu-filtered web (fineweb-edu).
+#   - computing & coding: tiny-codes, python-codes, the-stack-smol.
+#   - long documents (rows are packed to 16k tokens, but attention resets at
+#     document boundaries, so long-range signal comes from long DOCUMENTS):
+#     raw source files (the-stack-smol, ~20k tokens each), long-form textbooks
+#     (open-phi/textbooks), Japanese web novels (Syosetu711K).
+#   - multilingual: conversational coverage only, not knowledge depth --
+#     Japanese (user-facing: fineweb-edu-ja, wikipedia-ja, Syosetu711K) plus a
+#     thin slice of major-language wikipedias (zh/ko/es/fr/de/ru).
+block_size: 16384
+
+datasets:
+    # --- computing & coding ---
+    - {
+          preset: tiny-codes,
+          output: tiny-codes,
+          val_output: tiny-codes.val,
+          val_fraction: 0.01,
+      }
+    - {
+          preset: python-codes,
+          output: python-codes,
+          val_output: python-codes.val,
+          val_fraction: 0.01,
+      }
+    # Raw multi-language source files: the main long-document code source
+    # (~20k tokens each; 20k docs is ~400M tokens). The smol dump exposes no
+    # usable size metadata for val_fraction, so it is a train-only stream
+    # (code val coverage comes from tiny/python-codes).
+    - { preset: the-stack-smol, output: the-stack-smol, streaming: true, limit: 20000 }
+
+    # --- STEM / educational (Phi-style) ---
+    - { preset: tiny-textbooks, output: tiny-textbooks }
+    - { preset: tiny-textbooks, output: tiny-textbooks.val, split: test }
+    - {
+          preset: tiny-orca-textbooks,
+          output: tiny-orca-textbooks,
+          val_output: tiny-orca-textbooks.val,
+          val_fraction: 0.01,
+      }
+    # Long-form "Textbooks Are All You Need"-style books (long documents).
+    - {
+          preset: textbooks,
+          output: textbooks,
+          val_output: textbooks.val,
+          val_fraction: 0.05, # only ~1.8k docs total; 1% would be too few to be meaningful
+      }
+    - {
+          preset: cosmopedia,
+          output: cosmopedia,
+          val_output: cosmopedia.val,
+          val_fraction: 0.001, # ~10M docs total; 1% would be an oversized val set
+      }
+    # Edu-filtered web (closest open analogue to Phi's filtering). The full
+    # sample is ~10B tokens, so stream a fixed train-only slice (~1B tokens).
+    - { preset: fineweb-edu, output: fineweb-edu, streaming: true, limit: 1000000 }
+
+    # --- general knowledge ---
+    - {
+          preset: wikipedia-en,
+          output: wikipedia-en,
+          val_output: wikipedia-en.val,
+          val_fraction: 0.001, # ~6.4M articles total
+      }
+
+    # --- Japanese (user-facing language) ---
+    - {
+          preset: fineweb-edu-ja,
+          output: fineweb-edu-ja,
+          streaming: true,
+          limit: 500000,
+      }
+    - { preset: wikipedia-ja, output: wikipedia-ja, streaming: true }
+    # Web novels: long Japanese documents (dialogue-heavy -- doubles as
+    # conversational-register and long-context data).
+    - {
+          preset: RyokoAI_Syosetu711K,
+          output: syosetu,
+          streaming: true,
+          limit: 20000,
+      }
+
+    # --- other languages: conversational coverage only ---
+    - { preset: wikipedia-zh, output: wikipedia-zh, streaming: true }
+    - { preset: wikipedia-ko, output: wikipedia-ko, streaming: true }
+    - { preset: wikipedia-es, output: wikipedia-es, streaming: true }
+    - { preset: wikipedia-fr, output: wikipedia-fr, streaming: true }
+    - { preset: wikipedia-de, output: wikipedia-de, streaming: true }
+    - { preset: wikipedia-ru, output: wikipedia-ru, streaming: true }

@@ -1,0 +1,75 @@
+# Single-stage base pretraining (the old stage 1 / stage 2 split is merged:
+# one setup, one run, one checkpoint -- less to manage, no repacking between
+# stages). Corpus focus: STEM / educational + computing & coding, long context
+# (16k rows), with just enough non-English for conversational coverage (see
+# configs/base_setup/base.yml for the selection rationale).
+
+tokenizer: weights/tokenizer.json
+output_dir: weights/base
+init_from: null # trains from scratch
+
+model:
+    size: 1b
+    # Sizes the NSA layers' partial-RoPE tables (GDN layers are
+    # position-agnostic); must exceed data.block_size. Headroom over the 16k
+    # training rows so SFT / inference can extend context without rebuilding.
+    max_seq_len: 32768
+    grad_checkpoint: true # set true to trade compute for memory (bigger models / longer seqs)
+
+data:
+    data_dir: data # joined with each dataset path/val_bin filename below
+    block_size: 16384 # must match configs/base_setup/base.yml
+
+    datasets:
+        # weights are total sampling mass per source (GroupWeightedIndexSampler),
+        # independent of each source's row count.
+        # -- computing & coding (~18%) --
+        - { path: tiny-codes, weight: 1.0 }
+        - { path: python-codes, weight: 0.5 }
+        - { path: the-stack-smol, weight: 2.0 } # long raw source files
+        # -- STEM / educational (~47%) --
+        - { path: tiny-textbooks, weight: 1.0 }
+        - { path: tiny-orca-textbooks, weight: 1.0 }
+        - { path: textbooks, weight: 1.0 } # long-form books
+        - { path: cosmopedia, weight: 3.0 }
+        - { path: fineweb-edu, weight: 3.0 }
+        # -- general knowledge --
+        - { path: wikipedia-en, weight: 3.0 }
+        # -- Japanese (user-facing) --
+        - { path: fineweb-edu-ja, weight: 1.5 }
+        - { path: wikipedia-ja, weight: 1.0 }
+        - { path: syosetu, weight: 0.5 } # long documents, conversational register
+        # -- other languages: conversational coverage only --
+        - { path: wikipedia-zh, weight: 0.25 }
+        - { path: wikipedia-ko, weight: 0.25 }
+        - { path: wikipedia-es, weight: 0.25 }
+        - { path: wikipedia-fr, weight: 0.25 }
+        - { path: wikipedia-de, weight: 0.25 }
+        - { path: wikipedia-ru, weight: 0.25 }
+    val_bin: # per-dataset validation splits (see configs/base_setup/base.yml)
+        - tiny-codes.val
+        - python-codes.val
+        - tiny-textbooks.val
+        - tiny-orca-textbooks.val
+        - textbooks.val
+        - cosmopedia.val
+        - wikipedia-en.val
+optim:
+    lr: 1.0e-4
+    weight_decay: 0.1
+    warmup_steps: 2000
+    # One merged run replaces the old 100k+100k two-stage schedule; 150k steps
+    # at 32,768 tokens/update (batch 1 x 16384 x accumulate 2) is ~4.9B tokens,
+    # the same total token budget as before.
+    max_steps: 150000
+
+trainer:
+    # 16k-token rows: one row per micro-batch, accumulate to keep the update
+    # size at 32,768 tokens (the old stage 2's tokens/update).
+    batch_size: 1
+    accumulate: 2
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 4
+    val_check_interval: 5000
+    # compile: null # null=auto (compile only where torch.compile is supported); true/false to force

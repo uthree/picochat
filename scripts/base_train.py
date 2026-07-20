@@ -6,7 +6,7 @@ curriculum, train one stage, then point the next stage's config at the produced
 checkpoint via `init_from` to warm-start (continual learning) with a fresh
 optimizer and LR schedule.
 
-    python scripts/base_train.py --config configs/base_train/stage1.yml
+    python scripts/base_train.py --config configs/base_train/base.yml
 
 The model architecture must stay the same across stages that chain via
 `init_from` (only the data / schedule change).
