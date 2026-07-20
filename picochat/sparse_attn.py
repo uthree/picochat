@@ -282,10 +282,15 @@ class NativeSparseAttention(nn.Module):
         # selection-block availability for each query (causal + same doc)
         sel_pos = torch.arange(n_sel, device=q.device) * sb  # block start pos
         sel_id = torch.arange(Lk, device=q.device) // sb  # token -> sel block
-        # deterministic tiebreak: nudge importance by block position so exact
+        # deterministic tiebreak: nudge importance by block index so exact
         # ties (e.g. all-zero importance) resolve identically regardless of the
         # tensor width -- torch.topk leaves tie order unspecified otherwise.
-        imp = imp + 1e-6 * sel_pos.to(imp.dtype)
+        # Bounded (< 1e-6 total, regardless of sequence length) so the nudge
+        # can never override a genuine importance difference; an unbounded
+        # position-proportional nudge would grow past real score gaps on long
+        # sequences and bias selection toward late blocks.
+        tie = torch.arange(n_sel, device=q.device, dtype=imp.dtype)
+        imp = imp + (1e-6 / n_sel) * tie
         # a sel block is available if its first token is causal & same doc as q
         blk_start_causal = sel_pos[None, None, :] <= q_pos[None, :, None]  # (1,Lq,n_sel)
         avail = blk_start_causal.expand(b, Lq, n_sel).clone()
