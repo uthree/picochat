@@ -6,10 +6,32 @@ from typing import Iterator
 import rustbpe
 import tiktoken
 
-# GPT-2's pattern with one change: split digits one at a time (\p{N}+ -> \p{N}).
+# GPT-2's pattern, adapted for a multilingual + code BPE whose goal is
+# *semantically decomposable* tokens -- morpheme-ish units, not whole compound
+# words merged into one token. Two changes vs GPT-2:
+#
+#   1. Digits split one at a time (\p{N}+ -> \p{N}), so numbers stay compositional
+#      (helps arithmetic and avoids a token per multi-digit literal).
+#   2. CJK is peeled apart before the generic word branch, because Chinese and
+#      Japanese have no spaces: a plain ` ?\p{L}+` swallows an entire clause as
+#      ONE pre-token, and BPE then merges whole phrases into single tokens (the
+#      exact "compound word = 1 token" behavior we want to avoid, worst for
+#      scriptio-continua scripts). So each Han ideograph becomes its own
+#      pre-token (kanji/hanzi never fuse into 熟語-level megatokens), while kana
+#      runs -- which spell particles / okurigana / native words, i.e. natural
+#      morphemes -- stay grouped. Every other script (Latin, Cyrillic, Greek,
+#      Hangul, ...) is space-delimited, so the generic word branch already stops
+#      at word boundaries; it just has to exclude the CJK scripts via a regex
+#      set-difference so a ` ?\p{L}+` run can't cross a script boundary (e.g.
+#      "PyTorchで" -> "PyTorch" + "で"). Both engines that compile this pattern
+#      -- rustbpe (training) and tiktoken (inference) use the Rust regex crate --
+#      support `\p{Han}` and `[... -- ...]` set operations.
 PATTERN = (
     r"'s|'t|'re|'ve|'m|'ll|'d"  # English contractions
-    r"| ?\p{L}+"  # words (any script)
+    r"|\p{Han}"  # CJK ideographs: one character per token (no compound megatokens)
+    r"| ?\p{Hiragana}+"  # kana runs stay grouped (particles / okurigana / words)
+    r"| ?\p{Katakana}+"
+    r"| ?[\p{L}--\p{Han}\p{Hiragana}\p{Katakana}]+"  # other scripts: whole words
     r"| ?\p{N}"  # Digits: Always separate each digit.
     r"| ?[^\s\p{L}\p{N}]+"  # runs of punctuation/symbols
     r"|\s+(?!\S)"  # trailing space

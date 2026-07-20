@@ -1,25 +1,44 @@
 output: /workspace/weights/tokenizer.json
-vocab_size: 128000
+# 65536 (2^16), down from 128000. For a ~1B model a 128k vocab spent ~40% of
+# all parameters on the embedding + lm head; 64k drops that to ~26%, moving the
+# freed budget into the transformer. It also suits the goal of decomposable
+# tokens: fewer merges keep tokens closer to morphemes, and CJK is now split
+# per-character in the tokenizer PATTERN (so the vocab no longer needs thousands
+# of kanji-compound merges anyway). Must match the model's vocab_size (the
+# presets carry 65536 too, and base_train derives it from the trained
+# tokenizer's n_vocab).
+vocab_size: 65536
 
-total_chars: 1000000000
-streaming: false
+total_chars: 2000000000
+# Stream, so only ~total_chars are pulled from each source instead of
+# downloading the (huge) datasets in full -- iter_mixture caps each source's
+# byte budget and stops early.
+streaming: true
 
+# The mixture mirrors the pretraining corpus (configs/base_setup/base.yml):
+# BPE is frequency-based, so merges should be allocated where tokens are
+# actually spent -- English STEM/educational prose + code dominate, Japanese is
+# the main non-English (user-facing) language, and the other six languages get
+# lighter coverage just to seat their characters/subwords. The languages dropped
+# from the corpus (ar/el/la/ms/th) are dropped here too, so no vocab is spent on
+# scripts the model won't train on. Weights are byte-budget fractions.
 data:
-    - { preset: wikipedia-en, weight: 4 } # English
-    - { preset: wikipedia-ja, weight: 1 } # Japanese
-    - { preset: wikipedia-de, weight: 1 } # German
+    # -- English: educational web + STEM textbook prose + encyclopedic --
+    - { preset: fineweb-edu, weight: 4 } # edu-filtered web (bulk of pretraining)
+    - { preset: cosmopedia, weight: 2 } # synthetic textbooks/blogs (STEM prose)
+    - { preset: tiny-textbooks, weight: 1 } # phi-style textbooks
+    - { preset: wikipedia-en, weight: 3 } # encyclopedic English
+    # -- code: indentation, brackets and identifiers get their own merges --
+    - { preset: python-codes, weight: 1 } # Python (prose + fenced code)
+    - { preset: the-stack-smol, weight: 3 } # multi-language source code
+    # -- Japanese (user-facing): web/edu + encyclopedic + novels --
+    - { preset: fineweb-edu-ja, weight: 2 } # Japanese edu web
+    - { preset: wikipedia-ja, weight: 2 } # encyclopedic Japanese
+    - { preset: RyokoAI_Syosetu711K, weight: 1 } # web novels (conversational register)
+    # -- other corpus languages: lighter coverage (seat characters/subwords) --
+    - { preset: wikipedia-zh, weight: 1 } # Chinese
+    - { preset: wikipedia-ko, weight: 1 } # Korean
     - { preset: wikipedia-es, weight: 1 } # Spanish
     - { preset: wikipedia-fr, weight: 1 } # French
-    - { preset: wikipedia-it, weight: 1 } # Italian
-    - { preset: wikipedia-ko, weight: 1 } # Korean
-    - { preset: wikipedia-zh, weight: 1 } # Chinese
-    - { preset: wikipedia-ar, weight: 1 } # Arabic
+    - { preset: wikipedia-de, weight: 1 } # German
     - { preset: wikipedia-ru, weight: 1 } # Russian
-    - { preset: wikipedia-el, weight: 1 } # Greek
-    - { preset: wikipedia-la, weight: 1 } # Latin
-    - { preset: wikipedia-ms, weight: 1 } # Malay
-    - { preset: wikipedia-th, weight: 1 } # Thai
-    # Code: so indentation, brackets and identifiers get their own merges
-    # instead of wasting tokens (matters for any coding-agent use later).
-    - { preset: python-codes, weight: 1 } # Python
-    - { preset: the-stack-smol, weight: 2 } # multi-language source code

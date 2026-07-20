@@ -43,7 +43,8 @@ model uses the built-in pure-PyTorch implementation (also the CPU path
 everywhere). Both compute the same result.
 
 ### 2. Train the tokenizer
-Train a BPE tokenizer (128k vocab, ChatML special tokens) from a YAML recipe:
+Train a BPE tokenizer (64k vocab, ChatML special tokens; CJK split
+per-character so tokens stay morpheme-level) from a YAML recipe:
 ```bash
 uv run scripts/tok_train.py --config configs/tok/default.yml
 
@@ -187,7 +188,7 @@ implementations are the fallback and the CPU/test path. On top of that,
 kernel, loaded from the Hub via the optional
 [HF `kernels`](https://github.com/huggingface/kernels) extra
 ([kernels-community/liger-kernels](https://huggingface.co/kernels-community/liger-kernels)).
-At a 128k vocab the logits tensor is the largest activation of a training
+At a 64k vocab the logits tensor is the largest activation of a training
 step; never materializing it roughly halves peak memory (measured on the
 a ≈0.5B model, batch 8 x 1024 tokens, bf16, L4 24GB: 13.1 → 6.8 GiB) at the
 cost of some step time on smaller GPUs (+20% on that L4; the chunked kernel
