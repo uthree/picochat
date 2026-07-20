@@ -31,20 +31,18 @@ def _gdn_params(d_model: int, n_heads: int, kv_dim: int, conv_size: int) -> int:
     )
 
 
-def _nsa_params(
-    d_model: int, n_heads: int, kv_dim: int, cmp_block: int
-) -> int:
+def _nsa_params(d_model: int, n_heads: int, nsa_kv_heads: int) -> int:
     """Native Sparse Attention mixer (sparse_attn.NativeSparseAttention), one
-    layer. Three branches each own K/V projections; partial RoPE adds no
-    parameters (buffers only)."""
+    layer. One shared K/V for all three branches (the compressed branch derives
+    its keys/values by mean pooling -- no learned compression parameters);
+    partial RoPE adds no parameters (buffers only)."""
     d_head = d_model // n_heads
+    kv_dim = d_head * nsa_kv_heads
     return (
         d_model * d_model  # proj_q
-        + 6 * d_model * kv_dim  # per-branch k/v (cmp, slc, win)
+        + 2 * d_model * kv_dim  # shared k/v
         + d_model * d_model  # proj_o
         + d_model * (n_heads * 3)  # branch gate
-        + cmp_block * d_head  # intra-block position encoding (cmp_pos)
-        + 2 * (cmp_block * d_head) * d_head  # phi_k, phi_v compression MLPs
     )
 
 
@@ -54,9 +52,9 @@ def estimate_num_params(
     n_heads: int,
     n_layers: int,
     n_kv_heads: int | None = None,
+    nsa_kv_heads: int = 1,
     layers_per_block: int = 4,
     d_ffn: int | None = None,
-    cmp_block: int = 32,
     conv_size: int = 4,
     n_experts: int | None = None,
     d_expert: int | None = None,
@@ -101,7 +99,7 @@ def estimate_num_params(
     nsa_layers = n_layers // layers_per_block
     gdn_layers = n_layers - nsa_layers
     gdn = _gdn_params(d_model, n_heads, kv_dim, conv_size)
-    nsa = _nsa_params(d_model, n_heads, kv_dim, cmp_block)
+    nsa = _nsa_params(d_model, n_heads, nsa_kv_heads)
     mixers = gdn_layers * gdn + nsa_layers * nsa
 
     # Per-layer, mixer-independent: SwiGLU FFN + two Block-AttnRes depth queries.

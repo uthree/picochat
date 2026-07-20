@@ -273,8 +273,6 @@ def test_gpt_generate_long_with_kv_cache():
         n_layers=4,
         layers_per_block=2,  # GDN + NSA
         window_size=3,
-        cmp_block=4,
-        cmp_stride=2,
         sel_block=4,
         n_selected=4,
         max_seq_len=64,

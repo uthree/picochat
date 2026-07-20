@@ -324,13 +324,12 @@ class TransformerLayer(nn.Module):
         n_heads: int,
         linear: bool,
         n_kv_heads: int | None = None,
+        nsa_kv_heads: int = 1,
         d_ffn: int | None = None,
         max_seq_len: int = 4096,
         window_size: int = 512,
         rope_base: float = 1_000_000.0,
         rope_factor: float = 0.25,
-        cmp_block: int = 32,
-        cmp_stride: int = 16,
         sel_block: int = 64,
         n_selected: int = 16,
         conv_size: int = 4,
@@ -345,7 +344,7 @@ class TransformerLayer(nn.Module):
         # recurrent, no RoPE) for the intra-block layers, or Native Sparse
         # Attention (sparse softmax, partial RoPE) for the block-tail global
         # layer. The two carry different cache formats at decode (a recurrent
-        # state vs. a growing per-branch KV), so `linear` also routes decode().
+        # state vs. a growing KV cache), so `linear` also routes decode().
         self.linear = linear
         self.mix_attn = DepthAttention(d_model)
         self.mix_ffn = DepthAttention(d_model)
@@ -354,13 +353,14 @@ class TransformerLayer(nn.Module):
                 d_model, n_heads, n_kv_heads=n_kv_heads, conv_size=conv_size
             )
         else:
+            # NSA keeps its own KV head count (nsa_kv_heads, default MQA):
+            # selection is shared per GQA group and fla's kernels need the
+            # group size (n_heads / nsa_kv_heads) to be a multiple of 16.
             self.attn = NativeSparseAttention(
                 d_model,
                 n_heads,
-                n_kv_heads=n_kv_heads,
-                cmp_block=cmp_block,
-                cmp_stride=cmp_stride,
-                sel_block=sel_block,
+                n_kv_heads=nsa_kv_heads,
+                block_size=sel_block,
                 n_selected=n_selected,
                 window=window_size,
                 rope_factor=rope_factor,
@@ -381,11 +381,12 @@ class TransformerLayer(nn.Module):
             )
 
     def _mix(self, mixed: Tensor, doc_ids: Tensor | None, cu_seqlens: Tensor | None):
-        # Dispatch the mixed input to the layer's sequence mixer: GDN resets its
-        # recurrence at cu_seqlens boundaries; NSA masks within doc_ids.
+        # Dispatch the mixed input to the layer's sequence mixer: both reset
+        # at cu_seqlens boundaries (GDN its recurrence, NSA its block/attention
+        # structure); GDN additionally uses doc_ids for its short conv.
         if self.linear:
             return self.attn(mixed, cu_seqlens=cu_seqlens, doc_ids=doc_ids)
-        return self.attn(mixed, doc_ids=doc_ids)
+        return self.attn(mixed, cu_seqlens=cu_seqlens)
 
     def forward(
         self,
@@ -415,7 +416,7 @@ class TransformerLayer(nn.Module):
         if self.linear:
             a, cache = self.attn.decode(mixed, cache)  # (rec_state, conv_state)
         else:
-            a, cache = self.attn.decode(mixed, cache, pos)  # per-branch KV dict
+            a, cache = self.attn.decode(mixed, cache, pos)  # raw K/V dict
         partial = a if partial is None else partial + a
         # no_drop=True mirrors forward()'s MoE but never drops a token, so
         # generation runs the same network as training (see MoE.forward).
@@ -447,8 +448,7 @@ class Transformer(nn.Module):
         grad_checkpoint: bool = False,
         window_size: int = 512,
         layers_per_block: int = 4,
-        cmp_block: int = 32,
-        cmp_stride: int = 16,
+        nsa_kv_heads: int = 1,
         sel_block: int = 64,
         n_selected: int = 16,
         conv_size: int = 4,
@@ -493,8 +493,7 @@ class Transformer(nn.Module):
                 window_size=window_size,
                 rope_base=rope_base,
                 rope_factor=rope_factor,
-                cmp_block=cmp_block,
-                cmp_stride=cmp_stride,
+                nsa_kv_heads=nsa_kv_heads,
                 sel_block=sel_block,
                 n_selected=n_selected,
                 conv_size=conv_size,
@@ -580,7 +579,7 @@ class Transformer(nn.Module):
         # The AttnRes blocks/partial state is per-token and lives only within
         # this call (rebuilt for each chunk). `cache[i]` is whatever the layer's
         # mixer returns: a Gated DeltaNet (recurrent_state, conv_state) tuple, or
-        # a Native Sparse Attention per-branch KV dict.
+        # a Native Sparse Attention raw K/V dict.
         if cache is None:
             cache = [None] * self.n_layers
         q_len = x.shape[-2]
@@ -631,8 +630,7 @@ class TransformerLM(nn.Module):
         grad_checkpoint: bool = True,
         window_size: int = 512,
         layers_per_block: int = 4,
-        cmp_block: int = 32,
-        cmp_stride: int = 16,
+        nsa_kv_heads: int = 1,
         sel_block: int = 64,
         n_selected: int = 16,
         conv_size: int = 4,
@@ -675,8 +673,7 @@ class TransformerLM(nn.Module):
             grad_checkpoint=grad_checkpoint,
             window_size=window_size,
             layers_per_block=layers_per_block,
-            cmp_block=cmp_block,
-            cmp_stride=cmp_stride,
+            nsa_kv_heads=nsa_kv_heads,
             sel_block=sel_block,
             n_selected=n_selected,
             conv_size=conv_size,

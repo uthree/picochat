@@ -28,8 +28,10 @@
 #     (rope_factor of the head dim rotated) as their positional signal.
 #
 # NSA hyperparameters not set here fall back to the module defaults
-# (cmp_block=32, cmp_stride=16, sel_block=64, n_selected=16, rope_factor=0.25);
-# `window_size` is the NSA sliding-window branch. GDN uses a fixed conv_size=4.
+# (nsa_kv_heads=1, sel_block=64, n_selected=16, rope_factor=0.25); `window_size`
+# is the NSA sliding-window branch. The fla Triton kernels need the NSA GQA
+# group (n_heads / nsa_kv_heads) to be a multiple of 16 -- every preset keeps
+# that (16/1 or 32/2). GDN uses a fixed conv_size=4.
 #
 # Dense-only at 200m / 1b / 8b: at those scales MoE sparsity barely pays off
 # (the always-on backbone -- embedding, the mixers, the dense/shared FFN -- is a
@@ -66,8 +68,8 @@
 200m: # ~0.20B params (dense)
     d_model: 576
     n_layers: 12
-    n_heads: 9
-    n_kv_heads: 3
+    n_heads: 16  # d_head 36; multiple of 16 so the NSA kernel group (MQA) fits
+    n_kv_heads: 4
     vocab_size: 128000
     layers_per_block: 4
     window_size: 256
@@ -78,8 +80,8 @@
 1b: # ~0.99B params (dense)
     d_model: 1536
     n_layers: 20
-    n_heads: 12
-    n_kv_heads: 3
+    n_heads: 16  # d_head 96; multiple of 16 so the NSA kernel group (MQA) fits
+    n_kv_heads: 4
     vocab_size: 128000
     window_size: 512
     layers_per_block: 4
@@ -92,6 +94,7 @@
     n_layers: 32
     n_heads: 32
     n_kv_heads: 8
+    nsa_kv_heads: 2  # NSA GQA-16 (32/2); GDN keeps n_kv_heads
     vocab_size: 128000
     window_size: 512
     layers_per_block: 4
@@ -104,8 +107,9 @@
 35b-moe: # ~35.5B total / ~2.5B active -- LatentMoE, fine-grained
     d_model: 2560
     n_layers: 40
-    n_heads: 20
+    n_heads: 32  # d_head 80; multiple of 16 for the NSA kernel group
     n_kv_heads: 4
+    nsa_kv_heads: 2  # NSA GQA-16 (32/2)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
@@ -119,8 +123,9 @@
 35b-moe-shared: # ~35.5B total / ~3.4B active -- coarse-grained, shared pool
     d_model: 2560
     n_layers: 40
-    n_heads: 20
+    n_heads: 32  # d_head 80; multiple of 16 for the NSA kernel group
     n_kv_heads: 4
+    nsa_kv_heads: 2  # NSA GQA-16 (32/2)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
@@ -138,8 +143,9 @@
 120b-moe: # ~118B total / ~6.2B active -- LatentMoE, fine-grained
     d_model: 3584
     n_layers: 48
-    n_heads: 28
-    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads
+    n_heads: 32  # d_head 112; multiple of 16 for the NSA kernel group
+    n_kv_heads: 4
+    nsa_kv_heads: 2  # NSA GQA-16 (32/2)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6
@@ -153,8 +159,9 @@
 120b-moe-shared: # ~118B total / ~8.1B active -- coarse-grained, shared pool
     d_model: 3584
     n_layers: 48
-    n_heads: 28
-    n_kv_heads: 4  # 28 heads: GQA groups must divide n_heads
+    n_heads: 32  # d_head 112; multiple of 16 for the NSA kernel group
+    n_kv_heads: 4
+    nsa_kv_heads: 2  # NSA GQA-16 (32/2)
     vocab_size: 128000
     window_size: 512
     layers_per_block: 6

@@ -175,10 +175,13 @@ all-reduce), and the default Muon optimizer needs whole 2D weight matrices,
 which flat sharding breaks -- sharded training of the 8b+ presets remains
 future work.
 
-Training compiles the model with `torch.compile`. Installing the optional `fla`
-extra (`uv pip install -e ".[fla]"`) swaps in flash-linear-attention's Triton
-kernels for the Gated DeltaNet layers on CUDA (the pure-PyTorch chunk kernel is
-the fallback and the CPU/test path). On top of that,
+Training compiles the model with `torch.compile`. On Linux the base install
+includes [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)'s
+Triton kernels (`fla-core`), used on CUDA by *both* mixers: the Gated DeltaNet
+layers (chunked gated delta rule) and the Native Sparse Attention layers
+(`parallel_nsa` for the fused compression/selection branches plus
+`parallel_attn` for the sliding window) -- pure-PyTorch reference
+implementations are the fallback and the CPU/test path. On top of that,
 `trainer.fused_loss: true` in a stage config folds the lm-head matmul into
 [Liger's](https://github.com/linkedin/Liger-Kernel) fused cross-entropy
 kernel, loaded from the Hub via the optional
@@ -208,10 +211,13 @@ ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
   [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
   Triton kernels on CUDA.
 - [Native Sparse Attention](https://arxiv.org/abs/2502.11089): sparse softmax
-  over three branches -- a compressed (block-pooled) branch, a top-n
+  over three branches -- a compressed (mean-pooled blocks) branch, a top-n
   block-*selected* branch (its scores reuse the compressed branch, so selection
-  is trained end-to-end), and a sliding window -- combined by a learned per-head
-  gate. These layers keep **partial** [RoPE](https://arxiv.org/abs/2104.09864)
+  is trained end-to-end; the sink/current/previous blocks are always kept), and
+  a sliding window -- combined by a learned per-head gate. Runs on fla's Triton
+  NSA kernels on CUDA (no O(T^2) score materialization; the GQA group per
+  selection is 16, hence the presets' 16-query-head MQA / 32-head GQA-2 NSA
+  configs). These layers keep **partial** [RoPE](https://arxiv.org/abs/2104.09864)
   (a fraction of each head's dims rotated) as their positional signal.
 - [RMS Normalization](https://arxiv.org/abs/1910.07467)
 - [QK Normalization](https://arxiv.org/abs/2010.04245) (L2-normalized q/k in GDN)

@@ -7,27 +7,38 @@ branches combined by a per-head learned sigmoid gate (paper Eq. 5):
 
     o_t = g_t^cmp Attn(q_t, K_cmp) + g_t^slc Attn(q_t, K_slc) + g_t^win Attn(q_t, K_win)
 
-- compressed: keys/values pooled into block reps by a small MLP (with an
-  intra-block position encoding), so the query attends over ~T/stride coarse
-  tokens;
+- compressed: keys/values mean-pooled into non-overlapping `block_size` blocks,
+  so the query attends over ~T/block_size coarse tokens;
 - selected: the *raw* tokens of the top-n most important blocks, where block
   importance reuses the compressed-branch attention scores (so the selection
   scorer is trained for free through the compressed branch -- the "natively
   trainable" trick; the discrete top-n itself gets no gradient), shared across
-  the query heads of a GQA group;
+  the query heads of a GQA group. The sink block (0) and the current/previous
+  blocks are always selected;
 - window: plain local attention over the last `window` tokens.
 
-Each branch has its own K/V projections (independent, to stop the easy
-window-branch gradient from suppressing the other two -- paper §3.3.3); the
-query is shared. Partial RoPE is applied to q/k (picochat keeps a positional
-signal on these softmax layers; the Gated DeltaNet layers are NoPE).
+The semantics follow fla's Triton NSA kernels exactly (`fla.ops.nsa`), so the
+training path can run on them on CUDA: `parallel_nsa` fuses the compressed
+branch, the top-n selection and the selected attention (no O(T^2) score
+materialization), and `parallel_attn` (also fla) provides the sliding-window
+branch. Both accept `cu_seqlens` for sequence packing, treating each document
+as its own sequence (block structure resets per document). This is what fla's
+kernel design implies for the module, vs. the paper's full generality: one
+shared K/V per layer (not per-branch), mean-pooling compression (not a learned
+MLP), and compression block == selection block with no overlap.
 
-This module is an exact, differentiable, *dense-masked* pure-PyTorch reference
-that runs on CPU: it realizes NSA's selection semantics (and their gradient
-behavior) but not its memory/throughput win, which comes from the fla Triton
-kernels on CUDA (a follow-up swap behind the same interface). forward() is the
-packed training path; decode() caches each branch's raw K/V and re-derives the
-compression/selection/window per step.
+The fla kernels additionally require the GQA group size (n_heads / n_kv_heads)
+to be a multiple of 16 -- the paper's regime (its config has 64 query heads in
+GQA-4, group 16), since a whole group is loaded as one Triton tile. Configs
+that violate it still work but fall back to the reference path below.
+
+The pure-PyTorch reference (`_reference`) implements the same math dense-masked
+for CPU, non-kernel configs and the decode path, which caches raw K/V like an
+ordinary KV cache and re-derives pooling/selection/window per step.
+
+Partial RoPE is applied to q/k before everything (picochat keeps a positional
+signal on these softmax layers; the Gated DeltaNet layers are NoPE), so both
+paths and both branches see identically rotated keys.
 """
 
 from __future__ import annotations
@@ -36,6 +47,15 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from torch import Tensor
+
+try:  # CUDA Triton kernels (fla-core, a Linux dependency); guarded so
+    # macOS/Windows fall back cleanly to the pure-PyTorch reference below.
+    from fla.ops.attn.parallel import parallel_attn as _fla_parallel_attn
+    from fla.ops.nsa.parallel import parallel_nsa as _fla_parallel_nsa
+
+    _HAS_FLA = True
+except Exception:  # pragma: no cover - depends on the environment
+    _HAS_FLA = False
 
 NEG = float("-inf")
 
@@ -65,15 +85,15 @@ class PartialRoPE(nn.Module):
             self.register_buffer("cos", theta.cos(), persistent=False)
 
     def forward(self, x: Tensor, pos: Tensor) -> Tensor:
-        # x (b, h, l, d_head); pos (l,) absolute positions. Rotates x[..., :rot].
+        # x (b, l, h, d_head); pos (l,) absolute positions. Rotates x[..., :rot].
         if self.rot_dim == 0:
             return x
         r = self.rot_dim
         with torch.amp.autocast(device_type="cuda", enabled=False):
-            sin = self.sin[pos][None, None]  # (1,1,l,rot)
-            cos = self.cos[pos][None, None]
-            xr, xp = x[..., :r], x[..., r:]
-            xr = xr * cos + _rotate_half(xr) * sin
+            sin = self.sin[pos][None, :, None]  # (1, l, 1, rot)
+            cos = self.cos[pos][None, :, None]
+            xr, xp = x[..., :r].float(), x[..., r:]
+            xr = (xr * cos + _rotate_half(xr) * sin).to(x.dtype)
         return torch.cat([xr, xp], dim=-1)
 
 
@@ -81,10 +101,8 @@ def _masked_softmax_attend(
     q: Tensor, k: Tensor, v: Tensor, mask: Tensor, scale: float
 ) -> Tensor:
     """Scaled-dot-product attention with an explicit boolean `mask` (True =
-    attend), returning zeros for any query row that may attend to nothing (an
-    early token with no available compressed/selected blocks -- the window
-    branch always keeps such tokens covered). q (b,h,lq,d), k/v (b,h,lk,d),
-    mask (b,h,lq,lk)."""
+    attend), returning zeros for any query row that may attend to nothing.
+    q (b,h,lq,d), k/v (b,h,lk,d), mask broadcastable to (b,h,lq,lk)."""
     scores = (q @ k.transpose(-1, -2)) * scale
     scores = scores.masked_fill(~mask, NEG)
     attn = scores.softmax(-1)
@@ -97,10 +115,8 @@ class NativeSparseAttention(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        n_kv_heads: int | None = None,
-        cmp_block: int = 32,
-        cmp_stride: int = 16,
-        sel_block: int = 64,
+        n_kv_heads: int = 1,
+        block_size: int = 64,
         n_selected: int = 16,
         window: int = 512,
         rope_factor: float = 0.25,
@@ -110,272 +126,229 @@ class NativeSparseAttention(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
-        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
-        assert n_heads % self.n_kv_heads == 0
-        self.n_rep = n_heads // self.n_kv_heads
+        # NSA's own KV head count (independent of the GDN layers' GQA setting):
+        # the paper shares one selection per GQA group, and the fla kernels tile
+        # a whole group, requiring n_heads/n_kv_heads to be a multiple of 16.
+        self.n_kv_heads = n_kv_heads
+        assert n_heads % n_kv_heads == 0
+        self.n_rep = n_heads // n_kv_heads
         self.d_head = d_model // n_heads
         assert d_model % n_heads == 0
         self.scale = self.d_head**-0.5
 
-        self.cmp_block = cmp_block
-        self.cmp_stride = cmp_stride
-        self.sel_block = sel_block
+        self.block_size = block_size
         self.n_selected = n_selected
         self.window = window
 
         kv_dim = self.n_kv_heads * self.d_head
+        # One shared K/V for all three branches (the fla-kernel factorization;
+        # the compressed branch derives its keys/values by mean-pooling these).
         self.proj_q = nn.Linear(d_model, d_model, bias=False)
-        # Independent K/V projections per branch (paper §3.3.3).
-        self.proj_k_cmp = nn.Linear(d_model, kv_dim, bias=False)
-        self.proj_v_cmp = nn.Linear(d_model, kv_dim, bias=False)
-        self.proj_k_slc = nn.Linear(d_model, kv_dim, bias=False)
-        self.proj_v_slc = nn.Linear(d_model, kv_dim, bias=False)
-        self.proj_k_win = nn.Linear(d_model, kv_dim, bias=False)
-        self.proj_v_win = nn.Linear(d_model, kv_dim, bias=False)
+        self.proj_k = nn.Linear(d_model, kv_dim, bias=False)
+        self.proj_v = nn.Linear(d_model, kv_dim, bias=False)
         self.proj_o = nn.Linear(d_model, d_model, bias=False)
         # Per-head gate over the three branches (Eq. 5): sigmoid MLP on x.
         self.gate = nn.Linear(d_model, n_heads * 3, bias=False)
 
-        # Compression MLP phi (separate for k and v), with an intra-block
-        # position encoding added before pooling: (block_len * d_head) -> d_head.
-        self.cmp_pos = nn.Parameter(torch.zeros(cmp_block, self.d_head))
-        self.phi_k = nn.Linear(cmp_block * self.d_head, self.d_head, bias=False)
-        self.phi_v = nn.Linear(cmp_block * self.d_head, self.d_head, bias=False)
-
         self.rope = PartialRoPE(self.d_head, rope_factor, rope_base, max_seq_len)
 
-    # -- projections ------------------------------------------------------
-    def _project(self, x: Tensor, proj: nn.Linear, heads: int) -> Tensor:
-        return rearrange(proj(x), "b l (h d) -> b h l d", h=heads)
-
-    def _q(self, x: Tensor, pos: Tensor) -> Tensor:
-        return self.rope(self._project(x, self.proj_q, self.n_heads), pos)
-
-    def _kv(self, x: Tensor, kp: nn.Linear, vp: nn.Linear) -> tuple[Tensor, Tensor]:
+    def _use_kernel(self, x: Tensor) -> bool:
+        # The fla NSA kernels tile one GQA group per Triton block: the group
+        # size must be a multiple of 16, and the top-k tile needs
+        # block_size >= 2 * n_selected.
         return (
-            self._project(x, kp, self.n_kv_heads),
-            self._project(x, vp, self.n_kv_heads),
+            _HAS_FLA
+            and x.is_cuda
+            and self.n_rep % 16 == 0
+            and self.block_size >= 2 * self.n_selected
         )
+
+    def _qkv(self, x: Tensor, pos: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        b, l, _ = x.shape
+        q = self.proj_q(x).reshape(b, l, self.n_heads, self.d_head)
+        k = self.proj_k(x).reshape(b, l, self.n_kv_heads, self.d_head)
+        v = self.proj_v(x).reshape(b, l, self.n_kv_heads, self.d_head)
+        return self.rope(q, pos), self.rope(k, pos), v
+
+    def _gates(self, x: Tensor) -> Tensor:
+        # (b, l, n_heads, 3): sigmoid gate per query head per branch,
+        # ordered (cmp, slc, win).
+        return rearrange(self.gate(x), "b l (h c) -> b l h c", c=3).sigmoid()
 
     def _rep(self, t: Tensor) -> Tensor:
-        # GQA: expand n_kv_heads -> n_heads along the head dim.
+        # GQA: expand n_kv_heads -> n_heads along the head dim (b, h, l, d).
         return t.repeat_interleave(self.n_rep, dim=1) if self.n_rep > 1 else t
 
-    # -- compression ------------------------------------------------------
-    def _compress(
-        self, k: Tensor, v: Tensor, k_pos: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor] | None:
-        # Strided block compression of RoPE'd keys / raw values. Returns
-        # (cmp_k, cmp_v, block_last_pos, block_first_pos) or None if the
-        # sequence is shorter than one block. k/v: (b, n_kv, T, d_head).
-        b, h, T, d = k.shape
-        bl, s = self.cmp_block, self.cmp_stride
-        if T < bl:
-            return None
-        starts = torch.arange(0, T - bl + 1, s, device=k.device)
-        # gather blocks: (b, h, n_blocks, bl, d)
-        idx = starts[:, None] + torch.arange(bl, device=k.device)[None, :]  # (nb, bl)
-        kb = k[:, :, idx]  # (b, h, nb, l, d)
-        vb = v[:, :, idx]
-        kb = kb + self.cmp_pos  # intra-block position encoding
-        vb = vb + self.cmp_pos
-        cmp_k = self.phi_k(kb.flatten(-2))  # (b, h, nb, d)
-        cmp_v = self.phi_v(vb.flatten(-2))
-        block_last = starts + (bl - 1)
-        return cmp_k, cmp_v, block_last, starts
+    # -- reference path ----------------------------------------------------
+    def _reference(self, q: Tensor, k: Tensor, v: Tensor, g: Tensor, q_pos: Tensor) -> Tensor:
+        """Dense-masked pure-PyTorch NSA over ONE sequence segment, matching
+        fla's kernel semantics exactly (see module docstring). q (b, Lq, HQ, d)
+        and g (b, Lq, HQ, 3) cover the query positions `q_pos` (0-based within
+        the segment); k/v (b, Lk, H, d) cover key positions 0..Lk-1 -- Lq == Lk
+        for training, a suffix of the timeline for decode. Returns
+        (b, Lq, HQ, d)."""
+        b, lq, hq, dh = q.shape
+        lk, h = k.shape[1], k.shape[2]
+        bs, s = self.block_size, self.n_selected
+        qh = q.permute(0, 2, 1, 3)  # (b, HQ, Lq, d)
+        kh = k.permute(0, 2, 1, 3)  # (b, H, Lk, d)
+        vh = v.permute(0, 2, 1, 3)
+        k_pos = torch.arange(lk, device=q.device)
 
-    # -- core (shared by forward and decode) ------------------------------
-    def _attend(
-        self,
-        x_q: Tensor,
-        q: Tensor,
-        k_cmp: Tensor,
-        v_cmp: Tensor,
-        k_slc: Tensor,
-        v_slc: Tensor,
-        k_win: Tensor,
-        v_win: Tensor,
-        q_pos: Tensor,
-        k_pos: Tensor,
-        doc_q: Tensor,
-        doc_k: Tensor,
-    ) -> Tensor:
-        # q (b, H, Lq, d); branch keys/values (b, n_kv, Lk, d) already RoPE'd
-        # (keys) where applicable. q_pos/k_pos absolute positions; doc_q/doc_k
-        # (b, L) document ids for packing (equal everywhere when unpacked).
-        b, H, Lq, d = q.shape
-        same_doc = doc_q[:, None, :, None] == doc_k[:, None, None, :]  # (b,1,Lq,Lk)
-        causal = k_pos[None, None, None, :] <= q_pos[None, None, :, None]
-
-        # --- window branch ---
-        in_win = k_pos[None, None, None, :] > q_pos[None, None, :, None] - self.window
-        win_mask = causal & in_win & same_doc
+        # --- window branch: keys in (t - window, t] ---
+        rel = q_pos[:, None] - k_pos[None, :]  # (Lq, Lk)
+        win_mask = (rel >= 0) & (rel < self.window)
         out_win = _masked_softmax_attend(
-            q, self._rep(k_win), self._rep(v_win), win_mask, self.scale
+            qh, self._rep(kh), self._rep(vh), win_mask[None, None], self.scale
         )
 
-        # --- compressed branch (also produces the selection importances) ---
-        comp = self._compress(k_cmp, v_cmp, k_pos)
+        # --- compressed branch: mean-pooled complete blocks; block j becomes
+        # visible at its last token ((j+1)*bs - 1 <= t, i.e. j < (t+1)//bs) ---
+        nb = lk // bs  # complete blocks only
+        n_all = (lk + bs - 1) // bs  # incl. the trailing partial block
+        imp = qh.new_zeros(b, h, lq, n_all)  # selection importance per KV head
         out_cmp = torch.zeros_like(out_win)
-        p_cmp = None
-        blk_first_pos = None
-        if comp is not None:
-            cmp_k, cmp_v, blk_last, blk_first = comp
-            # a compressed block is visible to query t iff it is fully causal
-            # and lies entirely within t's document
-            blk_last_pos = k_pos[blk_last]  # (nb,)
-            blk_first_pos = k_pos[blk_first]
-            blk_doc = doc_k[:, blk_last]  # (b, nb) doc of block's last token
-            blk_doc_first = doc_k[:, blk_first]
-            no_straddle = (blk_doc == blk_doc_first)[:, None, None, :]  # (b,1,1,nb)
-            blk_causal = blk_last_pos[None, None, None, :] <= q_pos[None, None, :, None]
-            blk_same = blk_doc[:, None, None, :] == doc_q[:, None, :, None]
-            blk_mask = blk_causal & blk_same & no_straddle  # (b,1,Lq,nb)
+        if nb > 0:
+            kc = kh[:, :, : nb * bs].reshape(b, h, nb, bs, dh).mean(3)
+            vc = vh[:, :, : nb * bs].reshape(b, h, nb, bs, dh).mean(3)
+            s_cmp = (qh @ self._rep(kc).transpose(-1, -2)) * self.scale  # (b,HQ,Lq,nb)
+            ncq = (q_pos + 1) // bs  # visible complete blocks per query
+            vis = torch.arange(nb, device=q.device)[None, :] < ncq[:, None]  # (Lq, nb)
+            s_cmp = s_cmp.masked_fill(~vis[None, None], NEG)
+            # p == exp(s - lse): the softmax over visible blocks; a query with
+            # no visible block gets all-zero p (fla defines lse = 0 there).
+            p_cmp = torch.nan_to_num(s_cmp.softmax(-1), nan=0.0)
+            out_cmp = p_cmp @ self._rep(vc)
+            # importance = p summed over the GQA group (selection is shared
+            # across the group's query heads)
+            imp[..., :nb] = rearrange(
+                p_cmp, "b (h g) l n -> b h g l n", h=h
+            ).sum(2)
 
-            scores = (q @ self._rep(cmp_k).transpose(-1, -2)) * self.scale  # (b,H,Lq,nb)
-            scores = scores.masked_fill(~blk_mask, NEG)
-            p_cmp = torch.nan_to_num(scores.softmax(-1), nan=0.0)  # (b,H,Lq,nb)
-            out_cmp = p_cmp @ self._rep(cmp_v)
+        # --- selection: top-n blocks per KV head among blocks 0..cur, with the
+        # sink (0), previous and current blocks forced to maximal importance
+        # (fla scores them 1.0 per query head, i.e. n_rep after the group sum,
+        # >= any real score sum) ---
+        cur = (q_pos // bs).long()  # (Lq,)
+        blk = torch.arange(n_all, device=q.device)
+        cand = blk[None, :] <= cur[:, None]  # (Lq, n_all) selectable blocks
+        ar = torch.arange(lq, device=q.device)
+        forced = torch.zeros(lq, n_all, dtype=torch.bool, device=q.device)
+        forced[:, 0] = True
+        forced[ar, cur] = True
+        forced[ar, (cur - 1).clamp_min(0)] = True
+        imp = imp.masked_fill(forced[None, None], float(self.n_rep))
+        imp = imp.masked_fill(~cand[None, None], NEG)
+        topk = imp.topk(min(s, n_all), dim=-1)
+        picked = torch.zeros_like(imp, dtype=torch.bool)
+        picked.scatter_(-1, topk.indices, True)
+        picked &= imp > NEG  # drop picks that were only masked padding
 
-        # --- selected branch (always runs; forced sink+local blocks make it
-        # attend to at least the local tokens even when the sequence is shorter
-        # than a compression block and there are no importance scores yet) ---
-        out_slc = self._select_and_attend(
-            q, k_slc, v_slc, p_cmp, blk_first_pos,
-            q_pos, k_pos, doc_q, doc_k, causal, same_doc,
+        # expand the block mask to token level, all heads, causal
+        sel_id = (k_pos // bs).clamp_max(n_all - 1)  # token -> block
+        tok_mask = picked[..., sel_id]  # (b, H, Lq, Lk)
+        tok_mask = tok_mask.repeat_interleave(self.n_rep, dim=1)
+        tok_mask = tok_mask & (k_pos[None, None, None, :] <= q_pos[None, None, :, None])
+        out_slc = _masked_softmax_attend(
+            qh, self._rep(kh), self._rep(vh), tok_mask, self.scale
         )
 
-        # --- gate & combine ---
-        g = self.gate(x_q).sigmoid()  # (b, Lq, H*3)
-        g = rearrange(g, "b l (h c) -> c b h l 1", c=3)
-        out = g[0] * out_cmp + g[1] * out_slc + g[2] * out_win
-        return self.proj_o(rearrange(out, "b h l d -> b l (h d)"))
+        gh = g.permute(0, 2, 1, 3)[..., None]  # (b, HQ, Lq, 3, 1) -> slices below
+        out = (
+            gh[..., 0, :] * out_cmp + gh[..., 1, :] * out_slc + gh[..., 2, :] * out_win
+        )
+        return out.permute(0, 2, 1, 3)  # (b, Lq, HQ, d)
 
-    def _select_and_attend(
-        self, q, k_slc, v_slc, p_cmp, blk_first_pos,
-        q_pos, k_pos, doc_q, doc_k, causal, same_doc,
+    def _reference_segments(
+        self, q: Tensor, k: Tensor, v: Tensor, g: Tensor, cu_seqlens: Tensor
     ) -> Tensor:
-        # Map compressed-block importance onto selection blocks, pick top-n per
-        # GQA group (plus forced sink + local blocks), and attend over the raw
-        # tokens of the selected blocks. `p_cmp`/`blk_first_pos` are None when
-        # the sequence is shorter than a compression block (forced-only
-        # selection). Returns (b, H, Lq, d).
-        b, H, Lq, d = q.shape
-        Lk = k_slc.shape[2]
-        sb = self.sel_block
-        # k_pos is always a contiguous 0..Lk-1, so the number of selection blocks
-        # follows from the (static, compile-friendly) key length -- no .item()
-        # sync / graph break, which would otherwise block torch.compile fusion.
-        n_sel = max(1, (Lk + sb - 1) // sb)
-
-        # per-group selection importance over selection blocks; zero when there
-        # are no compressed scores yet
-        imp = q.new_zeros(b, self.n_kv_heads, Lq, n_sel)
-        if p_cmp is not None:
-            # assign each compressed block to the selection block containing its
-            # first token, scatter-sum p_cmp, then share across the GQA group
-            sel_of_cmp = (blk_first_pos // sb).clamp_max(n_sel - 1)  # (nb,)
-            imp_h = q.new_zeros(b, H, Lq, n_sel)
-            imp_h.index_add_(3, sel_of_cmp, p_cmp)
-            imp = rearrange(imp_h, "b (kv r) l n -> b kv r l n", r=self.n_rep).sum(2)
-
-        # selection-block availability for each query (causal + same doc)
-        sel_pos = torch.arange(n_sel, device=q.device) * sb  # block start pos
-        sel_id = torch.arange(Lk, device=q.device) // sb  # token -> sel block
-        # deterministic tiebreak: nudge importance by block index so exact
-        # ties (e.g. all-zero importance) resolve identically regardless of the
-        # tensor width -- torch.topk leaves tie order unspecified otherwise.
-        # Bounded (< 1e-6 total, regardless of sequence length) so the nudge
-        # can never override a genuine importance difference; an unbounded
-        # position-proportional nudge would grow past real score gaps on long
-        # sequences and bias selection toward late blocks.
-        tie = torch.arange(n_sel, device=q.device, dtype=imp.dtype)
-        imp = imp + (1e-6 / n_sel) * tie
-        # a sel block is available if its first token is causal & same doc as q
-        blk_start_causal = sel_pos[None, None, :] <= q_pos[None, :, None]  # (1,Lq,n_sel)
-        avail = blk_start_causal.expand(b, Lq, n_sel).clone()
-        imp = imp.masked_fill(~avail[:, None], NEG)
-
-        # forced blocks: sink (0), current block, and previous block (always
-        # kept -- attention sink + local recency). Up to 3 distinct per query.
-        cur = (q_pos // sb).long()  # (Lq,)
-        forced = torch.zeros(b, imp.shape[1], Lq, n_sel, dtype=torch.bool, device=q.device)
-        forced[..., 0] = True
-        ar = torch.arange(Lq, device=q.device)
-        forced[:, :, ar, cur] = True
-        forced[:, :, ar, (cur - 1).clamp_min(0)] = True
-        forced &= avail[:, None]
-
-        # Reserve the (<=3) forced slots and fill the rest competitively from the
-        # non-forced available blocks by importance. Keeping the forced blocks
-        # out of the topk avoids +inf ties, whose ordering torch.topk leaves
-        # unspecified -- that made selection depend on padded (future) blocks and
-        # broke causal invariance. Total selected blocks stay <= n_selected.
-        n = min(self.n_selected, n_sel)
-        n_compete = max(0, n - 3)
-        sel_mask_blk = forced.clone()
-        if n_compete > 0:
-            imp_compete = imp.masked_fill(forced | ~avail[:, None], NEG)
-            topk = imp_compete.topk(min(n_compete, n_sel), dim=-1).indices
-            picked = torch.zeros_like(imp, dtype=torch.bool)
-            picked.scatter_(-1, topk, True)
-            picked &= imp_compete > NEG  # drop padded (all-masked) picks
-            sel_mask_blk |= picked
-
-        # expand selection-block mask to token level and to all heads
-        tok_mask = sel_mask_blk[..., sel_id]  # (b, kv, Lq, Lk)
-        tok_mask = tok_mask.repeat_interleave(self.n_rep, dim=1)  # (b, H, Lq, Lk)
-        tok_mask = tok_mask & causal & same_doc
-        return _masked_softmax_attend(
-            q, self._rep(k_slc), self._rep(v_slc), tok_mask, self.scale
-        )
+        # Packed training on the reference path: run each cu_seqlens segment
+        # as its own sequence (positions and block structure restart per
+        # document, exactly like fla's varlen mode). Inputs are (1, T, ...).
+        outs = []
+        for s0, e0 in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist()):
+            t = e0 - s0
+            pos = torch.arange(t, device=q.device)
+            outs.append(
+                self._reference(q[:, s0:e0], k[:, s0:e0], v[:, s0:e0], g[:, s0:e0], pos)
+            )
+        return torch.cat(outs, dim=1)
 
     # -- forward / decode -------------------------------------------------
-    def forward(self, x: Tensor, doc_ids: Tensor | None = None) -> Tensor:
-        # Training path: q positions == k positions == 0..L-1.
-        b, L, _ = x.shape
-        pos = torch.arange(L, device=x.device)
-        doc = (
-            torch.zeros(b, L, dtype=torch.long, device=x.device)
-            if doc_ids is None
-            else doc_ids
-        )
-        q = self._q(x, pos)
-        k_cmp, v_cmp = self._kv(x, self.proj_k_cmp, self.proj_v_cmp)
-        k_slc, v_slc = self._kv(x, self.proj_k_slc, self.proj_v_slc)
-        k_win, v_win = self._kv(x, self.proj_k_win, self.proj_v_win)
-        k_cmp = self.rope(k_cmp, pos)
-        k_slc = self.rope(k_slc, pos)
-        k_win = self.rope(k_win, pos)
-        return self._attend(
-            x, q, k_cmp, v_cmp, k_slc, v_slc, k_win, v_win, pos, pos, doc, doc
-        )
+    def forward(
+        self,
+        x: Tensor,
+        doc_ids: Tensor | None = None,
+        cu_seqlens: Tensor | None = None,
+    ) -> Tensor:
+        # Training path. Sequence packing comes in as `cu_seqlens` (1D bounds
+        # into the flattened batch*seq, always including row boundaries -- see
+        # doc_ids_to_cu_seqlens); each segment is treated as an independent
+        # sequence. `doc_ids` is accepted for interface symmetry but unused --
+        # cu_seqlens carries the same information here.
+        b, l, _ = x.shape
+        pos = torch.arange(l, device=x.device)
+        q, k, v = self._qkv(x, pos)  # RoPE'd per row (relative offsets survive
+        # flattening: RoPE is relative under dot products)
+        g = self._gates(x)
+
+        if self._use_kernel(x):
+            if cu_seqlens is not None:
+                q, k, v, g = (u.reshape(1, b * l, *u.shape[2:]) for u in (q, k, v, g))
+            o = _fla_parallel_nsa(
+                q, k, v,
+                g_cmp=g[..., 0].contiguous(),
+                g_slc=g[..., 1].contiguous(),
+                block_counts=self.n_selected,
+                block_size=self.block_size,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+            )
+            o_win = _fla_parallel_attn(
+                q, k, v,
+                scale=self.scale,
+                window_size=self.window,
+                cu_seqlens=cu_seqlens,
+            )
+            o = o + g[..., 2, None] * o_win
+            o = o.reshape(b, l, self.d_model)
+        elif cu_seqlens is not None:
+            flat = (u.reshape(1, b * l, *u.shape[2:]) for u in (q, k, v, g))
+            o = self._reference_segments(*flat, cu_seqlens).reshape(b, l, self.d_model)
+        else:
+            o = self._reference(q, k, v, g, pos).reshape(b, l, self.d_model)
+        return self.proj_o(o)
 
     def decode(
         self, x: Tensor, cache: dict | None = None, pos: int = 0
     ) -> tuple[Tensor, dict]:
-        # Inference path: cache each branch's raw (RoPE'd) K / raw V over the
-        # full history; recompute compression / selection / window per step. The
+        # Inference path: cache the raw (RoPE'd) K / raw V over the full
+        # history and re-derive pooling / selection / window per step. The
         # cache grows in the sequence dim, so speculative-decode rollback can
-        # slice it like an ordinary KV cache.
-        b, L, _ = x.shape
-        q_pos = torch.arange(pos, pos + L, device=x.device)
-        q = self._q(x, q_pos)
-        kc, vc = self._kv(x, self.proj_k_cmp, self.proj_v_cmp)
-        ks, vs = self._kv(x, self.proj_k_slc, self.proj_v_slc)
-        kw, vw = self._kv(x, self.proj_k_win, self.proj_v_win)
-        kc, ks, kw = self.rope(kc, q_pos), self.rope(ks, q_pos), self.rope(kw, q_pos)
+        # snapshot/restore it like an ordinary KV cache.
+        b, l, _ = x.shape
+        q_pos = torch.arange(pos, pos + l, device=x.device)
+        q, k, v = self._qkv(x, q_pos)
         if cache is not None:
-            kc = torch.cat([cache["kc"], kc], dim=2)
-            vc = torch.cat([cache["vc"], vc], dim=2)
-            ks = torch.cat([cache["ks"], ks], dim=2)
-            vs = torch.cat([cache["vs"], vs], dim=2)
-            kw = torch.cat([cache["kw"], kw], dim=2)
-            vw = torch.cat([cache["vw"], vw], dim=2)
-        new_cache = {"kc": kc, "vc": vc, "ks": ks, "vs": vs, "kw": kw, "vw": vw}
-        k_pos = torch.arange(kw.shape[2], device=x.device)
-        doc = torch.zeros(b, kw.shape[2], dtype=torch.long, device=x.device)
-        out = self._attend(
-            x, q, kc, vc, ks, vs, kw, vw, q_pos, k_pos, doc[:, -L:], doc
-        )
-        return out, new_cache
+            k = torch.cat([cache["k"], k], dim=1)
+            v = torch.cat([cache["v"], v], dim=1)
+        new_cache = {"k": k, "v": v}
+        g = self._gates(x)
+        if cache is None and self._use_kernel(x):
+            # Fresh-prefill fast path: with no history this is exactly the
+            # training forward, so the O(T^2)-free kernels handle long prompts.
+            o = _fla_parallel_nsa(
+                q, k, v,
+                g_cmp=g[..., 0].contiguous(),
+                g_slc=g[..., 1].contiguous(),
+                block_counts=self.n_selected,
+                block_size=self.block_size,
+                scale=self.scale,
+            )
+            o = o + g[..., 2, None] * _fla_parallel_attn(
+                q, k, v, scale=self.scale, window_size=self.window
+            )
+            o = o.reshape(b, l, self.d_model)
+        else:
+            o = self._reference(q, k, v, g, q_pos).reshape(b, l, self.d_model)
+        return self.proj_o(o), new_cache

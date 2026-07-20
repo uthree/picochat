@@ -154,7 +154,7 @@ def _snapshot_cache(cache: list | None) -> list | None:
     """A cheap rollback point for speculative decoding: a shallow copy of the
     per-layer cache list. The mixers' decode() never mutates cached tensors in
     place -- a Gated DeltaNet returns a fresh (recurrent_state, conv_state) and a
-    Native Sparse Attention returns a new per-branch KV dict (torch.cat makes new
+    Native Sparse Attention returns a new raw-K/V dict (torch.cat makes new
     tensors) -- so preserving the old element references is enough to restore the
     pre-draft state, without cloning any tensor."""
     return None if cache is None else list(cache)

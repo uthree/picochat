@@ -40,7 +40,7 @@ def test_transformer_incremental_matches_full():
     torch.manual_seed(0)
     model = Transformer(
         d_model=32, n_heads=4, n_layers=4, layers_per_block=2, window_size=8,
-        cmp_block=4, cmp_stride=2, sel_block=4, n_selected=4,
+        sel_block=4, n_selected=4,
     ).eval()
     x = torch.randn(1, 5, 32)
     full = model(x)
@@ -78,7 +78,7 @@ def test_transformer_packed_first_document_matches_standalone():
     torch.manual_seed(0)
     model = Transformer(
         d_model=32, n_heads=4, n_layers=4, layers_per_block=2, window_size=8,
-        cmp_block=4, cmp_stride=2, sel_block=4, n_selected=4,
+        sel_block=4, n_selected=4,
     ).eval()
     a, b = torch.randn(1, 4, 32), torch.randn(1, 6, 32)
     packed = torch.cat([a, b], dim=1)
@@ -92,7 +92,7 @@ def test_transformer_doc_ids_blocks_cross_document_attention():
     torch.manual_seed(0)
     model = Transformer(
         d_model=32, n_heads=4, n_layers=4, layers_per_block=2, window_size=8,
-        cmp_block=4, cmp_stride=2, sel_block=4, n_selected=4,
+        sel_block=4, n_selected=4,
     ).eval()
     x = torch.randn(1, 8, 32)
     doc_ids = torch.tensor([[0] * 4 + [1] * 4])
