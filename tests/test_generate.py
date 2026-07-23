@@ -272,3 +272,120 @@ def test_update_and_describe_cover_penalties():
     with pytest.raises(ValueError):
         cfg.update("repetition_penalty", "-1")
     assert "repetition_penalty=1.3" in cfg.describe()
+
+
+# ---------------------------------------------------------------------------
+# ChatSession: incremental multi-turn decoding
+# ---------------------------------------------------------------------------
+def _counting_lm(vocab_size=300):
+    from picochat.model import TransformerLM
+
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=vocab_size, d_model=32, n_heads=4, n_layers=2).eval()
+    lm.decoded_tokens = 0
+    orig = lm.decode
+
+    def counting_decode(x=None, cache=None, pos=0, inputs_embeds=None):
+        lm.decoded_tokens += x.shape[1] if x is not None else inputs_embeds.shape[1]
+        return orig(x, cache, pos, inputs_embeds)
+
+    lm.decode = counting_decode
+    return lm
+
+
+def test_chat_session_matches_stateless_generate():
+    from picochat.inference.engine import ChatSession
+
+    lm = _counting_lm()
+    tok = ByteTokenizer()
+    cfg = SamplingConfig(temperature=0.0, max_new_tokens=8)
+    session = ChatSession(lm, tok, max_seq_len=512)
+
+    first = [1, 2, 3, 4]
+    reply1 = list(session.generate(first, cfg))
+    assert reply1 == list(generate(lm, tok, first, cfg, max_seq_len=512))
+
+    # the next prompt extends (prompt + reply + new turn), as chat rebuilds it
+    second = first + reply1 + [7, 8, 9]
+    reply2 = list(session.generate(second, cfg))
+    assert reply2 == list(generate(lm, tok, second, cfg, max_seq_len=512))
+
+
+def test_chat_session_prefills_only_the_delta():
+    from picochat.inference.engine import ChatSession
+
+    lm = _counting_lm()
+    tok = ByteTokenizer()
+    cfg = SamplingConfig(temperature=0.0, max_new_tokens=4)
+    session = ChatSession(lm, tok, max_seq_len=512)
+
+    first = list(range(1, 30))
+    reply1 = list(session.generate(first, cfg))
+    lm.decoded_tokens = 0
+    second = first + reply1 + [40, 41, 42]
+    reply2 = list(session.generate(second, cfg))
+    # only the un-cached suffix (the 3 new ids + any uncommitted reply tail)
+    # plus the generated tokens were decoded -- NOT the whole conversation
+    assert lm.decoded_tokens <= 3 + 1 + len(reply2) + 1
+    assert lm.decoded_tokens < len(second)
+
+
+def test_chat_session_resets_on_divergent_prompt():
+    from picochat.inference.engine import ChatSession
+
+    lm = _counting_lm()
+    tok = ByteTokenizer()
+    cfg = SamplingConfig(temperature=0.0, max_new_tokens=4)
+    session = ChatSession(lm, tok, max_seq_len=512)
+
+    list(session.generate([1, 2, 3, 4, 5], cfg))
+    assert session.cached_tokens > 0
+    # a shorter / diverging prompt (e.g. after /reset) must start over and
+    # still produce exactly the stateless stream
+    fresh = [9, 8, 7]
+    assert list(session.generate(fresh, cfg)) == list(
+        generate(lm, tok, fresh, cfg, max_seq_len=512)
+    )
+
+
+def test_chat_session_aborted_stream_stays_consistent():
+    from picochat.inference.engine import ChatSession
+
+    lm = _counting_lm()
+    tok = ByteTokenizer()
+    cfg = SamplingConfig(temperature=0.0, max_new_tokens=8)
+    session = ChatSession(lm, tok, max_seq_len=512)
+
+    first = [1, 2, 3, 4]
+    stream = session.generate(first, cfg)
+    got = [next(stream), next(stream)]  # consume two tokens, then abort
+    stream.close()
+    # continuing with prompt + the tokens the caller actually saw must equal
+    # the stateless result (the session committed exactly what it yielded)
+    second = first + got + [11, 12]
+    assert list(session.generate(second, cfg)) == list(
+        generate(lm, tok, second, cfg, max_seq_len=512)
+    )
+
+
+def test_bf16_weights_decode_under_autocast():
+    from picochat.inference.engine import ChatSession, inference_autocast
+    from picochat.training.checkpoint import resolve_dtype
+
+    lm = _counting_lm()
+    for p in lm.parameters():
+        p.data = p.data.to(torch.bfloat16)
+    ctx = inference_autocast(lm, "cpu")
+    assert type(ctx).__name__ != "nullcontext"
+    tok = ByteTokenizer()
+    cfg = SamplingConfig(temperature=0.0, max_new_tokens=4)
+    tokens = list(generate(lm, tok, [1, 2, 3], cfg, max_seq_len=128))
+    assert all(isinstance(t, int) for t in tokens)
+    session = ChatSession(lm, tok, max_seq_len=128)
+    assert list(session.generate([1, 2, 3], cfg)) == tokens
+
+    assert resolve_dtype("auto", "cpu") is None
+    assert resolve_dtype("bf16", "cpu") is torch.bfloat16
+    assert resolve_dtype("fp32", "cuda") is None
+    with pytest.raises(ValueError):
+        resolve_dtype("int8", "cpu")

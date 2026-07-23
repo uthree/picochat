@@ -43,7 +43,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from torch import Tensor
 
-from picochat.inference.engine import SamplingConfig, generate
+from picochat.inference.engine import ChatSession, SamplingConfig, generate
 from picochat.model.multimodal import (
     MediaAdapters,
     render_mm_prompt,
@@ -186,21 +186,51 @@ def _to_internal_parts(content, sample_rate: int):
     return parts
 
 
+def _token_stream(
+    model, tokenizer, session, prompt_ids, sampling, device, max_seq_len, prompt_embeds
+):
+    """The reply token iterator for one request: through the shared
+    ChatSession (prefix-cached incremental prefill) for ordinary text
+    requests, or a stateless generate() for multimodal prompt_embeds (their
+    spliced embeddings are not reconstructible from token ids, so they cannot
+    share the session's committed prefix)."""
+    if prompt_embeds is None and session is not None:
+        return session.generate(prompt_ids, sampling)
+    return generate(
+        model,
+        tokenizer,
+        prompt_ids,
+        sampling,
+        device,
+        max_seq_len=max_seq_len,
+        prompt_embeds=prompt_embeds,
+    )
+
+
 def _run_generation(
-    model, tokenizer, prompt_ids, sampling, device, max_seq_len, prompt_embeds=None
+    model,
+    tokenizer,
+    session,
+    prompt_ids,
+    sampling,
+    device,
+    max_seq_len,
+    prompt_embeds=None,
 ) -> tuple[list[int], bool]:
-    """Consume generate() fully. Returns (token_ids, stopped_on_stop_token) --
-    the latter distinguishes finish_reason "stop" from "length"."""
+    """Consume the reply stream fully. Returns (token_ids,
+    stopped_on_stop_token) -- the latter distinguishes finish_reason "stop"
+    from "length"."""
     budget = _completion_budget(len(prompt_ids), sampling, max_seq_len)
     token_ids = list(
-        generate(
+        _token_stream(
             model,
             tokenizer,
+            session,
             prompt_ids,
             sampling,
             device,
-            max_seq_len=max_seq_len,
-            prompt_embeds=prompt_embeds,
+            max_seq_len,
+            prompt_embeds,
         )
     )
     return token_ids, len(token_ids) < budget
@@ -213,6 +243,7 @@ def _sse(payload: dict) -> bytes:
 async def _stream_chat_completion(
     model,
     tokenizer,
+    session,
     prompt_ids: list[int],
     sampling: SamplingConfig,
     device,
@@ -249,14 +280,15 @@ async def _stream_chat_completion(
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             n = 0
             try:
-                for token_id in generate(
+                for token_id in _token_stream(
                     model,
                     tokenizer,
+                    session,
                     prompt_ids,
                     sampling,
                     device,
-                    max_seq_len=max_seq_len,
-                    prompt_embeds=prompt_embeds,
+                    max_seq_len,
+                    prompt_embeds,
                 ):
                     n += 1
                     text = decoder.decode(tokenizer.decode_single_token_bytes(token_id))
@@ -292,6 +324,12 @@ def create_app(
     default_sampling = default_sampling or SamplingConfig()
     generation_lock = asyncio.Lock()
     app = FastAPI(title="picochat")
+    # One shared incremental-decode session (requests are serialized by
+    # generation_lock): a client continuing the same conversation -- the
+    # typical chat pattern, where each request's messages extend the last --
+    # only pays prefill for its newest turns. Requests that don't extend the
+    # committed prefix reset it automatically (see ChatSession).
+    session = ChatSession(model, tokenizer, device, max_seq_len)
     media = MediaAdapters.from_encoders(audio_encoder, vision_encoder)
     audio_sr = media.audio_processor.cfg.sample_rate if media.audio_processor else 16000
 
@@ -360,6 +398,7 @@ def create_app(
                 _stream_chat_completion(
                     model,
                     tokenizer,
+                    session,
                     prompt_ids,
                     sampling,
                     device,
@@ -378,6 +417,7 @@ def create_app(
                 _run_generation,
                 model,
                 tokenizer,
+                session,
                 prompt_ids,
                 sampling,
                 device,

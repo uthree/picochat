@@ -80,11 +80,34 @@ def load_mm_encoders(ckpt: dict, d_model: int):
     return audio_encoder, vision_encoder
 
 
+def resolve_dtype(
+    spec: str | torch.dtype | None, device: torch.device | str
+) -> torch.dtype | None:
+    """Inference weight dtype from a CLI-ish spec: "auto" -> bf16 on CUDA
+    (halves memory; decoding then runs under bf16 autocast, the same numeric
+    regime bf16-mixed training used) and full fp32 elsewhere; "bf16"/"fp16"/
+    "fp32" force it. None (fp32) keeps the checkpoint's precision."""
+    if isinstance(spec, torch.dtype):
+        return spec
+    match spec:
+        case "auto":
+            cuda = torch.device(device).type == "cuda"
+            return torch.bfloat16 if cuda else None
+        case "bf16":
+            return torch.bfloat16
+        case "fp16":
+            return torch.float16
+        case "fp32" | None:
+            return None
+    raise ValueError(f"unknown dtype '{spec}' (auto, bf16, fp16, fp32)")
+
+
 def load_gpt_checkpoint(
     checkpoint: str,
     tokenizer_path: str,
     device: torch.device | str = "cpu",
     ckpt=None,
+    dtype: str | torch.dtype | None = None,
 ) -> tuple[GPT, Tokenizer]:
     """Load a GPT + tokenizer for inference from a Lightning checkpoint.
 
@@ -94,7 +117,12 @@ def load_gpt_checkpoint(
     and scripts/base_eval.py; requires a checkpoint produced by the current
     scripts/base_train.py or sft_train.py. Pass an already-loaded `ckpt` dict
     to avoid re-reading the file (e.g. scripts/api.py, which also pulls the
-    media encoders out of the same checkpoint)."""
+    media encoders out of the same checkpoint).
+
+    `dtype` (see resolve_dtype) casts the *parameters* only -- buffers such
+    as the RoPE tables stay fp32 for positional precision, and
+    engine.inference_autocast bridges the mix at decode time exactly like
+    bf16-mixed training did."""
     tokenizer = load_tokenizer(tokenizer_path)
 
     if ckpt is None:
@@ -115,4 +143,8 @@ def load_gpt_checkpoint(
     gpt.load_state_dict(state)
     gpt.eval()
     gpt.to(device)
+    cast = resolve_dtype(dtype, device)
+    if cast is not None:
+        for p in gpt.parameters():
+            p.data = p.data.to(cast)
     return gpt, tokenizer

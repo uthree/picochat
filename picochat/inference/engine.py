@@ -6,6 +6,7 @@ interactive commands. `generate()` is a lazy token iterator -- callers stream
 tokens as they arrive and can simply stop consuming it to abort generation.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -13,6 +14,19 @@ import torch
 from torch import Tensor
 
 from picochat.tokenizer import EOS_TOKEN, IM_END, Tokenizer as Encoding
+
+
+def inference_autocast(model: torch.nn.Module, device: torch.device | str):
+    """The autocast context inference should run under: bf16/fp16 autocast
+    when the model's weights are half-precision (see load_gpt_checkpoint's
+    `dtype`), else a no-op. Autocast -- rather than casting every buffer --
+    mirrors the bf16-mixed *training* regime: matmuls run in the low
+    precision while the norm/softmax-style ops autocast keeps in fp32 stay
+    fp32, and fp32 buffers (e.g. RoPE tables) mix in without dtype errors."""
+    p = next(model.parameters(), None)
+    if p is not None and p.dtype in (torch.bfloat16, torch.float16):
+        return torch.autocast(device_type=torch.device(device).type, dtype=p.dtype)
+    return nullcontext()
 
 
 @dataclass
@@ -226,27 +240,31 @@ def generate(
 
     stop_ids = chat_stop_ids(tokenizer)
 
+    ctx = inference_autocast(model, device)
     if prompt_embeds is not None:
-        logits, cache, pos = model.decode(inputs_embeds=prompt_embeds.to(device))
+        with ctx:
+            logits, cache, pos = model.decode(inputs_embeds=prompt_embeds.to(device))
     else:
         x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-        logits, cache, pos = model.decode(x)
+        with ctx:
+            logits, cache, pos = model.decode(x)
     # The anti-repetition penalties need the running context; only carry it
     # when they are on (GRPO and greedy eval paths keep zero overhead).
     history = None
     if cfg.penalized():
         history = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    next_token = sample(logits[:, -1], cfg, history)
+    next_token = sample(logits[:, -1].float(), cfg, history)
 
     for _ in range(budget):
         token_id = int(next_token.item())
         if token_id in stop_ids:
             return
         yield token_id
-        logits, cache, pos = model.decode(next_token, cache, pos)
+        with ctx:
+            logits, cache, pos = model.decode(next_token, cache, pos)
         if history is not None:
             history = torch.cat([history, next_token], dim=1)
-        next_token = sample(logits[:, -1], cfg, history)
+        next_token = sample(logits[:, -1].float(), cfg, history)
 
 
 def _snapshot_cache(cache: list | None) -> list | None:
@@ -301,8 +319,10 @@ def generate_speculative(
             return
     stop_ids = chat_stop_ids(tokenizer)
 
+    ctx = inference_autocast(model, device)
     x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    logits, mtp, cache, pos = model.decode_heads(x)
+    with ctx:
+        logits, mtp, cache, pos = model.decode_heads(x)
     cand = [int(logits[0, -1].argmax())] + [int(m[0, -1].argmax()) for m in mtp]
 
     emitted = 0
@@ -313,7 +333,8 @@ def generate_speculative(
                 return
         ct = torch.tensor([cand], dtype=torch.long, device=device)
         base, base_pos = _snapshot_cache(cache), pos
-        logits, mtp, cache, pos = model.decode_heads(ct, cache, pos)
+        with ctx:
+            logits, mtp, cache, pos = model.decode_heads(ct, cache, pos)
         # true[i] = the model's real next token after candidate i.
         true = [int(logits[0, i].argmax()) for i in range(len(cand))]
         # cand[0] is a verified token; accept drafts while each matches the real
@@ -341,12 +362,104 @@ def generate_speculative(
             commit = torch.tensor(
                 [cand[: accepted + 1]], dtype=torch.long, device=device
             )
-            logits, mtp, cache, pos = model.decode_heads(commit, cache, pos)
+            with ctx:
+                logits, mtp, cache, pos = model.decode_heads(commit, cache, pos)
         # draft afresh from the last committed position (index `accepted` in the
         # chunk that produced the current logits/mtp).
         cand = [int(logits[0, accepted].argmax())] + [
             int(mtp[j][0, accepted].argmax()) for j in range(k)
         ]
+
+
+class ChatSession:
+    """Incremental multi-turn decoding: keeps the model cache (GDN-2 recurrent
+    states + NSA KV) across turns and, when a new prompt extends the committed
+    conversation, prefills only the delta -- the previous reply's closing
+    tokens plus the new user turn -- instead of the whole history. On a long
+    conversation that turns per-reply prefill from O(conversation) into
+    O(new turn).
+
+    The invariant is `self._ids == the tokens decoded into self._cache`, in
+    order. Generation commits each emitted token as it is produced, so an
+    aborted stream leaves a consistent (shorter) committed prefix. A prompt
+    that does not extend the committed prefix -- history trimmed, /reset, an
+    edited turn -- resets the cache and prefills from scratch: the recurrent
+    GDN state cannot be rolled back to an arbitrary earlier position.
+
+    Multi-token-prediction speculative decoding is not routed here (its
+    rollback protocol conflicts with abort-at-any-yield commitment); plain
+    sampled chat -- the TUI/API default -- is unaffected.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        tokenizer: Encoding,
+        device: torch.device | str = "cpu",
+        max_seq_len: int | None = None,
+    ):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.max_seq_len = max_seq_len
+        self._ids: list[int] = []
+        self._cache = None
+        self._pos = 0
+
+    def reset(self) -> None:
+        self._ids, self._cache, self._pos = [], None, 0
+
+    @property
+    def cached_tokens(self) -> int:
+        return len(self._ids)
+
+    @torch.no_grad()
+    def generate(self, prompt_ids: list[int], cfg: SamplingConfig) -> Iterator[int]:
+        """Stream a reply to `prompt_ids` like engine.generate, reusing the
+        committed cache when the prompt extends it."""
+        budget = cfg.max_new_tokens
+        if self.max_seq_len is not None:
+            budget = min(budget, self.max_seq_len - len(prompt_ids))
+            if budget <= 0:
+                return
+
+        n = len(self._ids)
+        if not (0 < n <= len(prompt_ids) and prompt_ids[:n] == self._ids):
+            self.reset()
+        suffix = prompt_ids[len(self._ids) :]
+        if not suffix:
+            # Identical prompt (regenerate): the last logits are gone and the
+            # recurrent state cannot rewind one token, so start over.
+            self.reset()
+            suffix = prompt_ids
+
+        ctx = inference_autocast(self.model, self.device)
+        stop_ids = chat_stop_ids(self.tokenizer)
+        x = torch.tensor([suffix], dtype=torch.long, device=self.device)
+        with ctx:
+            logits, self._cache, self._pos = self.model.decode(
+                x, self._cache, self._pos
+            )
+        self._ids.extend(suffix)
+
+        history = None
+        if cfg.penalized():
+            history = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+        next_token = sample(logits[:, -1].float(), cfg, history)
+
+        for _ in range(budget):
+            token_id = int(next_token.item())
+            if token_id in stop_ids:
+                return
+            yield token_id
+            with ctx:
+                logits, self._cache, self._pos = self.model.decode(
+                    next_token, self._cache, self._pos
+                )
+            self._ids.append(token_id)
+            if history is not None:
+                history = torch.cat([history, next_token], dim=1)
+            next_token = sample(logits[:, -1].float(), cfg, history)
 
 
 def resolve_device(spec: str | None) -> torch.device:

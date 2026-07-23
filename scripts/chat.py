@@ -41,9 +41,9 @@ from textual.worker import get_current_worker
 
 from picochat.tokenizer import render_chat_prompt
 from picochat.inference.engine import (
+    ChatSession,
     SamplingConfig,
     add_sampling_args,
-    generate,
     resolve_device,
     sampling_from_args,
 )
@@ -114,6 +114,10 @@ class ChatApp(App):
         self.messages: list[dict] = []  # user/assistant turns only
         self.banner = banner
         self.max_seq_len = max_seq_len
+        # Incremental decoding across turns: each reply prefills only the new
+        # tokens since the last one (the session detects /reset, trimmed
+        # history etc. by itself and starts over when the prompt diverges).
+        self.session = ChatSession(model, tokenizer, device, max_seq_len)
         self._theme_name = theme
         self._generating = False
 
@@ -274,14 +278,7 @@ class ChatApp(App):
         # Streamed display decodes per token (a multi-byte character split
         # across tokens shows replacement chars until complete)...
         shown = ""
-        for token_id in generate(
-            self.model,
-            self.tokenizer,
-            prompt_ids,
-            self.sampling,
-            self.device,
-            max_seq_len=self.max_seq_len,
-        ):
+        for token_id in self.session.generate(prompt_ids, self.sampling):
             if worker.is_cancelled:
                 break
             reply_ids.append(token_id)
@@ -313,6 +310,13 @@ def main():
     add_sampling_args(p)
     p.add_argument("--device", type=str, default=None)
     p.add_argument(
+        "--dtype",
+        type=str,
+        default="auto",
+        choices=("auto", "bf16", "fp16", "fp32"),
+        help="inference weight dtype; auto = bf16 on CUDA, fp32 elsewhere",
+    )
+    p.add_argument(
         "--theme",
         type=str,
         default=DEFAULT_THEME,
@@ -330,7 +334,9 @@ def main():
 
     device = resolve_device(args.device)
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
-    gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device)
+    gpt, tokenizer = load_gpt_checkpoint(
+        args.checkpoint, args.tokenizer, device, dtype=args.dtype
+    )
 
     sampling = sampling_from_args(args)
     logo = Path("assets/logo_ascii.txt")
