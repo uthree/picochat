@@ -54,7 +54,16 @@ from picochat.tokenizer import Tokenizer as Encoding, render_chat_prompt
 
 class ChatMessage(BaseModel):
     role: str
-    content: str | list[dict]
+    content: str | list[dict] | None = None
+    # OpenAI tool-result turns carry the tool's output plus the id of the call
+    # they answer; both are accepted and mapped onto a picochat `tool` ChatML
+    # turn (the id is echoed back but not needed by the model).
+    tool_call_id: str | None = None
+    name: str | None = None
+    # An assistant turn a client echoes back after a tool round: its structured
+    # calls (content is usually null there). _to_chatml flattens them back to
+    # the on-the-wire call string so a multi-turn tool conversation replays.
+    tool_calls: list[dict] | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -72,6 +81,12 @@ class ChatCompletionRequest(BaseModel):
     repetition_penalty: float | None = (
         None  # extension beyond the OpenAI spec (vLLM/Ollama also accept it)
     )
+    # OpenAI function-calling: `tools` are JSON-schema function specs declared
+    # to the model (rendered into the system prompt); the reply's tool calls
+    # come back as `tool_calls` on the assistant message (see the tools branch
+    # in chat_completions). tool_choice is accepted for compatibility.
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
 
 
 def _resolve_sampling(
@@ -205,6 +220,85 @@ def _token_stream(
         max_seq_len=max_seq_len,
         prompt_embeds=prompt_embeds,
     )
+
+
+def _to_chatml(messages) -> list[dict]:
+    """OpenAI request messages -> picochat ChatML turns. `tool` role turns
+    (function results) map straight through -- render_turn handles the role;
+    an assistant turn that itself made tool calls is flattened back to the
+    on-the-wire call string so a multi-turn tool conversation round-trips."""
+    from picochat.model.tools import render_tool_call
+
+    out = []
+    for m in messages:
+        msg = m.model_dump() if hasattr(m, "model_dump") else dict(m)
+        role, content = msg.get("role"), msg.get("content")
+        if role == "assistant" and msg.get("tool_calls"):
+            # Reconstruct the assistant's call tokens from the structured
+            # tool_calls the client echoes back (OpenAI sends content=None).
+            calls = "".join(
+                render_tool_call(
+                    tc["function"]["name"],
+                    _loads_args(tc["function"].get("arguments", "{}")),
+                )
+                for tc in msg["tool_calls"]
+            )
+            out.append({"role": "assistant", "content": (content or "") + calls})
+        else:
+            out.append(
+                {"role": role, "content": content if content is not None else ""}
+            )
+    return out
+
+
+def _loads_args(arguments) -> dict:
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        return json.loads(arguments)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _inject_tools(messages: list[dict], tools: list[dict]) -> list[dict]:
+    """Return `messages` with the tool declarations rendered into the system
+    turn (folding into a leading system message, or prepending one)."""
+    from picochat.model.tools import render_tool_system
+
+    if messages and messages[0]["role"] == "system":
+        system = render_tool_system(tools, messages[0]["content"])
+        return [{"role": "system", "content": system}, *messages[1:]]
+    return [{"role": "system", "content": render_tool_system(tools)}, *messages]
+
+
+def _assistant_message(
+    text: str, tools_enabled: bool, stopped: bool
+) -> tuple[dict, str]:
+    """Build the response `message` and finish_reason. With tools enabled and
+    tool calls present in the reply, return them as OpenAI `tool_calls` (and
+    finish_reason "tool_calls"); otherwise a plain content message."""
+    if tools_enabled:
+        from picochat.model.tools import parse_tool_calls, strip_tool_calls
+
+        calls = parse_tool_calls(text)
+        if calls:
+            message = {
+                "role": "assistant",
+                "content": strip_tool_calls(text) or None,
+                "tool_calls": [
+                    {
+                        "id": f"call_{uuid.uuid4().hex[:24]}",
+                        "type": "function",
+                        "function": {
+                            "name": c["name"],
+                            "arguments": json.dumps(c["arguments"], ensure_ascii=False),
+                        },
+                    }
+                    for c in calls
+                ],
+            }
+            return message, "tool_calls"
+    return {"role": "assistant", "content": text}, "stop" if stopped else "length"
 
 
 def _run_generation(
@@ -379,7 +473,11 @@ def create_app(
     async def chat_completions(req: ChatCompletionRequest):
         if not req.messages:
             raise _error("messages must not be empty", "empty_messages", 400)
-        messages = [m.model_dump() for m in req.messages]
+        messages = _to_chatml(req.messages)
+        if req.tools:
+            # Declare the tools in the system turn (Hermes/Qwen style): fold
+            # them into an existing leading system message or prepend one.
+            messages = _inject_tools(messages, req.tools)
         prompt_ids, prompt_embeds = _prepare_prompt(messages)
         sampling = _resolve_sampling(req, default_sampling)
         if _completion_budget(len(prompt_ids), sampling, max_seq_len) <= 0:
@@ -393,7 +491,10 @@ def create_app(
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
 
-        if req.stream:
+        # Tool calls must be parsed from the whole reply into structured
+        # `tool_calls`, which the token-delta stream can't express -- serve
+        # them non-streamed even if stream was requested.
+        if req.stream and not req.tools:
             return StreamingResponse(
                 _stream_chat_completion(
                     model,
@@ -424,6 +525,8 @@ def create_app(
                 max_seq_len,
                 prompt_embeds,
             )
+        text = tokenizer.decode(token_ids)
+        message, finish_reason = _assistant_message(text, bool(req.tools), stopped)
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -432,11 +535,8 @@ def create_app(
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": tokenizer.decode(token_ids),
-                    },
-                    "finish_reason": "stop" if stopped else "length",
+                    "message": message,
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {

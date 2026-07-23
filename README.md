@@ -262,6 +262,11 @@ ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
   matrices, AdamW for embeddings/heads
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
   chat format
+- Tool calling (Hermes / Qwen2.5-style function calling): tools declared to
+  the model as JSON schema in the system prompt, calls emitted between
+  `<|tool_call|>`/`<|/tool_call|>` special tokens and parsed back to OpenAI
+  `tool_calls`; the API server accepts `tools` and `tool` result turns (see
+  picochat/model/tools.py)
 - Multimodal input (optional, via SFT): audio and image soft tokens spliced
   at placeholder positions (LLaVA / Qwen2-Audio / Qwen2-VL style), produced
   by a pretrained [Whisper](https://arxiv.org/abs/2212.04356) encoder

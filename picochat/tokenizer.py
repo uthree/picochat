@@ -70,7 +70,18 @@ VISION_START_TOKEN = "<|vision_start|>"
 IMAGE_TOKEN = "<|image_pad|>"
 VISION_END_TOKEN = "<|vision_end|>"
 
-NUM_RESERVED_SPECIAL_TOKENS = 16
+# Tool calling (Hermes / Qwen2.5-style function calling): the assistant emits
+# a call wrapped in TOOL_CALL_START/END carrying a JSON {"name", "arguments"}
+# object, the caller executes the tool and feeds the result back as a `tool`
+# ChatML turn (rendered by the ordinary render_turn path). Available tools are
+# declared to the model as JSON schema in the system prompt (see
+# render_tool_system). These are single tokens (peeled from the reserved pool
+# below, so the vocab size is unchanged) so the call boundary is unambiguous
+# and TOOL_CALL_END can serve as a generation stop signal.
+TOOL_CALL_START = "<|tool_call|>"
+TOOL_CALL_END = "<|/tool_call|>"
+
+NUM_RESERVED_SPECIAL_TOKENS = 14
 SPECIAL_TOKENS = [
     PAD_TOKEN,
     BOS_TOKEN,
@@ -89,6 +100,8 @@ SPECIAL_TOKENS = [
     VISION_START_TOKEN,
     IMAGE_TOKEN,
     VISION_END_TOKEN,
+    TOOL_CALL_START,
+    TOOL_CALL_END,
 ] + [f"<|reserved_token_{n}|>" for n in range(NUM_RESERVED_SPECIAL_TOKENS)]
 
 
