@@ -19,6 +19,7 @@ for SFT checkpoints.
 import argparse
 from pathlib import Path
 
+import torch
 import uvicorn
 
 from picochat.inference.api import create_app
@@ -28,6 +29,7 @@ from picochat.inference.engine import (
     sampling_from_args,
 )
 from picochat.training import load_gpt_checkpoint
+from picochat.training.checkpoint import load_mm_encoders
 
 
 def main():
@@ -48,7 +50,25 @@ def main():
 
     device = resolve_device(args.device)
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
-    gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device)
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device, ckpt)
+    # A multimodal SFT checkpoint also carries its media encoders; with them
+    # attached, requests may send OpenAI input_audio / image_url (data URI)
+    # content parts. Text-only checkpoints serve exactly as before.
+    model_config = gpt.hparams["model_config"] or {}
+    # d_model read off the built model (model_config is the build_lm recipe --
+    # a preset name plus overrides -- so it need not spell out d_model).
+    audio_encoder, vision_encoder = load_mm_encoders(
+        ckpt, gpt.model.embed.embedding_dim
+    )
+    for enc in (audio_encoder, vision_encoder):
+        if enc is not None:
+            enc.to(device)
+    if audio_encoder or vision_encoder:
+        mods = [
+            m for m, e in (("audio", audio_encoder), ("vision", vision_encoder)) if e
+        ]
+        print(f"multimodal encoders attached: {', '.join(mods)}", flush=True)
 
     default_sampling = sampling_from_args(args)
 
@@ -56,9 +76,11 @@ def main():
         gpt.model,
         tokenizer,
         device=device,
-        max_seq_len=(gpt.hparams["model_config"] or {}).get("max_seq_len", 4096),
+        max_seq_len=model_config.get("max_seq_len", 4096),
         model_id=args.model_id or Path(args.checkpoint).parent.name,
         default_sampling=default_sampling,
+        audio_encoder=audio_encoder,
+        vision_encoder=vision_encoder,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 

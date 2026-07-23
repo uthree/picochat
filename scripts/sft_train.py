@@ -25,6 +25,11 @@ from picochat.config import (
     scale_for_devices,
 )
 from picochat.data.dataloader import PretrainDataModule, SFTTensorDataset
+from picochat.data.multimodal import (
+    MultimodalDataModule,
+    MultimodalSFTDataset,
+)
+from picochat.model.multimodal import MediaAdapters, build_encoders
 from picochat.training import SFTModule, load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
@@ -110,29 +115,6 @@ def main():
     vocab_size = tokenizer.n_vocab
     pad_idx = tokenizer.encode_single_token(PAD_TOKEN)
 
-    # --- data ---
-    batch_size = trainer_cfg.get("batch_size", 2)
-    num_workers = trainer_cfg.get("num_workers", 4)
-    data_dir = data_cfg.get("data_dir", "data")
-    train_paths, train_weights = resolve_paths(data_cfg["datasets"], data_dir)
-    train_ds, train_group_weights = make_dataset(
-        train_paths, weights=train_weights if len(train_paths) > 1 else None
-    )
-    val_ds = None
-    monitor = None
-    if data_cfg.get("val_path"):
-        val_ds, _ = make_dataset([str(Path(data_dir) / data_cfg["val_path"])])
-        monitor = "val_loss"
-
-    datamodule = PretrainDataModule(
-        train_ds,
-        val_ds,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        train_group_weights=train_group_weights,
-        seed=cfg.get("seed", 42),
-    )
-
     # --- model: rebuilt from the pretrained checkpoint's own architecture,
     # optionally overriding max_seq_len to extend context ---
     model_overrides = {k: model_cfg[k] for k in MODEL_OVERRIDES if k in model_cfg}
@@ -140,6 +122,61 @@ def main():
         init_from, vocab_size, overrides=model_overrides
     )
     print(f"fine-tuning from {init_from} (model_config: {model_config})", flush=True)
+
+    # --- multimodal (optional): a `multimodal:` section attaches media
+    # encoders (Whisper audio / SigLIP2 vision, or from-scratch) and switches
+    # the data pipeline to part-structured JSONL conversations (see
+    # picochat.data.multimodal); without it this is the plain text-SFT stage.
+    mm_cfg = cfg.get("multimodal")
+    audio_encoder = vision_encoder = mm_config = None
+    if mm_cfg:
+        # d_model read off the built model (model_config is the build_lm
+        # recipe -- a preset name plus overrides, no explicit d_model).
+        audio_encoder, vision_encoder, mm_config = build_encoders(
+            mm_cfg, lm.embed.embedding_dim
+        )
+
+    # --- data ---
+    batch_size = trainer_cfg.get("batch_size", 2)
+    num_workers = trainer_cfg.get("num_workers", 4)
+    val_ds = None
+    monitor = None
+    if mm_cfg:
+        media = MediaAdapters.from_encoders(audio_encoder, vision_encoder)
+        max_length = mm_cfg.get("max_length", model_cfg.get("max_seq_len", 4096))
+        train_ds = MultimodalSFTDataset(
+            mm_cfg["data"], tokenizer, media, max_length, pad_idx
+        )
+        if mm_cfg.get("val_data"):
+            val_ds = MultimodalSFTDataset(
+                mm_cfg["val_data"], tokenizer, media, max_length, pad_idx
+            )
+            monitor = "val_loss"
+        datamodule = MultimodalDataModule(
+            train_ds,
+            val_ds,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            seed=cfg.get("seed", 42),
+        )
+    else:
+        data_dir = data_cfg.get("data_dir", "data")
+        train_paths, train_weights = resolve_paths(data_cfg["datasets"], data_dir)
+        train_ds, train_group_weights = make_dataset(
+            train_paths, weights=train_weights if len(train_paths) > 1 else None
+        )
+        if data_cfg.get("val_path"):
+            val_ds, _ = make_dataset([str(Path(data_dir) / data_cfg["val_path"])])
+            monitor = "val_loss"
+
+        datamodule = PretrainDataModule(
+            train_ds,
+            val_ds,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            train_group_weights=train_group_weights,
+            seed=cfg.get("seed", 42),
+        )
 
     # Same per-device-config / linear-scaling convention as base_train.py.
     world_size = resolve_num_devices(args.devices, args.accelerator) * args.num_nodes
@@ -177,6 +214,12 @@ def main():
         model_config=model_config,
         # Auxiliary multi-token-prediction loss weight (n_mtp > 0 models only).
         mtp_weight=optim_cfg.get("mtp_weight", 0.3),
+        audio_encoder=audio_encoder,
+        vision_encoder=vision_encoder,
+        # Stage-1 default: pretrained towers frozen, projectors (+ LM) train;
+        # flip for a later full finetune.
+        train_towers=bool(mm_cfg.get("train_towers", False)) if mm_cfg else False,
+        mm_config=mm_config,
     )
 
     # --- resume: continue this exact SFT stage (weights + optimizer + step)

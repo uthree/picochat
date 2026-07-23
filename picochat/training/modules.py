@@ -23,6 +23,7 @@ from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel
 
 from picochat.model.blocks import doc_ids_to_cu_seqlens
+from picochat.model.multimodal import splice_media_embeds
 from picochat.model.transformer import TransformerLM
 from picochat.tokenizer import Tokenizer
 from picochat.training.kernels import (
@@ -152,11 +153,36 @@ class LMTrainerMixin:
             return model.no_sync()
         return nullcontext()
 
+    def _encoder_param_groups(self) -> list[dict]:
+        """Trainable parameters of any attached media encoders (multimodal
+        SFT), as AdamW decay/no-decay groups. Pretrained towers and their
+        projectors stay on AdamW regardless of the optimizer mode -- Muon's
+        hidden-matrix treatment is tuned for the transformer trunk, and the
+        de-facto recipe finetunes encoders with AdamW."""
+        decay, no_decay = [], []
+        for name in ("audio_encoder", "vision_encoder"):
+            module = getattr(self, name, None)
+            if module is None:
+                continue
+            for p in module.parameters():
+                if not p.requires_grad:
+                    continue
+                (decay if p.ndim >= 2 else no_decay).append(p)
+        groups = []
+        if decay:
+            groups.append({"params": decay, "weight_decay": self.weight_decay})
+        if no_decay:
+            groups.append({"params": no_decay, "weight_decay": 0.0})
+        return groups
+
     def _param_groups(self) -> list[dict]:
-        return param_groups(self.model, self.weight_decay)
+        return (
+            param_groups(self.model, self.weight_decay) + self._encoder_param_groups()
+        )
 
     def _muon_param_split(self) -> tuple[list, list[dict]]:
-        return muon_param_split(self.model, self.weight_decay)
+        muon, adam_groups = muon_param_split(self.model, self.weight_decay)
+        return muon, adam_groups + self._encoder_param_groups()
 
     def configure_optimizers(self):
         if self.optimizer_name == "muon":
@@ -249,7 +275,12 @@ class LMTrainerMixin:
         return F.cross_entropy(hidden @ weight.T, target_ids, ignore_index=self.pad_idx)
 
     def _next_token_loss(
-        self, input_ids: Tensor, targets: Tensor, doc_ids, cu_seqlens
+        self,
+        input_ids: Tensor,
+        targets: Tensor,
+        doc_ids,
+        cu_seqlens,
+        inputs_embeds: Tensor | None = None,
     ) -> Tensor:
         """Next-token cross-entropy: position i's prediction is scored against
         targets[i+1] (`targets` is input-aligned, not pre-shifted; it is
@@ -269,15 +300,22 @@ class LMTrainerMixin:
         trunk up to the final hidden states and the head matmuls happen here (see
         _head_ce); otherwise it is the full model and this is a plain loss over
         its primary logits.
+
+        `inputs_embeds` (multimodal SFT) bypasses the token embedding with
+        pre-spliced embeddings -- media soft tokens scattered over their
+        placeholder positions (see picochat.model.multimodal); `input_ids`
+        still provides the target/mask side.
         """
         if not self._trunk_hidden:
-            logits = self._forward(input_ids, doc_ids, cu_seqlens)[:, :-1]
+            logits = self._forward(input_ids, doc_ids, cu_seqlens, inputs_embeds)[
+                :, :-1
+            ]
             return F.cross_entropy(
                 rearrange(logits, "b l v -> (b l) v"),
                 rearrange(targets[:, 1:], "b l -> (b l)"),
                 ignore_index=self.pad_idx,
             )
-        hidden = self._forward(input_ids, doc_ids, cu_seqlens)
+        hidden = self._forward(input_ids, doc_ids, cu_seqlens, inputs_embeds)
         # Primary head: offset +1. hidden[:, :-1] predicts targets[:, 1:].
         loss = self._head_ce(hidden[:, :-1], self.model.lmhead.weight, targets[:, 1:])
         if self.model.n_mtp == 0:
@@ -481,11 +519,32 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         tokenizer=None,
         model_config: dict | None = None,
         mtp_weight: float = 0.3,
+        audio_encoder=None,
+        vision_encoder=None,
+        train_towers: bool = False,
+        mm_config: dict | None = None,
     ):
         super().__init__()
-        self.save_hyperparameters("model_config")
+        # `mm_config` mirrors model_config for the media encoders: the plain
+        # dict recipe (encoder dataclass fields + adapter knobs) that rebuilds
+        # the exact encoder architectures at inference from the checkpoint's
+        # own hyper_parameters (see training.checkpoint.load_mm_encoders).
+        self.save_hyperparameters("model_config", "mm_config")
         self.model = transformer_lm
         self.pad_idx = pad_idx
+        # Media encoders for multimodal SFT, registered as submodules so their
+        # weights ride along in the checkpoint and their trainable parameters
+        # join the optimizer (see LMTrainerMixin._encoder_param_groups). The
+        # de-facto recipe keeps the pretrained towers frozen and trains only
+        # the fresh projectors (+ the LM); train_towers=True unfreezes them
+        # for a later full-finetune stage.
+        self.audio_encoder = audio_encoder
+        self.vision_encoder = vision_encoder
+        if not train_towers:
+            for enc in (audio_encoder, vision_encoder):
+                if enc is not None:
+                    for p in enc.tower_parameters():
+                        p.requires_grad_(False)
         # Weight on the auxiliary multi-token-prediction loss (see
         # LMTrainerMixin._next_token_loss); ignored without MTP heads.
         self.mtp_weight = mtp_weight
@@ -511,7 +570,12 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         self._setup_compiled_forward(compile)
 
     def _loss(
-        self, input_ids: Tensor, labels: Tensor, doc_ids: Tensor | None = None
+        self,
+        input_ids: Tensor,
+        labels: Tensor,
+        doc_ids: Tensor | None = None,
+        mels: list | None = None,
+        images: list | None = None,
     ) -> Tensor:
         # Next-token prediction: position i's logits predict token i+1, so
         # compare against labels shifted left by one -- labels is already
@@ -523,15 +587,44 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         cu_seqlens = None
         if doc_ids is not None:
             cu_seqlens = doc_ids_to_cu_seqlens(doc_ids)
-        return self._next_token_loss(input_ids, labels, doc_ids, cu_seqlens)
+        inputs_embeds = None
+        if mels or images:
+            # Multimodal batch (see picochat.data.multimodal): run the media
+            # encoders and scatter their soft tokens over the placeholder
+            # positions, then train through inputs_embeds -- gradients flow
+            # back into the projectors (and the towers when train_towers).
+            inputs_embeds = splice_media_embeds(
+                self.model.embed(input_ids),
+                input_ids,
+                self.tokenizer,
+                audio_encoder=self.audio_encoder,
+                mels=mels,
+                vision_encoder=self.vision_encoder,
+                images=images,
+            )
+        return self._next_token_loss(
+            input_ids, labels, doc_ids, cu_seqlens, inputs_embeds
+        )
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
-        loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))
+        loss = self._loss(
+            batch["input_ids"],
+            batch["labels"],
+            batch.get("doc_ids"),
+            batch.get("mels"),
+            batch.get("images"),
+        )
         self._backward_and_step(loss, batch_idx)
         return loss
 
     def validation_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
-        loss = self._loss(batch["input_ids"], batch["labels"], batch.get("doc_ids"))
+        loss = self._loss(
+            batch["input_ids"],
+            batch["labels"],
+            batch.get("doc_ids"),
+            batch.get("mels"),
+            batch.get("images"),
+        )
         # sync_dist: see GPT.validation_step -- the checkpoint monitor should
         # rank on the all-rank mean, not rank 0's shard.
         self.log("val_loss", loss, prog_bar=True, sync_dist=True)

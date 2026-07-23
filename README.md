@@ -84,6 +84,26 @@ uv run scripts/sft_setup.py --config configs/sft_setup/setup.yml
 uv run scripts/sft_train.py --config configs/sft_train/stage1.yml
 ```
 
+### 5b. Multimodal SFT (audio & image input, optional)
+Attach pretrained media encoders and fine-tune on part-structured
+conversations (JSONL with `{"type": "audio"|"image", "path": ...}` parts --
+see `configs/sft_train/multimodal.yml` for the format and the two-stage
+frozen-tower recipe):
+```bash
+uv run scripts/sft_train.py --config configs/sft_train/multimodal.yml
+```
+The encoders follow the current de-facto standard and are both Apache-2.0:
+[Whisper](https://huggingface.co/openai/whisper-small)'s encoder for audio
+(Qwen2-Audio-style: pooled to ~10 soft tokens/sec, MLP-projected into the
+token stream) and [SigLIP2](https://huggingface.co/google/siglip2-base-patch16-256)'s
+vision tower for images (LLaVA-style: 2x2 pixel-shuffled to 64 soft tokens,
+MLP-projected). Both are implemented in-repo (no `transformers` dependency;
+weights load from the Hub via `safetensors`, numerically verified against the
+reference implementations) and ride along inside the SFT checkpoint, so
+inference needs no Hub access. The resulting checkpoint serves multimodal
+requests through the API server (OpenAI `input_audio` / `image_url` data-URI
+content parts, see step 7).
+
 ### 6. Chat
 An interactive chat TUI (built on [textual](https://textual.textualize.io/)):
 streaming replies, multi-turn history, Tab-completed slash commands --
@@ -106,7 +126,7 @@ tools that speak the OpenAI Chat Completions format (e.g. OpenCode's
 ```bash
 uv run scripts/api.py --checkpoint weights/sft-stage1/last.ckpt --port 8000
 ```
-Requests are served one at a time (see `picochat/api.py`); `--temperature`/
+Requests are served one at a time (see `picochat/inference/api.py`); `--temperature`/
 `--top-k`/`--top-p`/`--max-new-tokens` set the defaults, and a request may
 override any of them.
 
@@ -148,9 +168,9 @@ pipeline step:
 
 | Package / module | Responsibility |
 |---|---|
-| `picochat/model/` | the model. `blocks.py` (RMSNorm, SwiGLU, depth-attention residuals), `moe.py` (MoE + shareable ExpertBank), `linear_attn.py` (Gated DeltaNet-2), `sparse_attn.py` (Native Sparse Attention), `transformer.py` (`TransformerLayer` up through `TransformerLM`), `presets.py` (the scale ladder + `build_lm`), `estimate.py` (`estimate_num_params`), `grow.py` (width/depth/MoE-upcycle growth), `audio.py` (soft-token audio input) |
+| `picochat/model/` | the model. `blocks.py` (RMSNorm, SwiGLU, depth-attention residuals), `moe.py` (MoE + shareable ExpertBank), `linear_attn.py` (Gated DeltaNet-2), `sparse_attn.py` (Native Sparse Attention), `transformer.py` (`TransformerLayer` up through `TransformerLM`), `presets.py` (the scale ladder + `build_lm`), `estimate.py` (`estimate_num_params`), `grow.py` (width/depth/MoE-upcycle growth), `audio.py` (log-mel front end + audio encoders: pretrained Whisper or from-scratch), `vision.py` (SigLIP2 vision tower), `multimodal.py` (part-structured ChatML rendering + soft-token splicing) |
 | `picochat/training/` | training. `modules.py` (the LightningModules: `GPT` for pretraining, `SFTModule` for SFT, and the shared `LMTrainerMixin`), `optim.py` (Muon/AdamW param split + LR schedule), `checkpoint.py` (loading checkpoints back into models), `kernels.py` (optional [HF `kernels`](https://github.com/huggingface/kernels) fused-loss integration, see below) |
-| `picochat/data/` | data. `sources.py` (HF Hub streaming sources for pretraining text and SFT conversations), `dataloader.py` (sequence packing, the sharded on-disk token format, Datasets/samplers/DataModule) |
+| `picochat/data/` | data. `sources.py` (HF Hub streaming sources for pretraining text and SFT conversations), `dataloader.py` (sequence packing, the sharded on-disk token format, Datasets/samplers/DataModule), `multimodal.py` (part-structured JSONL SFT conversations with audio/image files) |
 | `picochat/rl/` | RL post-training. `grpo.py` (rollouts, group advantages, the clipped-surrogate + KL loss), `reward.py` (verifiable rewards: test runner, LLM judge, multi-turn code-fixing env), `sandbox.py` (bubblewrap / hardened-subprocess isolation for the untrusted code rewards execute) |
 | `picochat/evals/` | evaluation. `tasks.py` (likelihood-based multiple-choice benchmarks: hellaswag, arc, ...) |
 | `picochat/inference/` | inference. `engine.py` (sampling, KV-cached streaming generation, speculative decoding, device/sampling CLI helpers), `api.py` (OpenAI-compatible Chat Completions endpoints) |
@@ -240,6 +260,12 @@ ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
   matrices, AdamW for embeddings/heads
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
   chat format
+- Multimodal input (optional, via SFT): audio and image soft tokens spliced
+  at placeholder positions (LLaVA / Qwen2-Audio / Qwen2-VL style), produced
+  by a pretrained [Whisper](https://arxiv.org/abs/2212.04356) encoder
+  (pooled + MLP-projected) and a
+  [SigLIP2](https://arxiv.org/abs/2502.14786) vision tower (pixel-shuffled +
+  MLP-projected), both Apache-2.0 and implemented in-repo
 
 Presets (`configs/presets.yml`), named by nominal parameter count: `200m`
 ≈0.22B, `1b` ≈1.1B and `8b` ≈8.7B (dense; the GDN-2 channel-wise gates add a

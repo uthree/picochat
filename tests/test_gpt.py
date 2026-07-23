@@ -189,10 +189,10 @@ def test_gpt_without_bos_idx_passes_no_packing():
     gpt_module = GPT(lm, pad_idx=0, fused_loss=False)
     seen = {}
 
-    def spy(x, doc_ids=None, cu_seqlens=None):
+    def spy(x, doc_ids=None, cu_seqlens=None, inputs_embeds=None):
         seen["doc_ids"] = doc_ids
         seen["cu_seqlens"] = cu_seqlens
-        return gpt_module.model(x, doc_ids, cu_seqlens)
+        return gpt_module.model(x, doc_ids, cu_seqlens, inputs_embeds)
 
     # object.__setattr__ mirrors how __init__ stores _forward (kept out of
     # nn.Module's submodule registry, see GPT.__init__)

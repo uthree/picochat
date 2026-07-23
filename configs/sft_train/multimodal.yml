@@ -1,0 +1,43 @@
+# Multimodal SFT: attach pretrained media encoders (both Apache-2.0) to a
+# text checkpoint and fine-tune on part-structured conversations.
+#
+# The de-facto two-stage recipe:
+#   stage A (this config): towers frozen, the fresh projectors align the
+#     media soft tokens with the language model (train_towers: false).
+#   stage B (optional): re-run with train_towers: true and a lower lr to
+#     finetune the towers end-to-end.
+#
+# Data format (multimodal.data): JSONL, one {"messages": [...]} per line;
+# message content is either a string or a list of parts --
+#   {"type": "text",  "text": "..."}
+#   {"type": "audio", "path": "clips/x.wav"}   # mono is derived; resampled to 16 kHz
+#   {"type": "image", "path": "imgs/x.png"}
+# with media paths relative to the JSONL's directory. See
+# picochat/data/multimodal.py. Conversations are NOT packed (one per row).
+
+init_from: weights/sft-stage1/last.ckpt # continue from the text SFT stage
+tokenizer: weights/tokenizer.json
+output_dir: weights/sft-mm
+
+multimodal:
+  data: data/mm/train.jsonl
+  val_data: data/mm/val.jsonl # optional
+  max_length: 4096 # per-conversation token budget (media spans included)
+  train_towers: false # stage A: only projectors (+ the LM) train
+  audio:
+    pretrained: openai/whisper-small # Apache-2.0; null -> tiny from-scratch encoder
+    ms_per_token: 100 # ~10 soft tokens per second of audio
+  vision:
+    pretrained: google/siglip2-base-patch16-256 # Apache-2.0; 64 tokens per image
+
+optim:
+  lr: 1.0e-5
+  muon_lr: 0.005
+  max_steps: 2000
+  warmup_steps: 100
+
+trainer:
+  batch_size: 2
+  accumulate: 8
+  precision: bf16-mixed
+  val_check_interval: 200

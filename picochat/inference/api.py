@@ -8,6 +8,16 @@ Request `messages` are plain ChatML turns: picochat.tokenizer.render_chat_prompt
 already expects exactly this {"role", "content"} shape, so no translation
 layer is needed beyond Pydantic's request parsing.
 
+Multimodal requests use the OpenAI content-part shapes: a message `content`
+may be a list of parts -- {"type": "text", ...}, {"type": "input_audio",
+"input_audio": {"data": <base64 wav>, "format": "wav"}} and {"type":
+"image_url", "image_url": {"url": "data:image/png;base64,..."}} (data URIs
+only; the server does not fetch remote URLs). They require a checkpoint whose
+SFT stage attached the matching encoder (see
+picochat.training.checkpoint.load_mm_encoders); the media soft tokens are
+spliced into the prompt embeddings and generation runs over
+engine.generate's prompt_embeds prefill.
+
 Generation runs one request at a time (see create_app's generation_lock):
 TransformerLM.decode() is a plain function over an explicit KV cache with no
 shared mutable state, so concurrent calls would be memory-safe, but
@@ -17,7 +27,9 @@ work.
 """
 
 import asyncio
+import base64
 import codecs
+import io
 import json
 import queue
 import threading
@@ -29,13 +41,20 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from torch import Tensor
+
 from picochat.inference.engine import SamplingConfig, generate
+from picochat.model.multimodal import (
+    MediaAdapters,
+    render_mm_prompt,
+    splice_media_embeds,
+)
 from picochat.tokenizer import Tokenizer as Encoding, render_chat_prompt
 
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str | list[dict]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -86,15 +105,88 @@ def _error(message: str, code: str, status: int) -> HTTPException:
     )
 
 
+def _decode_audio_part(part: dict, sample_rate: int) -> Tensor:
+    """OpenAI input_audio part -> mono waveform at `sample_rate` (1-D).
+    soundfile decodes (it sniffs the container, so the part's `format` field
+    is advisory); torchaudio's pure-torch resampler converts the rate."""
+    import soundfile
+    import torchaudio
+
+    payload = part.get("input_audio") or {}
+    try:
+        raw = base64.b64decode(payload.get("data", ""), validate=True)
+        data, sr = soundfile.read(io.BytesIO(raw), dtype="float32")
+    except Exception:
+        raise _error(
+            "could not decode input_audio data", "invalid_audio", 400
+        ) from None
+    wav = torch.from_numpy(data)
+    if wav.ndim == 2:
+        wav = wav.mean(1)
+    if sr != sample_rate:
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+    return wav
+
+
+def _decode_image_part(part: dict):
+    """OpenAI image_url part (data URI only) -> PIL image. Remote http(s)
+    URLs are rejected: the server must not be turned into a URL fetcher."""
+    from PIL import Image
+
+    url = (part.get("image_url") or {}).get("url", "")
+    if not url.startswith("data:"):
+        raise _error(
+            "image_url must be a data: URI (remote URLs are not fetched)",
+            "invalid_image",
+            400,
+        )
+    try:
+        b64 = url.split(",", 1)[1]
+        return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    except Exception:
+        raise _error(
+            "could not decode image_url data URI", "invalid_image", 400
+        ) from None
+
+
+def _to_internal_parts(content, sample_rate: int):
+    """An OpenAI message content (str or part list) -> picochat parts (see
+    picochat.model.multimodal), decoding the base64 media payloads."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for part in content:
+        kind = part.get("type")
+        if kind == "text":
+            parts.append({"type": "text", "text": part.get("text", "")})
+        elif kind == "input_audio":
+            parts.append(
+                {"type": "audio", "audio": _decode_audio_part(part, sample_rate)}
+            )
+        elif kind == "image_url":
+            parts.append({"type": "image", "image": _decode_image_part(part)})
+        else:
+            raise _error(
+                f"unsupported content part type: {kind!r}", "invalid_part", 400
+            )
+    return parts
+
+
 def _run_generation(
-    model, tokenizer, prompt_ids, sampling, device, max_seq_len
+    model, tokenizer, prompt_ids, sampling, device, max_seq_len, prompt_embeds=None
 ) -> tuple[list[int], bool]:
     """Consume generate() fully. Returns (token_ids, stopped_on_stop_token) --
     the latter distinguishes finish_reason "stop" from "length"."""
     budget = _completion_budget(len(prompt_ids), sampling, max_seq_len)
     token_ids = list(
         generate(
-            model, tokenizer, prompt_ids, sampling, device, max_seq_len=max_seq_len
+            model,
+            tokenizer,
+            prompt_ids,
+            sampling,
+            device,
+            max_seq_len=max_seq_len,
+            prompt_embeds=prompt_embeds,
         )
     )
     return token_ids, len(token_ids) < budget
@@ -115,6 +207,7 @@ async def _stream_chat_completion(
     created: int,
     model_name: str,
     lock: asyncio.Lock,
+    prompt_embeds: Tensor | None = None,
 ) -> AsyncIterator[bytes]:
     def chunk(delta: dict, finish_reason: str | None) -> dict:
         return {
@@ -149,6 +242,7 @@ async def _stream_chat_completion(
                     sampling,
                     device,
                     max_seq_len=max_seq_len,
+                    prompt_embeds=prompt_embeds,
                 ):
                     n += 1
                     text = decoder.decode(tokenizer.decode_single_token_bytes(token_id))
@@ -178,10 +272,42 @@ def create_app(
     max_seq_len: int,
     model_id: str,
     default_sampling: SamplingConfig | None = None,
+    audio_encoder: torch.nn.Module | None = None,
+    vision_encoder: torch.nn.Module | None = None,
 ) -> FastAPI:
     default_sampling = default_sampling or SamplingConfig()
     generation_lock = asyncio.Lock()
     app = FastAPI(title="picochat")
+    media = MediaAdapters.from_encoders(audio_encoder, vision_encoder)
+    audio_sr = media.audio_processor.cfg.sample_rate if media.audio_processor else 16000
+
+    def _prepare_prompt(messages: list[dict]):
+        """(prompt_ids, prompt_embeds|None): the multimodal path renders the
+        part-structured turns, runs the encoders and splices their soft
+        tokens; plain string messages take the text-only path unchanged."""
+        if all(isinstance(m["content"], str) for m in messages):
+            return render_chat_prompt(messages, tokenizer), None
+        internal = [
+            {**m, "content": _to_internal_parts(m["content"], audio_sr)}
+            for m in messages
+        ]
+        try:
+            prompt_ids, mels, images = render_mm_prompt(internal, tokenizer, media)
+        except ValueError as e:
+            # e.g. an audio part on a checkpoint without an audio encoder
+            raise _error(str(e), "unsupported_modality", 400) from None
+        with torch.no_grad():
+            ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+            embeds = splice_media_embeds(
+                model.embed(ids),
+                ids,
+                tokenizer,
+                audio_encoder=audio_encoder,
+                mels=mels,
+                vision_encoder=vision_encoder,
+                images=images,
+            )
+        return prompt_ids, embeds
 
     @app.get("/v1/models")
     def list_models() -> dict:
@@ -202,7 +328,7 @@ def create_app(
         if not req.messages:
             raise _error("messages must not be empty", "empty_messages", 400)
         messages = [m.model_dump() for m in req.messages]
-        prompt_ids = render_chat_prompt(messages, tokenizer)
+        prompt_ids, prompt_embeds = _prepare_prompt(messages)
         sampling = _resolve_sampling(req, default_sampling)
         if _completion_budget(len(prompt_ids), sampling, max_seq_len) <= 0:
             raise _error(
@@ -228,6 +354,7 @@ def create_app(
                     created,
                     req.model,
                     generation_lock,
+                    prompt_embeds,
                 ),
                 media_type="text/event-stream",
             )
@@ -241,6 +368,7 @@ def create_app(
                 sampling,
                 device,
                 max_seq_len,
+                prompt_embeds,
             )
         return {
             "id": completion_id,

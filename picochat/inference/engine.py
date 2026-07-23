@@ -107,6 +107,7 @@ def generate(
     cfg: SamplingConfig,
     device: torch.device | str = "cpu",
     max_seq_len: int | None = None,
+    prompt_embeds: Tensor | None = None,
 ) -> Iterator[int]:
     """Stream token ids continuing `prompt_ids` (KV-cached decode) until
     `<|im_end|>` (the ChatML stop token), `<|end_of_text|>`, or the token
@@ -118,11 +119,24 @@ def generate(
     The caller is responsible for a prompt that already fits (see
     ChatApp._build_prompt in scripts/chat.py).
 
+    `prompt_embeds` (1, len(prompt_ids), d_model) prefills from pre-spliced
+    embeddings instead of the token ids -- the multimodal path, where media
+    soft tokens sit at the placeholder positions (see
+    picochat.model.multimodal.splice_media_embeds); `prompt_ids` still sets
+    the prompt length for the budget math. Generation then continues on
+    ordinary token ids.
+
     Greedy decoding (temperature <= 0) on a model with MTP heads routes through
     generate_speculative: the emitted stream is identical (every draft is
     verified against the model's own next-token argmax), it just arrives in
-    fewer forwards -- so every caller gets the speedup for free."""
-    if cfg.temperature <= 0 and getattr(model, "n_mtp", 0) > 0:
+    fewer forwards -- so every caller gets the speedup for free. (Embeds
+    prefills skip that routing: the speculative path re-commits prompt tokens
+    by id on rollback, which would lose the spliced media.)"""
+    if (
+        cfg.temperature <= 0
+        and getattr(model, "n_mtp", 0) > 0
+        and prompt_embeds is None
+    ):
         yield from generate_speculative(
             model, tokenizer, prompt_ids, cfg, device, max_seq_len
         )
@@ -136,8 +150,11 @@ def generate(
 
     stop_ids = chat_stop_ids(tokenizer)
 
-    x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    logits, cache, pos = model.decode(x)
+    if prompt_embeds is not None:
+        logits, cache, pos = model.decode(inputs_embeds=prompt_embeds.to(device))
+    else:
+        x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+        logits, cache, pos = model.decode(x)
     next_token = sample(logits[:, -1], cfg)
 
     for _ in range(budget):

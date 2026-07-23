@@ -26,6 +26,10 @@ dependencies = [
     # PyTorch implementation, which also serves CPU everywhere.
     "fla-core[cuda]>=0.5.0 ; sys_platform == 'linux'",
     "tiktoken>=0.13.0",
+    "safetensors>=0.8.0",
+    "pillow>=12.3.0",
+    "torchaudio",
+    "soundfile",
 ]
 
 [project.optional-dependencies]

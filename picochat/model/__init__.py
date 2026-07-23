@@ -11,7 +11,10 @@ API; the submodules hold the implementations:
 - presets.py      the scale ladder (configs/presets.yml) + build_lm
 - estimate.py     estimate_num_params (no model build required)
 - grow.py         width/depth/MoE-upcycle growth transforms
-- audio.py        the audio front end / encoder / soft-token splicing
+- audio.py        log-mel front end + audio encoders (pretrained Whisper /
+                  from-scratch)
+- vision.py       SigLIP2 vision tower + projector
+- multimodal.py   part-structured ChatML rendering + soft-token splicing
 """
 
 from picochat.model.blocks import (

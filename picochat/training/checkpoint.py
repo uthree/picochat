@@ -53,8 +53,38 @@ def load_lm_from_checkpoint(
     return lm, model_config
 
 
+def load_mm_encoders(ckpt: dict, d_model: int):
+    """Rebuild the media encoders (audio, vision) a multimodal SFT checkpoint
+    carries: architecture from the saved `mm_config` hyperparameter, weights
+    from the checkpoint's `audio_encoder.*` / `vision_encoder.*` keys -- no
+    Hub access needed at serve time. Returns (None, None) for a text-only
+    checkpoint."""
+    from picochat.model.multimodal import rebuild_encoders
+
+    mm_config = (ckpt.get("hyper_parameters") or {}).get("mm_config")
+    audio_encoder, vision_encoder = rebuild_encoders(mm_config, d_model)
+    for name, enc in (
+        ("audio_encoder", audio_encoder),
+        ("vision_encoder", vision_encoder),
+    ):
+        if enc is None:
+            continue
+        prefix = name + "."
+        state = {
+            k[len(prefix) :]: v
+            for k, v in ckpt["state_dict"].items()
+            if k.startswith(prefix)
+        }
+        enc.load_state_dict(state)
+        enc.eval()
+    return audio_encoder, vision_encoder
+
+
 def load_gpt_checkpoint(
-    checkpoint: str, tokenizer_path: str, device: torch.device | str = "cpu"
+    checkpoint: str,
+    tokenizer_path: str,
+    device: torch.device | str = "cpu",
+    ckpt=None,
 ) -> tuple[GPT, Tokenizer]:
     """Load a GPT + tokenizer for inference from a Lightning checkpoint.
 
@@ -62,16 +92,27 @@ def load_gpt_checkpoint(
     hyperparameter (the build_lm() recipe GPT.__init__ saves), so the caller
     never has to pass matching flags by hand. Used by scripts/chat.py
     and scripts/base_eval.py; requires a checkpoint produced by the current
-    scripts/base_train.py or sft_train.py."""
+    scripts/base_train.py or sft_train.py. Pass an already-loaded `ckpt` dict
+    to avoid re-reading the file (e.g. scripts/api.py, which also pulls the
+    media encoders out of the same checkpoint)."""
     tokenizer = load_tokenizer(tokenizer_path)
 
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if ckpt is None:
+        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     model_config = _model_config_from_ckpt(ckpt, checkpoint)
     print(f"using model_config from checkpoint: {model_config}", flush=True)
     lm = build_lm(**{**model_config, "vocab_size": tokenizer.n_vocab})
 
     gpt = GPT(lm, compile=False, tokenizer=tokenizer, model_config=model_config)
-    gpt.load_state_dict(ckpt["state_dict"])
+    # A multimodal SFT checkpoint also carries the media encoders' weights;
+    # they are not part of the language model (load_mm_encoders rebuilds them
+    # separately), so drop them here to keep this load strict.
+    state = {
+        k: v
+        for k, v in ckpt["state_dict"].items()
+        if not k.startswith(("audio_encoder.", "vision_encoder."))
+    }
+    gpt.load_state_dict(state)
     gpt.eval()
     gpt.to(device)
     return gpt, tokenizer
