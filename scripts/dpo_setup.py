@@ -24,7 +24,6 @@ import json
 from pathlib import Path
 
 from picochat.inference.engine import (
-    SamplingConfig,
     add_sampling_args,
     generate,
     resolve_device,
