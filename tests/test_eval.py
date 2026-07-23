@@ -104,6 +104,9 @@ def test_all_tasks_have_formatters():
         "openbookqa",
         "winogrande",
         "boolq",
+        "jcommonsenseqa",
+        "belebele_ja",
+        "xwinograd_ja",
     }
 
 
@@ -228,3 +231,54 @@ def test_summarize_multiple_examples():
     assert result["n"] == 2
     assert result["acc"] == 1.0
     assert result["random"] == (1 / 2 + 1 / 4) / 2
+
+
+def test_format_jcommonsenseqa():
+    from picochat.evals.tasks import format_jcommonsenseqa
+
+    doc = {
+        "question": "電子回路基板の事をなんと言う？",
+        **{f"choice{i}": c for i, c in enumerate(["掲示板", "台", "基板", "床", "壁"])},
+        "label": 2,
+    }
+    ex = format_jcommonsenseqa(doc)
+    assert len(ex.choices) == 5 and ex.answer == 2
+    ctx, completion = ex.choices[2]
+    assert ctx.endswith("答え:") and completion == "基板"
+
+
+def test_format_belebele_one_based_gold():
+    from picochat.evals.tasks import format_belebele
+
+    doc = {
+        "flores_passage": "アコーディオンについての文章。",
+        "question": "適切なコツはどれ？",
+        **{f"mc_answer{i}": f"選択肢{i}" for i in range(1, 5)},
+        "correct_answer_num": "3",  # the hub ships it as a string, 1-based
+    }
+    ex = format_belebele(doc)
+    assert len(ex.choices) == 4 and ex.answer == 2
+    assert "アコーディオン" in ex.choices[0][0]
+    assert ex.choices[2][1] == "選択肢3"
+
+
+def test_format_winogrande_handles_japanese_xwinograd():
+    from picochat.evals.tasks import format_winogrande
+
+    doc = {
+        "sentence": "狙撃兵はテロリストを撃った。_は悪漢だったからだ。",
+        "option1": "テロリスト",
+        "option2": "狙撃兵",
+        "answer": "1",
+    }
+    ex = format_winogrande(doc)
+    assert ex.answer == 0
+    ctx, tail = ex.choices[0]
+    assert ctx.endswith("テロリスト") and tail == "は悪漢だったからだ。"
+
+
+def test_japanese_tasks_registered():
+    from picochat.evals.tasks import TASKS
+
+    for name in ("jcommonsenseqa", "belebele_ja", "xwinograd_ja"):
+        assert name in TASKS

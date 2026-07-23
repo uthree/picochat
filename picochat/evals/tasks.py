@@ -108,6 +108,33 @@ def format_boolq(doc: dict) -> MCExample:
     return MCExample(choices=[(ctx, " no"), (ctx, " yes")], answer=int(doc["answer"]))
 
 
+# --- Japanese tasks --------------------------------------------------------
+# The tokenizer is CJK-tuned, so the ladder should be scored on Japanese too.
+# All three ship plain data files (datasets>=5 compatible) under permissive
+# terms: JCommonsenseQA (JGLUE, via the sbintuitions parquet mirror) and
+# Belebele are CC-BY-SA 4.0; XWinograd jp derives from public Winograd
+# schema collections. Japanese completions carry no leading space -- the
+# scripts are unspaced, and the tokenizer's pre-tokenizer splits CJK from a
+# preceding "答え:" on the script boundary by itself.
+
+
+def format_jcommonsenseqa(doc: dict) -> MCExample:
+    ctx = f"質問: {doc['question']}\n答え:"
+    return MCExample(
+        choices=[(ctx, doc[f"choice{i}"]) for i in range(5)],
+        answer=int(doc["label"]),
+    )
+
+
+def format_belebele(doc: dict) -> MCExample:
+    # FLORES passage + comprehension question, 4 choices (1-based gold).
+    ctx = f"{doc['flores_passage']}\n質問: {doc['question']}\n答え:"
+    return MCExample(
+        choices=[(ctx, doc[f"mc_answer{i}"]) for i in range(1, 5)],
+        answer=int(doc["correct_answer_num"]) - 1,
+    )
+
+
 @dataclass(frozen=True)
 class TaskSpec:
     path: str  # HF hub dataset id
@@ -125,6 +152,15 @@ TASKS: dict[str, TaskSpec] = {
         "allenai/winogrande", "winogrande_xl", "validation", format_winogrande
     ),
     "boolq": TaskSpec("google/boolq", None, "validation", format_boolq),
+    # Japanese (see the formatter comment): commonsense QA, reading
+    # comprehension, and coreference. xwinograd shares winogrande's schema
+    # (sentence with a "_" blank, two options), so its formatter is reused --
+    # the partial-scoring split works unchanged on Japanese text.
+    "jcommonsenseqa": TaskSpec(
+        "sbintuitions/JCommonsenseQA", None, "validation", format_jcommonsenseqa
+    ),
+    "belebele_ja": TaskSpec("facebook/belebele", "jpn_Jpan", "test", format_belebele),
+    "xwinograd_ja": TaskSpec("Muennighoff/xwinograd", "jp", "test", format_winogrande),
 }
 
 

@@ -131,8 +131,10 @@ Requests are served one at a time (see `picochat/inference/api.py`); `--temperat
 override any of them.
 
 ### 8. Evaluate
-Multiple-choice benchmarks (hellaswag, arc_easy, arc_challenge, openbookqa,
-winogrande, boolq) scored by completion log-likelihood:
+Multiple-choice benchmarks scored by completion log-likelihood -- English
+(hellaswag, arc_easy, arc_challenge, openbookqa, winogrande, boolq) and,
+matching the CJK-tuned tokenizer, Japanese (jcommonsenseqa, belebele_ja,
+xwinograd_ja):
 ```bash
 # base checkpoints: plain text-continuation scoring
 uv run scripts/base_eval.py --checkpoint weights/base/last.ckpt
