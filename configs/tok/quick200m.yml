@@ -1,0 +1,14 @@
+# Quick 200m experiment tokenizer: 64k vocab from ~300M chars of the same
+# public datasets base_setup/quick200m.yml uses (no gated sets, so no HF auth).
+output: /workspace/picochat/weights/tokenizer.json
+vocab_size: 65536
+total_chars: 300000000
+streaming: true
+data:
+    - { preset: fineweb-edu, weight: 4 }
+    - { preset: cosmopedia, weight: 2 }
+    - { preset: wikipedia-en, weight: 3 }
+    - { preset: python-codes, weight: 1 }
+    - { preset: the-stack-smol, weight: 3 }
+    - { preset: fineweb-edu-ja, weight: 2 }
+    - { preset: wikipedia-ja, weight: 2 }
