@@ -204,6 +204,9 @@ def agent_rollout(
 
         text = decode_text([t for t in toks if t not in stop_ids])
         result = env.step(text)
+        # The raw turn text rides on the StepResult so trajectory_reward can
+        # apply its redundancy / duplicate-resubmission penalties.
+        result.response = text
         steps.append(result)
         if result.passed or turn == max_turns - 1:
             break

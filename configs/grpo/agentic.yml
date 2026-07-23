@@ -23,23 +23,34 @@ tasks: configs/grpo/sample_tasks.jsonl
 sandbox: bwrap
 
 # Untested prompts still fall back to the judge; tested prompts drive the
-# agentic loop (the judge is not called there).
+# agentic loop (the judge is not called there). The judge grades a weighted
+# yes/no checklist (correctness-heavy by default); `questions` / `weights`
+# can be overridden here per task family. Responses are wrapped in <response>
+# tags and the rubric tells the judge to ignore instructions inside them
+# (judge-injection guard).
 judge:
     backend: http
     base_url: "http://localhost:8001/v1"
     model: "Qwen/Qwen2.5-7B-Instruct"
 
 reward: # single-turn / untested-prompt reward composition
-    w_task: 1.0
-    w_format: 0.1
+    w_task: 1.0 # test fraction (per-case partial credit) or judge score
+    w_format: 0.1 # non-empty, parseable code
+    w_redundancy: 0.05 # small penalty on in-response repetition (redundancy_score)
 
 # Trajectory reward for the agentic episodes. Defaults encode the training goal:
-# prize eventual success + stability, don't punish a long episode for its length.
+# prize eventual success + stability, don't punish a long episode for its
+# length -- only trivially wasteful behavior (repeating the same reasoning in
+# a turn, resubmitting identical code the tests already rejected) pays a
+# small penalty.
 agent_reward:
     w_success: 1.0 # terminal reward for the tests EVER passing (dominant)
-    w_stability: 0.3 # mean per-turn quality: pass=1, runs-but-wrong=0.5, crash=0
+    w_partial: 0.3 # best per-case pass fraction reached (partial credit)
+    w_stability: 0.3 # mean per-turn quality: pass=1, valid=0.5 + 0.5*fraction, crash=0
     step_penalty: 0.0 # per extra turn; 0 = don't penalize long trial-and-error
-    valid_credit: 0.5 # per-turn quality of a "runs but wrong" attempt
+    valid_credit: 0.5 # per-turn quality floor of a "runs but wrong" attempt
+    w_redundancy: 0.05 # small penalty on mean in-turn repetition
+    duplicate_penalty: 0.05 # per resubmission of byte-identical (mod whitespace) code
 
 grpo:
     group_size: 8 # trajectories per prompt (the group the advantage is relative to)

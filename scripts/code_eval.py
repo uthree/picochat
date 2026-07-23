@@ -62,18 +62,20 @@ def evaluate_tasks(
             )
         )
         response = tokenizer.decode(reply_ids)
-        passed, output = run_tests_verbose(extract_code(response), s["task"])
+        outcome = run_tests_verbose(extract_code(response), s["task"])
         results.append(
             {
                 "prompt": s["prompt_str"],
-                "passed": passed,
+                "passed": outcome.passed,
+                "fraction": outcome.fraction,  # per-test-case partial credit
                 "response": response,
-                "output": output,
+                "output": outcome.output,
             }
         )
         head = s["prompt_str"].replace("\n", " ")[:60]
         print(
-            f"[{i + 1}/{len(samples)}] {'PASS' if passed else 'FAIL'}  {head}",
+            f"[{i + 1}/{len(samples)}] "
+            f"{'PASS' if outcome.passed else f'FAIL {outcome.fraction:.0%}'}  {head}",
             flush=True,
         )
     return results
