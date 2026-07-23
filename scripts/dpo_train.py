@@ -24,7 +24,10 @@ from picochat.config import (
 )
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 from picochat.training import load_lm_from_checkpoint
-from picochat.training.callbacks import benchmark_callback_from_config
+from picochat.training.callbacks import (
+    NaNGuardCallback,
+    benchmark_callback_from_config,
+)
 from picochat.training.dpo import (
     DPOModule,
     PreferenceDataModule,
@@ -145,7 +148,9 @@ def main():
         precision=trainer_cfg.get("precision", "bf16-mixed"),
         val_check_interval=val_check_interval if val_ds is not None else 1.0,
         use_distributed_sampler=False,
-        callbacks=[cb for cb in (ckpt_cb, bench_cb) if cb is not None],
+        callbacks=[
+            cb for cb in (ckpt_cb, bench_cb, NaNGuardCallback()) if cb is not None
+        ],
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     trainer.fit(dpo, datamodule=datamodule, ckpt_path=resume_ckpt)

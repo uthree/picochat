@@ -30,7 +30,10 @@ from picochat.data.multimodal import (
     MultimodalSFTDataset,
 )
 from picochat.model.multimodal import MediaAdapters, build_encoders
-from picochat.training.callbacks import benchmark_callback_from_config
+from picochat.training.callbacks import (
+    NaNGuardCallback,
+    benchmark_callback_from_config,
+)
 from picochat.training import SFTModule, load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
@@ -260,7 +263,9 @@ def main():
         # The chunked train samplers are rank-aware themselves and the val
         # loader builds its own DistributedSampler (see PretrainDataModule).
         use_distributed_sampler=False,
-        callbacks=[cb for cb in (ckpt_cb, bench_cb) if cb is not None],
+        callbacks=[
+            cb for cb in (ckpt_cb, bench_cb, NaNGuardCallback()) if cb is not None
+        ],
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 

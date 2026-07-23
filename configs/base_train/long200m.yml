@@ -18,9 +18,9 @@ data:
         - { path: the-stack-smol, weight: 3.0 }
         - { path: python-codes, weight: 1.0 }
 optim:
-    lr: 3.0e-4
+    lr: 1.0e-4
     weight_decay: 0.1
-    warmup_steps: 500
+    warmup_steps: 1000
     max_steps: 40000
 trainer:
     batch_size: 16

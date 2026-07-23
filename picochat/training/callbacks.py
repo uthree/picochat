@@ -116,3 +116,40 @@ def benchmark_callback_from_config(
         batch_size=cfg.get("batch_size", 16),
         max_len=cfg.get("max_len", 4096),
     )
+
+
+class NaNGuardCallback(L.Callback):
+    """Stop training the moment the loss goes non-finite (NaN/Inf), instead of
+    burning hours of GPU on a diverged run. A single spike is usually
+    unrecoverable at this scale (the optimizer step already poisoned the
+    weights), so the default patience of 1 halts immediately; raise it to
+    tolerate `patience` consecutive bad steps before stopping.
+
+    Sets trainer.should_stop, which ends training gracefully after the current
+    batch -- Lightning still writes the last checkpoint, so the pre-divergence
+    state (from the previous good checkpoint) stays available.
+    """
+
+    def __init__(self, patience: int = 1):
+        self.patience = patience
+        self._bad = 0
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        # manual-optimization training_step returns the loss tensor directly;
+        # the automatic loop wraps it as {"loss": ...}.
+        loss = outputs.get("loss") if isinstance(outputs, dict) else outputs
+        if loss is None:
+            return
+        finite = torch.isfinite(torch.as_tensor(loss)).all().item()
+        if finite:
+            self._bad = 0
+            return
+        self._bad += 1
+        print(
+            f"NaNGuard: non-finite loss at global_step {trainer.global_step} "
+            f"({self._bad}/{self.patience})",
+            flush=True,
+        )
+        if self._bad >= self.patience:
+            print("NaNGuard: stopping training (diverged).", flush=True)
+            trainer.should_stop = True

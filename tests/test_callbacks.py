@@ -92,3 +92,50 @@ def test_benchmark_callback_from_config():
     )
     assert cb.tasks == ["boolq"] and cb.every_n_steps == 7
     assert cb.limit is None and cb.chat is True
+
+
+def test_nan_guard_stops_on_nonfinite():
+    import torch
+
+    from picochat.training.callbacks import NaNGuardCallback
+
+    class T:
+        def __init__(self):
+            self.global_step = 10
+            self.should_stop = False
+
+    cb = NaNGuardCallback()
+    tr = T()
+    # finite loss: keeps going
+    cb.on_train_batch_end(tr, None, torch.tensor(2.5), None, 0)
+    assert tr.should_stop is False
+    # dict-wrapped finite loss too
+    cb.on_train_batch_end(tr, None, {"loss": torch.tensor(1.0)}, None, 0)
+    assert tr.should_stop is False
+    # NaN: stops immediately (patience 1)
+    cb.on_train_batch_end(tr, None, torch.tensor(float("nan")), None, 0)
+    assert tr.should_stop is True
+
+
+def test_nan_guard_patience():
+    import torch
+
+    from picochat.training.callbacks import NaNGuardCallback
+
+    class T:
+        global_step = 5
+        should_stop = False
+
+    cb = NaNGuardCallback(patience=2)
+    tr = T()
+    cb.on_train_batch_end(tr, None, torch.tensor(float("inf")), None, 0)
+    assert tr.should_stop is False  # 1 bad, tolerated
+    cb.on_train_batch_end(tr, None, torch.tensor(float("nan")), None, 0)
+    assert tr.should_stop is True  # 2nd consecutive bad -> stop
+    # a good step resets the counter
+    cb2 = NaNGuardCallback(patience=2)
+    tr2 = T()
+    cb2.on_train_batch_end(tr2, None, torch.tensor(float("nan")), None, 0)
+    cb2.on_train_batch_end(tr2, None, torch.tensor(1.0), None, 0)  # reset
+    cb2.on_train_batch_end(tr2, None, torch.tensor(float("nan")), None, 0)
+    assert tr2.should_stop is False  # only 1 bad since reset
