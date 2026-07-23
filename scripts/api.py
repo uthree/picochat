@@ -45,13 +45,23 @@ def main():
     p.add_argument("--host", type=str, default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--device", type=str, default=None)
+    p.add_argument(
+        "--dtype",
+        type=str,
+        default="fp32",
+        choices=("auto", "bf16", "fp16", "fp32", "int8"),
+        help="inference weight dtype; auto = bf16 on CUDA, fp32 elsewhere; "
+        "int8 = weight-only quantized Linear layers",
+    )
     add_sampling_args(p, temp_help="default; a request may override it")
     args = p.parse_args()
 
     device = resolve_device(args.device)
     print(f"loading model from {args.checkpoint} (device={device}) ...", flush=True)
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    gpt, tokenizer = load_gpt_checkpoint(args.checkpoint, args.tokenizer, device, ckpt)
+    gpt, tokenizer = load_gpt_checkpoint(
+        args.checkpoint, args.tokenizer, device, ckpt, dtype=args.dtype
+    )
     # A multimodal SFT checkpoint also carries its media encoders; with them
     # attached, requests may send OpenAI input_audio / image_url (data URI)
     # content parts. Text-only checkpoints serve exactly as before.

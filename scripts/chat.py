@@ -313,8 +313,9 @@ def main():
         "--dtype",
         type=str,
         default="auto",
-        choices=("auto", "bf16", "fp16", "fp32"),
-        help="inference weight dtype; auto = bf16 on CUDA, fp32 elsewhere",
+        choices=("auto", "bf16", "fp16", "fp32", "int8"),
+        help="inference weight dtype; auto = bf16 on CUDA, fp32 elsewhere; "
+        "int8 = weight-only quantized Linear layers",
     )
     p.add_argument(
         "--theme",

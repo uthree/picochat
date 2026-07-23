@@ -122,7 +122,9 @@ def load_gpt_checkpoint(
     `dtype` (see resolve_dtype) casts the *parameters* only -- buffers such
     as the RoPE tables stay fp32 for positional precision, and
     engine.inference_autocast bridges the mix at decode time exactly like
-    bf16-mixed training did."""
+    bf16-mixed training did. `dtype="int8"` instead swaps the Linear layers
+    for weight-only int8 (picochat.inference.quant); parameters and
+    activations stay fp32 there, never combined with a bf16/fp16 cast."""
     tokenizer = load_tokenizer(tokenizer_path)
 
     if ckpt is None:
@@ -143,6 +145,15 @@ def load_gpt_checkpoint(
     gpt.load_state_dict(state)
     gpt.eval()
     gpt.to(device)
+    if dtype == "int8":
+        # Weight-only int8 quantization, branched *before* resolve_dtype (it
+        # is not a float cast: the remaining parameters stay fp32, so
+        # inference_autocast stays a no-op and activations run fp32). Import
+        # here to keep the quant module an optional dependency of training.
+        from picochat.inference.quant import quantize_model_int8
+
+        quantize_model_int8(gpt.model)
+        return gpt, tokenizer
     cast = resolve_dtype(dtype, device)
     if cast is not None:
         for p in gpt.parameters():

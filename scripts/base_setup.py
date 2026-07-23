@@ -44,6 +44,7 @@ from picochat.data.dataloader import (  # DTYPE: uint32; shared with the reader
     pack_docs,
     write_meta,
 )
+from picochat.data.dedup import filter_from_config
 from picochat.data.sources import (
     DatasetSpec,
     holdout_splits,
@@ -170,6 +171,7 @@ def process(
     batch_size: int = BATCH_SIZE,
     num_threads: int | None = None,
     shard_tokens: int = DEFAULT_SHARD_TOKENS,
+    corpus_filter=None,
 ) -> tuple[int, int]:
     """Encode every document of `spec` and pack them into fixed-length rows of
     block_size+1 tokens in shard files under the `output` directory (see
@@ -195,6 +197,16 @@ def process(
     bar = tqdm()
     try:
         for batch in _batched(texts, batch_size):
+            if corpus_filter is not None:
+                # Streaming corpus hygiene (picochat.data.dedup): drop exact/
+                # near duplicates and benchmark-contaminated docs before they
+                # cost tokenization. The filter instance spans the whole
+                # recipe run, so dedup is corpus-wide -- including dropping a
+                # validation doc that already appeared in a train split
+                # (train/val leakage) rather than keeping both.
+                batch = corpus_filter.filter_batch(batch)
+                if not batch:
+                    continue
             encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
             docs = [[bos_id, *ids, eos_id] for ids in encoded]
             rows = pack_docs(docs, block_size, pad_id, bos_id)
@@ -242,6 +254,10 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int, pad_id: int) -> None:
             "must match the training config's data.block_size)"
         )
     block_size = cfg["block_size"]
+    # Optional corpus hygiene (see picochat.data.dedup.filter_from_config).
+    # Built once up front: the decontamination index downloads the benchmark
+    # sets, and the dedup state must span every dataset in the recipe.
+    corpus_filter = filter_from_config(cfg.get("filter"))
     entries = expand_val_fraction(cfg["datasets"])
     for entry in entries:
         if "output" not in entry:
@@ -278,7 +294,10 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int, pad_id: int) -> None:
             batch_size=batch_size,
             num_threads=num_threads,
             shard_tokens=entry.get("shard_tokens", shard_tokens),
+            corpus_filter=corpus_filter,
         )
+    if corpus_filter is not None:
+        print(corpus_filter.stats.describe())
 
 
 def main():

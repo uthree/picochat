@@ -1,0 +1,40 @@
+{"category": "writing", "prompt": "Write a short email to your landlord asking them to fix a leaking kitchen faucet. Keep it polite, under 120 words, and propose a time window for the repair visit."}
+{"category": "writing", "prompt": "「梅雨」をテーマに俳句を3句詠んでください。それぞれの句に、込めた情景の説明を一文ずつ添えてください。"}
+{"category": "writing", "prompt": "Write the opening paragraph of a mystery story that begins with a character finding an unfamiliar key inside their own mailbox. Aim for 4-6 sentences that establish mood and raise a question."}
+{"category": "writing", "prompt": "新発売の缶コーヒーのキャッチコピーを5つ考えてください。ターゲットは朝の通勤で忙しい会社員です。それぞれ15文字以内でお願いします。"}
+{"category": "writing", "prompt": "Rewrite the sentence 'Our store will be closed tomorrow because of the holiday.' three ways: once formally, once casually, and once as upbeat marketing copy. Label each version."}
+{"category": "roleplay", "prompt": "あなたは江戸時代からタイムスリップしてきた侍です。初めてスマートフォンを見たときの驚きを、侍らしい口調で3〜4文で語ってください。"}
+{"category": "roleplay", "prompt": "You are a grumpy old lighthouse keeper. A tourist asks why the lighthouse still matters in the age of GPS. Answer in character, in about five sentences."}
+{"category": "roleplay", "prompt": "あなたは関西弁を話すたこ焼き屋の店主です。初めて来店した外国人観光客に、おすすめの食べ方を楽しく説明してください。"}
+{"category": "roleplay", "prompt": "Pretend you are the Moon being interviewed on a late-night talk show. The host asks: 'So what did you really think of all those astronauts who visited you?' Reply in character, with some personality."}
+{"category": "roleplay", "prompt": "あなたは図書館で働く猫の司書です。本を返し忘れた小学生に、優しく、でも少しだけ猫らしさを見せながら注意してください。"}
+{"category": "reasoning", "prompt": "Alice, Bob, and Carol each own exactly one pet: a cat, a dog, or a parrot. Alice is allergic to fur. Bob's pet cannot fly. Who owns which pet? Explain your reasoning step by step."}
+{"category": "reasoning", "prompt": "ある村には、常に本当のことを言う正直者と、常に嘘をつく嘘つきがいます。村人の1人に「あなたは嘘つきですか?」と尋ねたところ、「いいえ」と答えました。この答えだけで、その人が正直者か嘘つきか判別できますか?理由も説明してください。"}
+{"category": "reasoning", "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost? Explain why the common intuitive answer is wrong."}
+{"category": "reasoning", "prompt": "月曜日から金曜日まで、毎日1科目ずつテストがあります。数学は火曜日より後、英語は数学の翌日、国語は木曜日より前に行われます。国語が月曜日のとき、数学と英語はそれぞれ何曜日にありえますか?順を追って考えてください。"}
+{"category": "reasoning", "prompt": "If it takes 5 machines 5 minutes to make 5 widgets, how long would it take 100 machines to make 100 widgets? Explain your reasoning, not just the answer."}
+{"category": "math", "prompt": "Solve for x: 2(x - 3) + 4 = 10. Show each algebraic step."}
+{"category": "math", "prompt": "縦8cm、横5cmの長方形があります。この長方形の周の長さと面積をそれぞれ求めてください。計算の過程も示してください。"}
+{"category": "math", "prompt": "A shirt originally costs $40. It is discounted by 25%, and then a 10% sales tax is added to the discounted price. What is the final price? Show your work."}
+{"category": "math", "prompt": "1から100までの整数のうち、3でも5でも割り切れる数は全部でいくつありますか?どのように数えたかも説明してください。"}
+{"category": "math", "prompt": "What is the sum of the first 20 positive even numbers? Derive the answer using a formula instead of adding the numbers one by one."}
+{"category": "coding", "prompt": "Write a Python function `is_palindrome(s)` that returns True if the string reads the same forwards and backwards, ignoring case and spaces. Include two example calls with their expected output."}
+{"category": "coding", "prompt": "Pythonで、リストから重複した要素を取り除き、元の順序を保ったまま新しいリストを返す関数を書いてください。簡単な使用例も付けてください。"}
+{"category": "coding", "prompt": "Explain the difference between a `for` loop and a `while` loop in Python, then show a short example of a situation where a `while` loop is the more natural choice."}
+{"category": "coding", "prompt": "次のPython関数にはバグがあります。修正したコードと、どこが間違っていたかの説明を書いてください。\n\ndef average(numbers):\n    total = 0\n    for n in numbers:\n        total += n\n    return total / len(numbers) + 1"}
+{"category": "coding", "prompt": "Write a Python function that takes a list of words and returns a dictionary mapping each word to its length. Then show how to print the entries sorted by length, longest first."}
+{"category": "extraction", "prompt": "From the following text, extract every date and the event that happened on it, as a bulleted list: 'The company was founded on March 3, 1998. It went public on July 21, 2005, and opened its first overseas office on January 9, 2012.'"}
+{"category": "extraction", "prompt": "次の文章から、人物名とその職業をすべて抜き出して箇条書きにしてください。「昨日の会議には、エンジニアの田中さん、デザイナーの鈴木さん、営業部長の佐藤さんが出席しました。司会は広報担当の山本さんが務めました。」"}
+{"category": "extraction", "prompt": "Read this review and answer three questions: what product is being reviewed, what did the reviewer like, and what did they dislike? 'I bought the AeroBrew kettle last month. Water boils in under two minutes and the handle stays cool, but the lid rattles loudly and the blue power light is annoyingly bright at night.'"}
+{"category": "extraction", "prompt": "次のメールから、会議の日時・場所・持ち物を抜き出して箇条書きに整理してください。「お疲れさまです。来週水曜の14時から、本社3階の会議室Bで企画会議を行います。各自ノートPCと先月の売上資料を持参してください。」"}
+{"category": "extraction", "prompt": "Convert the following sentence into a JSON object with the keys 'name', 'age', and 'city': 'Maria is a 29-year-old architect living in Lisbon.' Output only the JSON."}
+{"category": "stem", "prompt": "なぜ昼間の空は青く、夕焼けは赤く見えるのでしょうか?光の性質に触れながら、中学生にもわかるように説明してください。"}
+{"category": "stem", "prompt": "Explain photosynthesis in simple terms: what goes in, what comes out, and why it matters for life on Earth. Keep it under 150 words."}
+{"category": "stem", "prompt": "水を冷凍庫で凍らせると体積が増えるのはなぜですか?水の分子の振る舞いに触れて説明してください。"}
+{"category": "stem", "prompt": "What is the difference between speed and velocity? Give one real-world example where the distinction actually matters."}
+{"category": "stem", "prompt": "Why do people need a new influenza vaccine every year, while some other vaccines protect for many years or even a lifetime? Explain the biological reason briefly."}
+{"category": "humanities", "prompt": "江戸幕府が約260年間も続いた理由を、政治や社会の仕組みに注目して2〜3つ挙げ、それぞれ簡単に説明してください。"}
+{"category": "humanities", "prompt": "In two or three short paragraphs, explain why the printing press is often described as one of the most transformative inventions in history."}
+{"category": "humanities", "prompt": "「わび・さび」とはどのような美意識ですか?具体的な例を1つ以上挙げながら、日本文化に馴染みのない人に説明してください。"}
+{"category": "humanities", "prompt": "Briefly compare how ancient Athens and the Roman Republic approached citizen participation in government. Mention at least one similarity and one difference."}
+{"category": "humanities", "prompt": "ことわざ「情けは人のためならず」の本来の意味と、よくある誤解について説明してください。なぜその誤解が生まれやすいのかにも触れてください。"}

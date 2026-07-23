@@ -18,6 +18,16 @@ streaming: false # small datasets: download once, then iterate from local cache
 #     thin slice of major-language wikipedias (zh/ko/es/fr/de/ru).
 block_size: 16384
 
+# Corpus hygiene (picochat.data.dedup), applied while streaming, before
+# tokenization. Dedup state spans every dataset below (corpus-wide);
+# decontaminate indexes the registered benchmarks' items and drops any doc
+# containing a long verbatim overlap, so eval numbers measure generalization
+# rather than recall. Stats are printed at the end of the run.
+filter:
+    exact_dedup: true
+    minhash_dedup: true # near-duplicates (MinHash-LSH over char shingles)
+    decontaminate: true # all registered eval tasks; or a list of task names
+
 datasets:
     # --- computing & coding ---
     - {
