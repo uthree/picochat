@@ -180,3 +180,95 @@ def test_generate_is_lazy():
             break
     # prompt prefill + 1st loop iteration + the decode feeding iteration 2
     assert model.calls <= 4
+
+
+# ---------------------------------------------------------------------------
+# anti-repetition penalties
+# ---------------------------------------------------------------------------
+def test_sample_repetition_penalty_shifts_greedy_choice():
+    # token 0 barely leads; once it is in the history the multiplicative
+    # penalty drops it below token 1 -- greedy decoding escapes the loop.
+    logits = torch.tensor([[1.0, 0.95, -2.0]])
+    cfg = SamplingConfig(temperature=0.0, repetition_penalty=1.2)
+    history = torch.tensor([[0]])
+    assert int(sample(logits, cfg, history)) == 1
+    # without history (or with the penalty off) the raw argmax wins
+    assert int(sample(logits, cfg)) == 0
+    assert int(sample(logits, SamplingConfig(temperature=0.0), history)) == 0
+
+
+def test_sample_repetition_penalty_scales_negative_logits_down():
+    # a seen token with a NEGATIVE logit must get less likely, not more
+    logits = torch.tensor([[-0.5, -1.0]])
+    cfg = SamplingConfig(temperature=0.0, repetition_penalty=2.0)
+    history = torch.tensor([[0]])
+    assert (
+        int(sample(logits, cfg, history)) == 0
+    )  # -0.5*2 = -1.0, ties broken by argmax
+    strong = SamplingConfig(temperature=0.0, repetition_penalty=3.0)
+    assert int(sample(logits, strong, history)) == 1  # -1.5 < -1.0
+
+
+def test_sample_frequency_penalty_counts_occurrences():
+    logits = torch.tensor([[1.0, 0.8]])
+    history = torch.tensor([[0, 0, 0]])  # token 0 emitted three times
+    cfg = SamplingConfig(temperature=0.0, frequency_penalty=0.1)
+    # 1.0 - 3*0.1 = 0.7 < 0.8
+    assert int(sample(logits, cfg, history)) == 1
+    once = torch.tensor([[0]])  # 1.0 - 0.1 = 0.9 > 0.8
+    assert int(sample(logits, cfg, once)) == 0
+
+
+def test_sample_presence_penalty_is_flat():
+    logits = torch.tensor([[1.0, 0.8]])
+    cfg = SamplingConfig(temperature=0.0, presence_penalty=0.3)
+    # present once or thrice, the penalty is the same 0.3
+    for history in (torch.tensor([[0]]), torch.tensor([[0, 0, 0]])):
+        assert int(sample(logits, cfg, history)) == 1
+
+
+def test_generate_repetition_penalty_breaks_loops():
+    # A constant-logits model loops on one token forever under plain greedy;
+    # with the penalty the stream must visit other tokens.
+    class LoopyModel(torch.nn.Module):
+        n_mtp = 0
+
+        def decode(self, x=None, cache=None, pos=0, inputs_embeds=None):
+            logits = torch.zeros(1, 1, 8)
+            logits[..., 3] = 5.0  # always prefers token 3
+            logits[..., 4] = 4.9
+            logits[..., 5] = 4.8
+            return logits, cache, pos + 1
+
+    tok = ByteTokenizer()
+    plain = list(
+        generate(
+            LoopyModel(),
+            tok,
+            [1, 2],
+            SamplingConfig(temperature=0.0, max_new_tokens=6),
+        )
+    )
+    assert set(plain) == {3}
+    shaped = list(
+        generate(
+            LoopyModel(),
+            tok,
+            [1, 2],
+            SamplingConfig(temperature=0.0, max_new_tokens=6, repetition_penalty=2.0),
+        )
+    )
+    assert len(set(shaped)) > 1  # escaped the loop
+
+
+def test_update_and_describe_cover_penalties():
+    cfg = SamplingConfig()
+    assert not cfg.penalized()
+    cfg.update("repetition_penalty", "1.3")
+    cfg.update("frequency_penalty", "0.5")
+    cfg.update("presence_penalty", "off")
+    assert cfg.repetition_penalty == 1.3 and cfg.frequency_penalty == 0.5
+    assert cfg.penalized()
+    with pytest.raises(ValueError):
+        cfg.update("repetition_penalty", "-1")
+    assert "repetition_penalty=1.3" in cfg.describe()

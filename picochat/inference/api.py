@@ -67,6 +67,11 @@ class ChatCompletionRequest(BaseModel):
         None  # extension beyond the OpenAI spec (vLLM/Ollama also accept it)
     )
     max_tokens: int | None = None
+    frequency_penalty: float | None = None  # OpenAI-standard additive penalties
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = (
+        None  # extension beyond the OpenAI spec (vLLM/Ollama also accept it)
+    )
 
 
 def _resolve_sampling(
@@ -83,6 +88,15 @@ def _resolve_sampling(
         max_new_tokens=req.max_tokens
         if req.max_tokens is not None
         else default.max_new_tokens,
+        repetition_penalty=req.repetition_penalty
+        if req.repetition_penalty is not None
+        else default.repetition_penalty,
+        frequency_penalty=req.frequency_penalty
+        if req.frequency_penalty is not None
+        else default.frequency_penalty,
+        presence_penalty=req.presence_penalty
+        if req.presence_penalty is not None
+        else default.presence_penalty,
     )
 
 

@@ -97,8 +97,12 @@ def main():
         default=None,
         help="optional system prompt, prepended as a ChatML system turn",
     )
+    # repetition_penalty=1.0: benchmarks measure the raw model, unshaped.
     add_sampling_args(
-        p, temperature=0.0, temp_help="0 -> greedy (deterministic; the default)"
+        p,
+        temperature=0.0,
+        temp_help="0 -> greedy (deterministic; the default)",
+        repetition_penalty=1.0,
     )
     p.add_argument(
         "--limit", type=int, default=None, help="cap the number of tasks (smoke runs)"

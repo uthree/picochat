@@ -21,6 +21,27 @@ class SamplingConfig:
     top_k: int | None = 50  # None -> disabled
     top_p: float | None = None  # nucleus sampling; None -> disabled
     max_new_tokens: int = 256
+    # Anti-repetition shaping -- the practical fix for small models looping on
+    # a phrase. repetition_penalty is the HF/CTRL multiplicative form (divide a
+    # seen token's positive logit / multiply a negative one by the factor);
+    # frequency/presence are OpenAI's additive forms (per-occurrence /
+    # once-if-present logit subtraction). All default OFF: GRPO rollouts must
+    # sample the policy's own distribution -- a shaped sampling distribution
+    # would no longer match the teacher-forced log-probs the importance ratio
+    # is computed from -- so penalties are enabled per-CLI (chat/api), never
+    # baked into the dataclass defaults.
+    repetition_penalty: float = 1.0  # 1.0 -> disabled; typical 1.05-1.3
+    frequency_penalty: float = 0.0  # 0 -> disabled; typical 0-1
+    presence_penalty: float = 0.0  # 0 -> disabled; typical 0-1
+
+    def penalized(self) -> bool:
+        """Whether any anti-repetition term is active (callers then need to
+        thread the context history into sample())."""
+        return (
+            self.repetition_penalty != 1.0
+            or self.frequency_penalty != 0.0
+            or self.presence_penalty != 0.0
+        )
 
     def update(self, key: str, raw: str) -> None:
         """Set one field from a raw string (e.g. `/set top_k 50`); "none"/
@@ -46,10 +67,24 @@ class SamplingConfig:
                 if value < 1:
                     raise ValueError
                 self.max_new_tokens = value
+            elif key == "repetition_penalty":
+                value = 1.0 if raw.lower() in ("none", "off") else float(raw)
+                if value <= 0:
+                    raise ValueError
+                self.repetition_penalty = value
+            elif key == "frequency_penalty":
+                self.frequency_penalty = (
+                    0.0 if raw.lower() in ("none", "off") else float(raw)
+                )
+            elif key == "presence_penalty":
+                self.presence_penalty = (
+                    0.0 if raw.lower() in ("none", "off") else float(raw)
+                )
             else:
                 raise ValueError(
                     f"unknown setting '{key}' (temperature, top_k, top_p, "
-                    "max_new_tokens)"
+                    "max_new_tokens, repetition_penalty, frequency_penalty, "
+                    "presence_penalty)"
                 )
         except ValueError as e:
             if str(e):
@@ -61,6 +96,8 @@ class SamplingConfig:
             f"temperature={self.temperature:g}  "
             f"top_k={self.top_k if self.top_k is not None else 'off'}  "
             f"top_p={self.top_p if self.top_p is not None else 'off'}  "
+            f"repetition_penalty="
+            f"{self.repetition_penalty:g}  "
             f"max_new_tokens={self.max_new_tokens}"
         )
 
@@ -75,9 +112,45 @@ def chat_stop_ids(tokenizer: Encoding) -> set[int]:
     }
 
 
-def sample(logits: Tensor, cfg: SamplingConfig) -> Tensor:
-    """logits: (B, V) -> next token ids (B, 1). top-k then top-p filtering,
-    both optional; temperature <= 0 short-circuits to greedy."""
+def _apply_repetition_penalties(
+    logits: Tensor, cfg: SamplingConfig, history: Tensor
+) -> Tensor:
+    """Shape `logits` (B, V) against the tokens already in `history` (B, T):
+    the HF/CTRL multiplicative repetition penalty plus OpenAI's additive
+    frequency (per occurrence) and presence (once if present) penalties.
+    History covers the whole context (prompt + generated), so echoing the
+    prompt is discouraged too."""
+    counts = torch.zeros_like(logits).scatter_add_(
+        -1, history, torch.ones_like(history, dtype=logits.dtype)
+    )
+    seen = counts > 0
+    if cfg.repetition_penalty != 1.0:
+        seen_logits = logits[seen]
+        logits = logits.masked_scatter(
+            seen,
+            torch.where(
+                seen_logits > 0,
+                seen_logits / cfg.repetition_penalty,
+                seen_logits * cfg.repetition_penalty,
+            ),
+        )
+    if cfg.frequency_penalty != 0.0:
+        logits = logits - cfg.frequency_penalty * counts
+    if cfg.presence_penalty != 0.0:
+        logits = logits - cfg.presence_penalty * seen.to(logits.dtype)
+    return logits
+
+
+def sample(
+    logits: Tensor, cfg: SamplingConfig, history: Tensor | None = None
+) -> Tensor:
+    """logits: (B, V) -> next token ids (B, 1). Anti-repetition shaping (when
+    `history`, the (B, T) context token ids, is provided and cfg enables it),
+    then top-k and top-p filtering, both optional; temperature <= 0
+    short-circuits to greedy -- after the penalties, which deliberately steer
+    greedy decoding away from loops too."""
+    if history is not None and history.numel() > 0 and cfg.penalized():
+        logits = _apply_repetition_penalties(logits.clone(), cfg, history)
     if cfg.temperature <= 0:
         return logits.argmax(dim=-1, keepdim=True)
     logits = logits / cfg.temperature
@@ -136,6 +209,9 @@ def generate(
         cfg.temperature <= 0
         and getattr(model, "n_mtp", 0) > 0
         and prompt_embeds is None
+        and not cfg.penalized()
+        # speculative drafting verifies against the *unshaped* argmax, so a
+        # penalized greedy stream must take the plain path to stay faithful
     ):
         yield from generate_speculative(
             model, tokenizer, prompt_ids, cfg, device, max_seq_len
@@ -155,7 +231,12 @@ def generate(
     else:
         x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         logits, cache, pos = model.decode(x)
-    next_token = sample(logits[:, -1], cfg)
+    # The anti-repetition penalties need the running context; only carry it
+    # when they are on (GRPO and greedy eval paths keep zero overhead).
+    history = None
+    if cfg.penalized():
+        history = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+    next_token = sample(logits[:, -1], cfg, history)
 
     for _ in range(budget):
         token_id = int(next_token.item())
@@ -163,7 +244,9 @@ def generate(
             return
         yield token_id
         logits, cache, pos = model.decode(next_token, cache, pos)
-        next_token = sample(logits[:, -1], cfg)
+        if history is not None:
+            history = torch.cat([history, next_token], dim=1)
+        next_token = sample(logits[:, -1], cfg, history)
 
 
 def _snapshot_cache(cache: list | None) -> list | None:
@@ -280,17 +363,41 @@ def resolve_device(spec: str | None) -> torch.device:
 
 
 def add_sampling_args(
-    parser, *, temperature: float = 0.8, temp_help: str = "0 -> greedy decoding"
+    parser,
+    *,
+    temperature: float = 0.8,
+    temp_help: str = "0 -> greedy decoding",
+    repetition_penalty: float = 1.1,
 ) -> None:
-    """Add the shared --temperature/--top-k/--top-p/--max-new-tokens flags to an
-    argparse parser (used by chat.py, api.py and code_eval.py); pair with
-    sampling_from_args."""
+    """Add the shared --temperature/--top-k/--top-p/--max-new-tokens and
+    anti-repetition flags to an argparse parser (used by chat.py, api.py and
+    code_eval.py); pair with sampling_from_args. The chat-facing CLIs default
+    to a mild repetition penalty (small models loop badly without one);
+    benchmark CLIs pass repetition_penalty=1.0 to measure the raw model."""
     parser.add_argument(
         "--temperature", type=float, default=temperature, help=temp_help
     )
     parser.add_argument("--top-k", type=int, default=50, help="0 -> disabled")
     parser.add_argument("--top-p", type=float, default=1.0, help="1.0 -> disabled")
     parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=repetition_penalty,
+        help="multiplicative penalty on already-seen tokens; 1.0 -> disabled",
+    )
+    parser.add_argument(
+        "--frequency-penalty",
+        type=float,
+        default=0.0,
+        help="additive per-occurrence penalty (OpenAI-style); 0 -> disabled",
+    )
+    parser.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=0.0,
+        help="additive once-if-present penalty (OpenAI-style); 0 -> disabled",
+    )
 
 
 def sampling_from_args(args) -> SamplingConfig:
@@ -301,4 +408,7 @@ def sampling_from_args(args) -> SamplingConfig:
         top_k=args.top_k if args.top_k > 0 else None,
         top_p=args.top_p if 0 < args.top_p < 1 else None,
         max_new_tokens=args.max_new_tokens,
+        repetition_penalty=args.repetition_penalty,
+        frequency_penalty=args.frequency_penalty,
+        presence_penalty=args.presence_penalty,
     )
