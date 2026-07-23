@@ -1,0 +1,36 @@
+# Extended 200m pretrain: 40k steps on the prepared real-data corpus.
+tokenizer: /workspace/picochat/weights/tokenizer.json
+output_dir: /workspace/picochat/weights/200m-40k
+init_from: null
+model:
+    size: 200m
+    max_seq_len: 8192
+    grad_checkpoint: false
+data:
+    data_dir: /workspace/picochat/data/200m
+    block_size: 2048
+    datasets:
+        - { path: fineweb-edu, weight: 4.0 }
+        - { path: cosmopedia, weight: 2.0 }
+        - { path: wikipedia-en, weight: 3.0 }
+        - { path: fineweb-edu-ja, weight: 2.0 }
+        - { path: wikipedia-ja, weight: 2.0 }
+        - { path: the-stack-smol, weight: 3.0 }
+        - { path: python-codes, weight: 1.0 }
+optim:
+    lr: 3.0e-4
+    weight_decay: 0.1
+    warmup_steps: 500
+    max_steps: 40000
+trainer:
+    batch_size: 16
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 8
+    val_check_interval: 5000
+    compile: false
+    benchmark_eval:
+        tasks: [hellaswag, arc_easy, jcommonsenseqa]
+        limit: 300
+        every_n_steps: 5000

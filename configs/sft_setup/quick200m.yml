@@ -1,0 +1,11 @@
+tokenizer: /workspace/picochat/weights/tokenizer.json
+output_dir: /workspace/picochat/data/200m-sft
+max_length: 2048
+streaming: true
+datasets:
+    - { preset: smoltalk, output: smoltalk.pt, limit: 40000 }
+    - { preset: smoltalk, output: smoltalk.val.pt, split: test, limit: 1000 }
+    - { preset: smoltalk-multilingual, output: smoltalk-ml.pt, limit: 15000 }
+    - { preset: magpie-ja, output: magpie-ja.pt, limit: 15000 }
+    - { path: "jsonl:data_seeds/identity.jsonl", output: identity.pt }
+    - { path: "jsonl:data_seeds/safety.jsonl", output: safety.pt }

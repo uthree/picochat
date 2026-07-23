@@ -1,0 +1,17 @@
+tokenizer: /workspace/picochat/weights/tokenizer.json
+init_from: /workspace/picochat/weights/200m-sft/last.ckpt
+output_dir: /workspace/picochat/weights/200m-dpo
+data:
+    train: /workspace/picochat/data/200m-dpo/pairs.jsonl
+    max_length: 1024
+optim:
+    beta: 0.1
+    lr: 5.0e-7
+    max_steps: 100
+    warmup_steps: 10
+trainer:
+    batch_size: 2
+    accumulate: 2
+    precision: bf16-mixed
+    num_workers: 0
+    compile: false

@@ -1,0 +1,28 @@
+tokenizer: /workspace/picochat/weights/tokenizer.json
+init_from: /workspace/picochat/weights/200m-40k/last.ckpt
+output_dir: /workspace/picochat/weights/200m-sft
+data:
+    data_dir: /workspace/picochat/data/200m-sft
+    datasets:
+        - { path: smoltalk.pt, weight: 3.0 }
+        - { path: smoltalk-ml.pt, weight: 1.0 }
+        - { path: magpie-ja.pt, weight: 1.5 }
+        - { path: identity.pt, weight: 0.3 }
+        - { path: safety.pt, weight: 0.3 }
+    val_path: smoltalk.val.pt
+optim:
+    lr: 1.0e-5
+    max_steps: 3000
+    warmup_steps: 100
+trainer:
+    batch_size: 8
+    accumulate: 2
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 4
+    val_check_interval: 500
+    compile: false
+    benchmark_eval:
+        tasks: [hellaswag, jcommonsenseqa]
+        limit: 200
+        every_n_steps: 1000
