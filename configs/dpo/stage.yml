@@ -1,0 +1,34 @@
+# DPO preference tuning: SFT -> DPO -> GRPO. The policy and the frozen
+# reference both come from init_from; only (prompt, chosen, rejected) pairs
+# are needed -- bootstrap them with scripts/dpo_setup.py (samples the policy
+# twice per prompt, keeps pairs where the LLM judge sees a clear winner).
+#
+#   python scripts/dpo_train.py --config configs/dpo/stage.yml
+
+tokenizer: weights/tokenizer.json
+init_from: weights/sft-stage1/last.ckpt
+output_dir: weights/dpo
+
+data:
+  train: data/dpo/pairs.jsonl
+  val: # optional held-out pairs, e.g. data/dpo/val.jsonl
+  max_length: 4096
+
+optim:
+  beta: 0.1 # DPO temperature: higher = sharper preference pressure
+  lr: 5.0e-7 # tiny: DPO nudges an already-tuned policy
+  optimizer: adamw
+  weight_decay: 0.0
+  max_steps: 1000
+  warmup_steps: 50
+
+trainer:
+  batch_size: 4 # pairs per step (each pair = 4 forwards: policy/ref x c/r)
+  accumulate: 4
+  precision: bf16-mixed
+  val_check_interval: 100
+  # In-training benchmark tracking works here too (ChatML rendering):
+  benchmark_eval:
+    tasks: [hellaswag, jcommonsenseqa]
+    limit: 300
+    every_n_steps: 200
