@@ -119,3 +119,28 @@ def test_muon_overfits_single_batch():
         for opt in optimizers:
             opt.step()
     assert loss.item() < first
+
+
+def test_muon_param_split_with_nsa_layer():
+    # Regression: a model deep enough to contain an NSA layer (block tail at
+    # layers_per_block=4) must split cleanly. NSA's positional signal is
+    # PartialRoPE (buffers, not params), so it adds nothing to the AdamW side;
+    # earlier code referenced a nonexistent NSA.cmp_pos and crashed here.
+    from picochat.model.sparse_attn import NativeSparseAttention
+
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=4)
+    nsa_layers = [m for m in lm.modules() if isinstance(m, NativeSparseAttention)]
+    assert nsa_layers, "expected an NSA layer at n_layers=4"
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    muon_params, (adam_decay, adam_no_decay) = gpt._muon_param_split()
+    # every trainable param lands in exactly one group (NSA params included)
+    all_ids = {id(p) for p in lm.parameters() if p.requires_grad}
+    split_ids = (
+        {id(p) for p in muon_params}
+        | {id(p) for p in adam_decay["params"]}
+        | {id(p) for p in adam_no_decay["params"]}
+    )
+    assert split_ids == all_ids
+    # configure_optimizers actually builds the optimizers without raising
+    opts = gpt.configure_optimizers()
+    assert len(opts) == 2  # Muon + AdamW

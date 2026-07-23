@@ -29,14 +29,21 @@ def _embedding_param_ids(model: nn.Module) -> set[int]:
 
 
 def _non_muon_param_ids(model: nn.Module) -> set[int]:
-    # Params that must NOT go to Muon even though they are 2D: the Native
-    # Sparse Attention intra-block position encoding (cmp_pos) is a learned
-    # positional table, not a hidden linear map -- route it to AdamW
-    # (no-decay) like the embeddings. (Depthwise conv weights are 3D and are
-    # excluded by the ndim check below; Muon accepts only 2D matrices.)
-    return {
-        id(m.cmp_pos) for m in model.modules() if isinstance(m, NativeSparseAttention)
-    }
+    # Params that must NOT go to Muon even though they are 2D. Native Sparse
+    # Attention's positional signal today is PartialRoPE -- non-persistent
+    # sin/cos buffers, not parameters -- so NSA contributes nothing here. The
+    # getattr guard keeps this correct if a *learned* positional table
+    # (`cmp_pos`) is reintroduced: such a table is a lookup, not a hidden
+    # linear map, so it belongs on AdamW (no-decay) like the embeddings.
+    # (Depthwise conv weights are 3D and are excluded by the ndim check in the
+    # callers; Muon accepts only 2D matrices.)
+    ids = set()
+    for m in model.modules():
+        if isinstance(m, NativeSparseAttention):
+            pos = getattr(m, "cmp_pos", None)
+            if pos is not None:
+                ids.add(id(pos))
+    return ids
 
 
 def param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
