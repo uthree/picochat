@@ -1,5 +1,7 @@
-# Quick 200m experiment: core corpus slices (per-source limits), block 2048,
-# to /workspace (Network Storage). Corpus hygiene on.
+# Quick 200m experiment: core public corpus slices (per-source limits),
+# block 2048, to /workspace. Corpus hygiene on. No val split (val_fraction's
+# slice-split form isn't supported under streaming; benchmark_eval tracks
+# quality during training instead).
 tokenizer: /workspace/picochat/weights/tokenizer.json
 output_dir: /workspace/picochat/data/200m
 streaming: true
@@ -9,9 +11,9 @@ filter:
     minhash_dedup: true
     decontaminate: true
 datasets:
-    - { preset: fineweb-edu,    output: fineweb-edu,    val_output: fineweb-edu.val,  val_fraction: 0.01, limit: 150000 }
+    - { preset: fineweb-edu,    output: fineweb-edu,    limit: 150000 }
     - { preset: cosmopedia,     output: cosmopedia,     limit: 80000 }
-    - { preset: wikipedia-en,   output: wikipedia-en,   val_output: wikipedia-en.val, val_fraction: 0.01, limit: 80000 }
+    - { preset: wikipedia-en,   output: wikipedia-en,   limit: 80000 }
     - { preset: fineweb-edu-ja, output: fineweb-edu-ja, limit: 80000 }
     - { preset: wikipedia-ja,   output: wikipedia-ja,   limit: 60000 }
     - { preset: the-stack-smol, output: the-stack-smol, limit: 50000 }

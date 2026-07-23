@@ -18,9 +18,6 @@ data:
         - { path: wikipedia-ja, weight: 2.0 }
         - { path: the-stack-smol, weight: 3.0 }
         - { path: python-codes, weight: 1.0 }
-    val_bin:
-        - fineweb-edu.val
-        - wikipedia-en.val
 optim:
     lr: 3.0e-4
     weight_decay: 0.1
