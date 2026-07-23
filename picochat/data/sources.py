@@ -9,6 +9,7 @@ conversation sources for SFT (scripts/sft_setup.py). Tokenizing, packing and
 loading the results live in picochat.data.dataloader.
 """
 
+import os
 from dataclasses import dataclass, field, replace
 from typing import Callable, Iterator
 
@@ -250,12 +251,50 @@ CHAT_PRESETS: dict[str, ChatDatasetSpec] = {
 }
 
 
+def _iter_local_jsonl(path: str, limit: int | None) -> Iterator[list[dict]]:
+    """Conversations from a local JSONL file: one {"messages": [...]} per line
+    (a bare [...] list is also accepted). Lets curated seed sets -- safety /
+    identity / refusal examples that must ship in the repo, not the Hub -- mix
+    into the SFT recipe alongside Hub datasets (spec.path with a "jsonl:" or
+    file-path form; see chat_spec_from_entry)."""
+    import json
+
+    with open(path) as f:
+        for i, line in enumerate(f):
+            if limit is not None and i >= limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            messages = rec["messages"] if isinstance(rec, dict) else rec
+            if messages:
+                yield messages
+
+
+def _is_local_jsonl(spec: ChatDatasetSpec) -> str | None:
+    """The local file path a ChatDatasetSpec points at, or None for a Hub
+    dataset. A spec is local when its path starts with "jsonl:" or names an
+    existing .jsonl file."""
+    path = spec.path
+    if path.startswith("jsonl:"):
+        return path[len("jsonl:") :]
+    if path.endswith(".jsonl") and os.path.exists(path):
+        return path
+    return None
+
+
 def iter_conversations(
     spec: ChatDatasetSpec,
     streaming: bool = True,
     limit: int | None = None,
 ) -> Iterator[list[dict]]:
-    """Yield one conversation (a list of {"role", "content"} dicts) at a time."""
+    """Yield one conversation (a list of {"role", "content"} dicts) at a time,
+    from a Hub dataset or a local JSONL seed file (see _is_local_jsonl)."""
+    local = _is_local_jsonl(spec)
+    if local is not None:
+        yield from _iter_local_jsonl(local, limit)
+        return
     ds = load_dataset(spec.path, spec.name, split=spec.split, streaming=streaming)
     if limit is not None:
         ds = ds.take(limit) if streaming else ds.select(range(min(limit, len(ds))))

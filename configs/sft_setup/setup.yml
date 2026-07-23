@@ -16,3 +16,11 @@ datasets:
     - { preset: smoltalk-multilingual, output: smoltalk-multilingual.pt }
     - { preset: magpie-ja, output: magpie-ja.pt }
     - { preset: aya-ko, output: aya-ko.pt }
+    # Curated in-repo seed sets (path: jsonl:<file> reads a local
+    # {"messages": [...]} JSONL; see picochat.data.sources). These teach the
+    # assistant its own identity/limitations and to refuse clearly harmful
+    # requests while still helping with benign ones. They are tiny, so weight
+    # them up when composing the SFT mix in sft_train.py (data.train_weights)
+    # rather than relying on their raw example count.
+    - { path: "jsonl:data_seeds/identity.jsonl", output: identity.pt }
+    - { path: "jsonl:data_seeds/safety.jsonl", output: safety.pt }
