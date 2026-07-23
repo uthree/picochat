@@ -1,0 +1,23 @@
+# SFT smoke: fine-tune the pretrain smoke checkpoint on a small chat mix.
+tokenizer: /workspace/picochat/weights/tok-smoke.json
+init_from: /workspace/picochat/weights/smoke/last.ckpt
+output_dir: /workspace/picochat/weights/smoke-sft
+data:
+    data_dir: /workspace/picochat/data/smoke-sft
+    datasets:
+        - { path: smoltalk.pt, weight: 1.0 }
+        - { path: identity.pt, weight: 0.3 }
+        - { path: safety.pt, weight: 0.3 }
+    val_path: smoltalk.val.pt
+optim:
+    lr: 1.0e-5
+    max_steps: 150
+    warmup_steps: 15
+trainer:
+    batch_size: 8
+    accumulate: 1
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 2
+    val_check_interval: 75
+    compile: false

@@ -1,0 +1,10 @@
+tokenizer: /workspace/picochat/weights/tok-smoke.json
+output_dir: /workspace/picochat/data/smoke-sft
+max_length: 512
+streaming: true
+datasets:
+    - { preset: smoltalk, output: smoltalk.pt, limit: 4000 }
+    - { preset: smoltalk, output: smoltalk.val.pt, split: test, limit: 300 }
+    # curated in-repo seed sets (identity/safety) -- exercises the local JSONL source
+    - { path: "jsonl:data_seeds/identity.jsonl", output: identity.pt }
+    - { path: "jsonl:data_seeds/safety.jsonl", output: safety.pt }

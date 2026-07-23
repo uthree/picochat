@@ -1,0 +1,17 @@
+tokenizer: /workspace/picochat/weights/tok-smoke.json
+init_from: /workspace/picochat/weights/smoke-sft/last.ckpt
+output_dir: /workspace/picochat/weights/smoke-dpo
+data:
+    train: /workspace/picochat/data/smoke-dpo/pairs.jsonl
+    max_length: 512
+optim:
+    beta: 0.1
+    lr: 5.0e-7
+    max_steps: 20
+    warmup_steps: 3
+trainer:
+    batch_size: 2
+    accumulate: 1
+    precision: bf16-mixed
+    num_workers: 0
+    compile: false

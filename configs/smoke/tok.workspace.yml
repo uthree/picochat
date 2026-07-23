@@ -1,0 +1,6 @@
+output: /workspace/picochat/weights/tok-smoke.json
+vocab_size: 4096
+total_chars: 5000000
+streaming: true
+data:
+    - { preset: tinystories, weight: 1 }

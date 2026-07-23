@@ -1,0 +1,11 @@
+tokenizer: /workspace/picochat/weights/tok-smoke.json
+output_dir: /workspace/picochat/data/smoke
+streaming: true
+block_size: 256
+# corpus hygiene smoke: exercise the dedup/decontam filter path too
+filter:
+    exact_dedup: true
+    minhash_dedup: true
+datasets:
+    - { preset: tinystories, output: tinystories, limit: 8000 }
+    - { preset: tinystories, output: tinystories.val, split: validation, limit: 500 }
