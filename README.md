@@ -260,6 +260,12 @@ ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
   identical to plain greedy decoding
 - [Muon](https://kellerjordan.github.io/posts/muon/) optimizer for the hidden
   matrices, AdamW for embeddings/heads
+- [Checkpoint averaging](https://arxiv.org/abs/2203.05482) ("model soup"):
+  `scripts/avg_ckpts.py` uniformly averages several late-run checkpoints into
+  one for a cheap generalization bump (also subsumes EMA)
+- Long-context continual pretraining (`configs/base_train/longctx.yml`):
+  warm-start from the base run and continue on longer rows -- the GDN-2 /
+  NSA hybrid is built for it (fixed-size recurrent state + sparse attention)
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
   chat format
 - Tool calling (Hermes / Qwen2.5-style function calling): tools declared to

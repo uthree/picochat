@@ -1,0 +1,66 @@
+# Long-context continual pretraining: warm-start from a base checkpoint and
+# keep training on longer rows. The NSA + GDN-2 hybrid is built for long
+# context (linear-attention layers carry unbounded history in a fixed state;
+# the sparse-attention layers pay only for selected/window blocks), so this
+# stage is where that capacity is actually exercised.
+#
+#   1. Repack the corpus at the longer block_size:
+#      (edit configs/base_setup/default.yml block_size to 65536, or make a copy)
+#      uv run scripts/base_setup.py --config configs/base_setup/longctx.yml
+#   2. Continue training from the base run:
+#      uv run scripts/base_train.py --config configs/base_train/longctx.yml
+#
+# init_from loads the base weights; the GDN-2 layers are position-agnostic and
+# the NSA partial-RoPE tables are rebuilt at the new max_seq_len from the same
+# rope_base (buffers, not checkpointed -- see MODEL_OVERRIDES in sft_train),
+# so no learned tensor changes shape and the warm-start is clean.
+
+tokenizer: weights/tokenizer.json
+output_dir: weights/base-longctx
+init_from: weights/base/last.ckpt # continue from the base run
+
+model:
+    size: 1b
+    # 64k context: 4x the base run's 16k rows. Must exceed data.block_size.
+    max_seq_len: 65536
+    grad_checkpoint: true # long rows are memory-heavy; recompute activations
+
+data:
+    data_dir: data
+    block_size: 65536 # must match the repacked shards (configs/base_setup/longctx.yml)
+
+    datasets:
+        # Favor the genuinely long-form sources at long context -- short docs
+        # packed into a 64k row just teach packing, not long-range modeling.
+        - { path: the-stack-smol, weight: 3.0 } # long raw source files
+        - { path: textbooks, weight: 2.0 } # long-form books
+        - { path: cosmopedia, weight: 2.0 }
+        - { path: fineweb-edu, weight: 2.0 }
+        - { path: wikipedia-en, weight: 2.0 }
+        - { path: syosetu, weight: 1.0 } # long Japanese documents
+        - { path: fineweb-edu-ja, weight: 1.0 }
+    val_bin:
+        - textbooks.val
+        - cosmopedia.val
+        - wikipedia-en.val
+
+optim:
+    # Lower LR for a short continuation: a context-length adaptation, not a
+    # fresh run. ~10k steps at 65,536 tokens/update is ~0.65B tokens.
+    lr: 3.0e-5
+    weight_decay: 0.1
+    warmup_steps: 500
+    max_steps: 10000
+
+trainer:
+    # One 64k row per micro-batch; accumulate to a 131,072-token update.
+    batch_size: 1
+    accumulate: 2
+    grad_clip: 1.0
+    precision: bf16-mixed
+    num_workers: 4
+    val_check_interval: 2000
+    benchmark_eval:
+        tasks: [hellaswag, arc_easy]
+        limit: 300
+        every_n_steps: 2000
