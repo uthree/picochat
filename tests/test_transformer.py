@@ -3,8 +3,8 @@ import math
 import pytest
 import torch
 
-from picochat.gpt import Transformer, TransformerLM
-from picochat.param_estimate import estimate_num_params
+from picochat.model import Transformer, TransformerLM
+from picochat.model.estimate import estimate_num_params
 
 
 # ---------------------------------------------------------------------------
@@ -39,8 +39,13 @@ def test_transformer_decode_pos_advances():
 def test_transformer_incremental_matches_full():
     torch.manual_seed(0)
     model = Transformer(
-        d_model=32, n_heads=4, n_layers=4, layers_per_block=2, window_size=8,
-        sel_block=4, n_selected=4,
+        d_model=32,
+        n_heads=4,
+        n_layers=4,
+        layers_per_block=2,
+        window_size=8,
+        sel_block=4,
+        n_selected=4,
     ).eval()
     x = torch.randn(1, 5, 32)
     full = model(x)
@@ -77,8 +82,13 @@ def test_transformer_packed_first_document_matches_standalone():
     # pools RoPE'd keys and so depends on absolute position, not just the offset.
     torch.manual_seed(0)
     model = Transformer(
-        d_model=32, n_heads=4, n_layers=4, layers_per_block=2, window_size=8,
-        sel_block=4, n_selected=4,
+        d_model=32,
+        n_heads=4,
+        n_layers=4,
+        layers_per_block=2,
+        window_size=8,
+        sel_block=4,
+        n_selected=4,
     ).eval()
     a, b = torch.randn(1, 4, 32), torch.randn(1, 6, 32)
     packed = torch.cat([a, b], dim=1)
@@ -91,8 +101,13 @@ def test_transformer_packed_first_document_matches_standalone():
 def test_transformer_doc_ids_blocks_cross_document_attention():
     torch.manual_seed(0)
     model = Transformer(
-        d_model=32, n_heads=4, n_layers=4, layers_per_block=2, window_size=8,
-        sel_block=4, n_selected=4,
+        d_model=32,
+        n_heads=4,
+        n_layers=4,
+        layers_per_block=2,
+        window_size=8,
+        sel_block=4,
+        n_selected=4,
     ).eval()
     x = torch.randn(1, 8, 32)
     doc_ids = torch.tensor([[0] * 4 + [1] * 4])
@@ -174,7 +189,7 @@ def test_init_residual_projections_are_depth_scaled():
 
 
 def test_init_gdn_gate_params_reset():
-    # GatedDeltaNet.reset_parameters restores the Mamba2 gate init after the
+    # GatedDeltaNet2.reset_parameters restores the Mamba2 gate init after the
     # generic normal init: A_log ~ log(uniform(1,16)) (so exp(A_log) in [1,16]),
     # dt_bias zeroed, output-norm weight ones.
     lm = TransformerLM(vocab_size=100, d_model=32, n_heads=4, n_layers=4)
@@ -212,17 +227,34 @@ def _actual_params(lm) -> int:
             vocab_size=50, d_model=64, n_heads=8, n_layers=4, layers_per_block=2
         ),
         dict(  # MoE + NSA
-            vocab_size=50, d_model=64, n_heads=8, n_layers=4, layers_per_block=2,
-            n_experts=4, d_expert=16,
+            vocab_size=50,
+            d_model=64,
+            n_heads=8,
+            n_layers=4,
+            layers_per_block=2,
+            n_experts=4,
+            d_expert=16,
         ),
         dict(  # GQA
-            vocab_size=50, d_model=48, n_heads=6, n_layers=4, n_kv_heads=2,
+            vocab_size=50,
+            d_model=48,
+            n_heads=6,
+            n_layers=4,
+            n_kv_heads=2,
             layers_per_block=2,
         ),
         dict(  # LatentMoE + shared experts + MTP
-            vocab_size=50, d_model=64, n_heads=8, n_layers=6, layers_per_block=3,
-            n_experts=6, d_expert=16, d_latent=32, share_experts=True,
-            n_mtp=2, mtp_rank=8,
+            vocab_size=50,
+            d_model=64,
+            n_heads=8,
+            n_layers=6,
+            layers_per_block=3,
+            n_experts=6,
+            d_expert=16,
+            d_latent=32,
+            share_experts=True,
+            n_mtp=2,
+            mtp_rank=8,
         ),
     ],
 )

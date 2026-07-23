@@ -1,4 +1,4 @@
-"""picochat.kernels: the optional HF-Hub kernel integration. fused_loss is
+"""picochat.training.kernels: the optional HF-Hub kernel integration. fused_loss is
 opt-in; without CUDA (or the `kernels` package) it must fail loudly rather
 than silently training differently, and when the kernel is genuinely usable
 the fused loss must match the plain one."""
@@ -10,10 +10,10 @@ import types
 import pytest
 import torch
 
-import picochat.kernels as K
-from picochat.gpt import TransformerLM
-from picochat.kernels import fused_linear_cross_entropy_available
-from picochat.trainer import GPT, SFTModule
+import picochat.training.kernels as K
+from picochat.model import TransformerLM
+from picochat.training.kernels import fused_linear_cross_entropy_available
+from picochat.training import GPT, SFTModule
 
 
 def _tiny_lm(vocab_size: int = 40) -> TransformerLM:

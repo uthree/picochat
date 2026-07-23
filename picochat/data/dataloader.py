@@ -1,6 +1,6 @@
 """Tokenized training data: packing, on-disk formats, Datasets, samplers and
 the LightningDataModule (nanochat's dataloader.py analogue; the raw HF
-sources live in picochat.dataset).
+sources live in picochat.data.sources).
 
 Everything here packs variable-length token sequences into fixed-length rows
 instead of padding each one on its own (MosaicBERT-style sequence packing,
@@ -29,7 +29,6 @@ from pathlib import Path
 
 import lightning as L
 import numpy as np
-import tiktoken
 import torch
 from torch import Tensor
 from torch.utils.data import (
@@ -40,7 +39,7 @@ from torch.utils.data import (
     Sampler,
 )
 
-from picochat.tokenizer import encode_conversation
+from picochat.tokenizer import Tokenizer, encode_conversation
 
 
 def pack_bins(lengths: list[int], max_length: int) -> list[list[int]]:
@@ -457,9 +456,7 @@ class PretrainDataModule(L.LightningDataModule):
         # twice -- the standard, slightly-approximate trade.
         _, world_size = self._dist_info()
         sampler = (
-            DistributedSampler(self.val_ds, shuffle=False)
-            if world_size > 1
-            else None
+            DistributedSampler(self.val_ds, shuffle=False) if world_size > 1 else None
         )
         return DataLoader(
             self.val_ds,
@@ -525,7 +522,7 @@ class SFTDataset(Dataset):
     def __init__(
         self,
         conversations: list[list[dict]],
-        tokenizer: tiktoken.Encoding,
+        tokenizer: Tokenizer,
         max_length: int,
         pad_id: int,
     ):

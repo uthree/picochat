@@ -1,6 +1,6 @@
 """Isolated execution of untrusted, model-generated code for the RL reward.
 
-GRPO runs code the *policy* invented; `picochat.reward.run_tests` would otherwise
+GRPO runs code the *policy* invented; `picochat.rl.reward.run_tests` would otherwise
 execute it with the trainer's own user, filesystem, and network. This wraps
 execution in a [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
 sandbox: a fresh mount + network + pid namespace with only read-only system
@@ -60,8 +60,12 @@ def bwrap_works() -> bool:
         proc = subprocess.run(
             [
                 "bwrap",
-                "--ro-bind", "/usr", "/usr",
-                "--ro-bind", "/bin", "/bin",
+                "--ro-bind",
+                "/usr",
+                "/usr",
+                "--ro-bind",
+                "/bin",
+                "/bin",
                 "--unshare-all",
                 "--die-with-parent",
                 "/bin/true",
@@ -117,17 +121,33 @@ def _bwrap_argv(work_dir: str, argv: list[str]) -> list[str]:
         "--die-with-parent",
         "--new-session",  # own session: no terminal escape via TIOCSTI
         *_system_ro_binds(),
-        "--proc", "/proc",
-        "--dev", "/dev",
-        "--tmpfs", "/tmp",
-        "--bind", work_dir, work_dir,
-        "--chdir", work_dir,
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--bind",
+        work_dir,
+        work_dir,
+        "--chdir",
+        work_dir,
         "--clearenv",
-        "--setenv", "PATH", "/usr/bin:/bin",
-        "--setenv", "HOME", work_dir,
-        "--setenv", "TMPDIR", "/tmp",
-        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-        "--setenv", "LANG", "C.UTF-8",
+        "--setenv",
+        "PATH",
+        "/usr/bin:/bin",
+        "--setenv",
+        "HOME",
+        work_dir,
+        "--setenv",
+        "TMPDIR",
+        "/tmp",
+        "--setenv",
+        "PYTHONDONTWRITEBYTECODE",
+        "1",
+        "--setenv",
+        "LANG",
+        "C.UTF-8",
         "--",
         *argv,
     ]

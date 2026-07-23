@@ -11,7 +11,7 @@ import warnings
 
 import pytest
 
-from picochat import sandbox
+from picochat.rl import sandbox
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +70,11 @@ def test_fallback_scrubs_environment():
     sandbox.configure("none")
     with tempfile.TemporaryDirectory() as tmp:
         proc = sandbox.run(
-            [sys.executable, "-c", "import os; print(os.environ.get('SECRET','<unset>'))"],
+            [
+                sys.executable,
+                "-c",
+                "import os; print(os.environ.get('SECRET','<unset>'))",
+            ],
             work_dir=tmp,
             timeout=10,
         )

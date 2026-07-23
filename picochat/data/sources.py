@@ -6,7 +6,7 @@ DatasetSpec/TEXT_PRESETS/Mixture describe pretraining text sources; both
 tokenizer training (scripts/tok_train.py) and preprocessing
 (scripts/base_setup.py) read from them. ChatDatasetSpec/CHAT_PRESETS describe
 conversation sources for SFT (scripts/sft_setup.py). Tokenizing, packing and
-loading the results live in picochat.dataloader.
+loading the results live in picochat.data.dataloader.
 """
 
 from dataclasses import dataclass, field, replace

@@ -1,10 +1,10 @@
 """Tokenize HF chat datasets (e.g. HuggingFaceTB/smoltalk) into packed SFT
-tensors ready for picochat.dataloader.SFTTensorDataset.
+tensors ready for picochat.data.dataloader.SFTTensorDataset.
 
 Every conversation is tokenized via picochat.tokenizer.encode_conversation
 (ChatML rendering, <|pad|>-based loss masking -- see that module), and
 the surviving conversations are packed several-per-sequence into fixed-length
-rows (MosaicBERT-style sequence packing, picochat.dataloader.pack_examples)
+rows (MosaicBERT-style sequence packing, picochat.data.dataloader.pack_examples)
 saved as a single {input_ids, labels, doc_ids, pad_id} tensor bundle in one
 .pt file. SFT corpora are small enough to fit in memory, unlike
 base_setup.py's sharded token-stream binaries for pretraining, so no shard
@@ -27,8 +27,8 @@ import torch
 import yaml
 from tqdm import tqdm
 
-from picochat.dataloader import pack_examples
-from picochat.dataset import (
+from picochat.data.dataloader import pack_examples
+from picochat.data.sources import (
     ChatDatasetSpec,
     chat_spec_from_entry,
     iter_conversations,
@@ -58,7 +58,7 @@ def process(
 ) -> tuple[int, int]:
     """Tokenize every conversation of `spec`, pack the surviving ones into
     fixed-length sequences (several conversations per sequence, see
-    picochat.dataloader.pack_examples) and save them as a single
+    picochat.data.dataloader.pack_examples) and save them as a single
     {input_ids, labels, doc_ids, pad_id} bundle at `output`. Returns (n_kept,
     n_dropped); a conversation is dropped when truncation to max_length left
     no assistant turn to train on (see encode_conversation).

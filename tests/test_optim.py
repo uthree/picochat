@@ -3,8 +3,8 @@ the rest, split by LMTrainerMixin._muon_param_split (see picochat/trainer.py).""
 
 import torch
 
-from picochat.gpt import TransformerLM
-from picochat.trainer import GPT
+from picochat.model import TransformerLM
+from picochat.training import GPT
 
 
 def _moe_gpt() -> GPT:
@@ -29,7 +29,12 @@ def test_muon_param_split_covers_everything_once():
 
     # fused MoE weights (router + flattened 2D experts) are Muon-optimized
     moe = lm.transformer.layers[0].moe
-    for w in (moe.weight_router, moe.bank.weight_up, moe.bank.weight_gate, moe.bank.weight_down):
+    for w in (
+        moe.weight_router,
+        moe.bank.weight_up,
+        moe.bank.weight_gate,
+        moe.bank.weight_down,
+    ):
         assert id(w) in muon_ids
     # torch.optim.Muon accepts exactly 2D params, nothing else
     assert all(p.ndim == 2 for p in muon_params)

@@ -2,7 +2,7 @@ tokenizer: weights/tokenizer.json
 output_dir: data
 streaming: false # small datasets: download once, then iterate from local cache
 # Rows are packed to block_size+1 tokens; must match
-# configs/base_train/base.yml's data.block_size.
+# configs/base_train/default.yml's data.block_size.
 #
 # Single-stage base pretraining corpus (the old stage 1 / stage 2 split is
 # merged: one setup, one training run, one checkpoint). Selection criteria:

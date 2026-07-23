@@ -1,43 +1,35 @@
-"""Training-side LightningModules for the model in gpt.py: GPT (pretraining)
-and SFTModule (supervised fine-tuning), plus the LMTrainerMixin scaffolding
-they share -- Muon/AdamW optimizer wiring, the warmup+cosine LR schedule
-applied by hand under manual optimization, and greedy KV-cache generation.
-(GRPOModule in picochat.grpo builds on the same mixin.)
-The two modules differ only in how they build the batch into a next-token
-cross-entropy loss, so that part stays in each class:
+"""Training-side LightningModules for the model in picochat.model: GPT
+(pretraining) and SFTModule (supervised fine-tuning), plus the LMTrainerMixin
+scaffolding they share -- Muon/AdamW optimizer wiring (see optim.py), the
+warmup+cosine LR schedule applied by hand under manual optimization, and
+greedy KV-cache generation. (GRPOModule in picochat.rl.grpo builds on the
+same mixin.) The two modules differ only in how they build the batch into a
+next-token cross-entropy loss, so that part stays in each class:
 
 - GPT trains on a single packed token stream (input == target, shifted
   internally), deriving per-token document ids from <|begin_of_text|>.
 - SFTModule trains against pre-computed (input_ids, labels) pairs from
-  picochat.dataloader, where labels already carry the loss mask (see
+  picochat.data.dataloader, where labels already carry the loss mask (see
   picochat.tokenizer.encode_conversation).
-
-The "muon" mode runs two optimizers side by side: torch.optim.Muon for the
-matrix-shaped hidden weights and torch.optim.AdamW for the rest (embeddings,
-lm head, 1-dim params) -- torch's Muon is Muon-only, unlike the previous
-in-repo implementation that embedded its own AdamW. Both subclasses already
-use manual optimization, so _optimizer_step owns the pair (see the
-global_step note there).
 """
 
-import math
 from contextlib import nullcontext
 
 import lightning as L
-import tiktoken
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel
 
-from picochat.gpt import TransformerLM, doc_ids_to_cu_seqlens
-from picochat.presets import build_lm
-from picochat.kernels import (
+from picochat.model.blocks import doc_ids_to_cu_seqlens
+from picochat.model.transformer import TransformerLM
+from picochat.tokenizer import Tokenizer
+from picochat.training.kernels import (
     fused_linear_cross_entropy,
     fused_linear_cross_entropy_available,
 )
+from picochat.training.optim import lr_lambda, muon_param_split, param_groups
 
 
 def can_compile() -> bool:
@@ -69,7 +61,7 @@ class LMTrainerMixin:
         min_lr_ratio: float,
         grad_clip: float | None,
         accumulate: int,
-        tokenizer=None,
+        tokenizer: Tokenizer | None = None,
         muon_weight_decay: float = 0.01,
         fused_loss: bool = False,
     ) -> None:
@@ -95,11 +87,11 @@ class LMTrainerMixin:
         # Set by configure_optimizers: per optimizer, the per-group base LRs
         # the schedule scales.
         self._base_lrs: list[list[float]] = []
-        # Optional tiktoken Encoding used to turn generated token ids back into
+        # Optional tokenizer used to turn generated token ids back into
         # readable text (e.g. for TensorBoard generation samples).
         self.tokenizer = tokenizer
-        # Liger fused lm-head + cross-entropy (see picochat.kernels): the
-        # single biggest memory lever at 128k vocab, but opt-in -- the
+        # Liger fused lm-head + cross-entropy (see picochat.training.kernels):
+        # the single biggest memory lever at a 64k vocab, but opt-in -- the
         # chunked kernel trades some step time for that memory on smaller
         # GPUs, so it should be a deliberate choice when memory-bound, not a
         # silent default. True insists (a loud error beats silently training
@@ -160,79 +152,11 @@ class LMTrainerMixin:
             return model.no_sync()
         return nullcontext()
 
-    def _embedding_param_ids(self) -> set[int]:
-        """ids of the embedding parameters -- excluded from weight decay and,
-        under Muon, routed to AdamW like the input/output layers."""
-        return {
-            id(p)
-            for m in self.model.modules()
-            if isinstance(m, nn.Embedding)
-            for p in m.parameters()
-        }
-
     def _param_groups(self) -> list[dict]:
-        # Apply weight decay only to weights with 2+ dims. Exclude biases (1-dim)
-        # and embeddings (rms_norm has no learnable params, so nothing to exclude there).
-        embed_ids = self._embedding_param_ids()
-        decay, no_decay = [], []
-        for p in self.model.parameters():
-            if not p.requires_grad:
-                continue
-            if p.ndim < 2 or id(p) in embed_ids:
-                no_decay.append(p)
-            else:
-                decay.append(p)
-        return [
-            {"params": decay, "weight_decay": self.weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
-        ]
-
-    def _non_muon_param_ids(self) -> set[int]:
-        # Params that must NOT go to Muon even though they are 2D: the Native
-        # Sparse Attention intra-block position encoding (cmp_pos) is a learned
-        # positional table, not a hidden linear map -- route it to AdamW
-        # (no-decay) like the embeddings. (Depthwise conv weights are 3D and are
-        # excluded by the ndim check below; Muon accepts only 2D matrices.)
-        from picochat.sparse_attn import NativeSparseAttention
-
-        return {
-            id(m.cmp_pos)
-            for m in self.model.modules()
-            if isinstance(m, NativeSparseAttention)
-        }
+        return param_groups(self.model, self.weight_decay)
 
     def _muon_param_split(self) -> tuple[list, list[dict]]:
-        # Muon orthogonalizes matrix-shaped *hidden* weights. The embedding and
-        # lm heads (input/output layers, per the Muon authors), 1-dim params
-        # (biases, norms, gates, A_log/dt_bias), 3-dim depthwise conv weights,
-        # and the NSA positional table go to the AdamW running alongside it
-        # instead, keeping the same decay split as _param_groups: no decay for
-        # embeddings/1-dim/positional, decay for lm-head and conv matrices.
-        # Everything else -- attention/FFN/mixer projections, the router, the
-        # NSA gate/compression MLPs, and the fused MoE expert weights (stored 2D
-        # exactly because torch.optim.Muon accepts nothing else) -- is Muon's.
-        embed_ids = self._embedding_param_ids()
-        no_decay_ids = embed_ids | self._non_muon_param_ids()
-        # The lm head is the model's output projection -> AdamW, not Muon (Muon
-        # skips input/output layers). The MTP heads' transforms are hidden
-        # d_model x d_model matrices (they reuse this same output projection), so
-        # they go to Muon like every other hidden weight.
-        head_ids = {id(p) for p in self.model.lmhead.parameters()}
-        muon, adam_decay, adam_no_decay = [], [], []
-        for p in self.model.parameters():
-            if not p.requires_grad:
-                continue
-            if p.ndim < 2 or id(p) in no_decay_ids:
-                adam_no_decay.append(p)
-            elif id(p) in head_ids or p.ndim != 2:
-                # lm head, and any >2D weight (depthwise conv) Muon can't take
-                adam_decay.append(p)
-            else:
-                muon.append(p)
-        return muon, [
-            dict(params=adam_decay, weight_decay=self.weight_decay),
-            dict(params=adam_no_decay, weight_decay=0.0),
-        ]
+        return muon_param_split(self.model, self.weight_decay)
 
     def configure_optimizers(self):
         if self.optimizer_name == "muon":
@@ -264,16 +188,7 @@ class LMTrainerMixin:
         return optimizers
 
     def _lr_lambda(self, step: int) -> float:
-        # Linear warmup -> cosine decay (down to min_lr_ratio).
-        if step < self.warmup_steps:
-            return (step + 1) / max(1, self.warmup_steps)
-        if self.max_steps is None or step >= self.max_steps:
-            return self.min_lr_ratio
-        progress = (step - self.warmup_steps) / max(
-            1, self.max_steps - self.warmup_steps
-        )
-        coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * coeff
+        return lr_lambda(step, self.warmup_steps, self.max_steps, self.min_lr_ratio)
 
     def _apply_lr(self, opts: list) -> None:
         # Scale each param group's base LR by the warmup/cosine schedule. Keyed on
@@ -323,7 +238,7 @@ class LMTrainerMixin:
         """Cross-entropy of a single output head (weight: (vocab, d_model)) over
         already-aligned hidden states and target ids. Uses the fused lm-head +
         cross-entropy kernel on CUDA (the (b*l, vocab) logits are never
-        materialized -- the big memory lever at 128k vocab), a plain
+        materialized -- the big memory lever at a 64k vocab), a plain
         F.cross_entropy otherwise."""
         hidden = hidden.reshape(-1, hidden.shape[-1])
         target_ids = target_ids.reshape(-1)
@@ -331,9 +246,7 @@ class LMTrainerMixin:
             return fused_linear_cross_entropy(
                 hidden, weight, target_ids, ignore_index=self.pad_idx
             )
-        return F.cross_entropy(
-            hidden @ weight.T, target_ids, ignore_index=self.pad_idx
-        )
+        return F.cross_entropy(hidden @ weight.T, target_ids, ignore_index=self.pad_idx)
 
     def _next_token_loss(
         self, input_ids: Tensor, targets: Tensor, doc_ids, cu_seqlens
@@ -604,7 +517,7 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         # compare against labels shifted left by one -- labels is already
         # input-aligned (see picochat.tokenizer.encode_conversation), not
         # pre-shifted. doc_ids marks which packed conversation each token
-        # belongs to (see picochat.dataloader.pack_examples) so attention
+        # belongs to (see picochat.data.dataloader.pack_examples) so attention
         # stays within one conversation; its masks are built here, outside
         # the compiled forward -- see Transformer.packed_masks.
         cu_seqlens = None
@@ -623,72 +536,3 @@ class SFTModule(LMTrainerMixin, L.LightningModule):
         # rank on the all-rank mean, not rank 0's shard.
         self.log("val_loss", loss, prog_bar=True, sync_dist=True)
         return loss
-
-
-def _model_config_from_ckpt(ckpt, checkpoint: str) -> dict:
-    """Pull and validate the saved `model_config` (the build_lm recipe
-    GPT.__init__ stores) from a loaded Lightning checkpoint."""
-    if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
-        raise ValueError(f"{checkpoint} doesn't look like a Lightning checkpoint")
-    model_config = (ckpt.get("hyper_parameters") or {}).get("model_config")
-    if model_config is None:
-        raise ValueError(
-            f"{checkpoint} has no 'model_config' hyperparameter -- it predates "
-            "GPT.__init__ saving it, so its architecture can't be rebuilt. "
-            "Retrain to produce a checkpoint with model_config."
-        )
-    return model_config
-
-
-def load_lm_from_checkpoint(
-    checkpoint: str,
-    vocab_size: int,
-    overrides: dict | None = None,
-    ckpt=None,
-) -> tuple[TransformerLM, dict]:
-    """Rebuild a bare TransformerLM from a checkpoint's saved `model_config`,
-    apply `overrides` (e.g. max_seq_len for continual learning), load
-    its weights (stripping GPT's `model.` state_dict prefix), and return
-    (lm, model_config). Pass an already-loaded `ckpt` dict when several models
-    come from one file (GRPO's policy + reference). Used by sft_train/grpo_train;
-    load_gpt_checkpoint is the GPT-wrapping variant for inference CLIs."""
-    if ckpt is None:
-        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    model_config = {**_model_config_from_ckpt(ckpt, checkpoint), **(overrides or {})}
-    lm = build_lm(**{**model_config, "vocab_size": vocab_size})
-    # GPT's state_dict keys are "model.*" (the wrapped TransformerLM) plus the
-    # trainer scaffolding around it; strip the prefix to load into a bare lm.
-    prefix = "model."
-    state = {
-        k[len(prefix) :]: v
-        for k, v in ckpt["state_dict"].items()
-        if k.startswith(prefix)
-    }
-    lm.load_state_dict(state)
-    return lm, model_config
-
-
-def load_gpt_checkpoint(
-    checkpoint: str, tokenizer_path: str, device: torch.device | str = "cpu"
-) -> tuple[GPT, tiktoken.Encoding]:
-    """Load a GPT + tokenizer for inference from a Lightning checkpoint.
-
-    The architecture is rebuilt from the checkpoint's own `model_config`
-    hyperparameter (the build_lm() recipe GPT.__init__ saves), so the caller
-    never has to pass matching flags by hand. Used by scripts/chat.py
-    and scripts/base_eval.py; requires a checkpoint produced by the current
-    scripts/base_train.py or sft_train.py."""
-    from picochat.tokenizer import load_tokenizer
-
-    tokenizer = load_tokenizer(tokenizer_path)
-
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    model_config = _model_config_from_ckpt(ckpt, checkpoint)
-    print(f"using model_config from checkpoint: {model_config}", flush=True)
-    lm = build_lm(**{**model_config, "vocab_size": tokenizer.n_vocab})
-
-    gpt = GPT(lm, compile=False, tokenizer=tokenizer, model_config=model_config)
-    gpt.load_state_dict(ckpt["state_dict"])
-    gpt.eval()
-    gpt.to(device)
-    return gpt, tokenizer

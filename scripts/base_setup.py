@@ -3,7 +3,7 @@
 Each document is encoded and wrapped in <|begin_of_text|>...<|end_of_text|>,
 then whole documents are packed into fixed-length rows of block_size+1 tokens
 (MosaicBERT-style sequence packing, greedy best-fit -- see
-picochat.dataloader.pack_docs; documents longer than one row are split into
+picochat.data.dataloader.pack_docs; documents longer than one row are split into
 row-sized chunks, each continuation prefixed with <|begin_of_text|>). The rows
 are split across shard files (00000.bin, 00001.bin, ...) under one output
 directory per dataset, so no single file grows with the corpus, plus a
@@ -37,14 +37,14 @@ import yaml
 from datasets import get_dataset_split_names, load_dataset_builder
 from tqdm import tqdm
 
-from picochat.dataloader import (  # DTYPE: uint32; shared with the reader
+from picochat.data.dataloader import (  # DTYPE: uint32; shared with the reader
     DEFAULT_SHARD_TOKENS,
     DTYPE,
     ShardWriter,
     pack_docs,
     write_meta,
 )
-from picochat.dataset import (
+from picochat.data.sources import (
     DatasetSpec,
     holdout_splits,
     iter_texts,
@@ -129,7 +129,7 @@ def _split_example_count(spec: DatasetSpec) -> int:
 
 def expand_val_fraction(entries: list[dict]) -> list[dict]:
     """Expand a `val_fraction`/`val_output` entry into a plain train + val pair
-    (see picochat.dataset.holdout_splits), so the rest of the pipeline
+    (see picochat.data.sources.holdout_splits), so the rest of the pipeline
     never has to know about held-out splits. For datasets with no dedicated
     validation split (e.g. Wikipedia, cosmopedia -- only "train"), this is
     how a val set is carved out instead of falling back to a different

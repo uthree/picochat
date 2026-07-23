@@ -24,8 +24,8 @@ from picochat.config import (
     resolve_num_devices,
     scale_for_devices,
 )
-from picochat.dataloader import PretrainDataModule, SFTTensorDataset
-from picochat.trainer import SFTModule, load_lm_from_checkpoint
+from picochat.data.dataloader import PretrainDataModule, SFTTensorDataset
+from picochat.training import SFTModule, load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
 
@@ -170,7 +170,7 @@ def main():
         warmup_steps=warmup_steps,
         max_steps=max_steps,
         compile=trainer_cfg.get("compile", None),
-        # Opt-in memory saver: Liger fused cross-entropy (see picochat.kernels
+        # Opt-in memory saver: Liger fused cross-entropy (see picochat.training.kernels
         # and the matching comment in base_train.py).
         fused_loss=trainer_cfg.get("fused_loss", False),
         tokenizer=tokenizer,

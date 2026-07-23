@@ -20,9 +20,9 @@ import json
 
 import torch
 
-from picochat.engine import resolve_device
-from picochat.tasks import TASKS, evaluate_task
-from picochat.trainer import load_gpt_checkpoint
+from picochat.inference.engine import resolve_device
+from picochat.evals.tasks import TASKS, evaluate_task
+from picochat.training import load_gpt_checkpoint
 
 
 def main():

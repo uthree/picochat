@@ -29,10 +29,8 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from tiktoken import Encoding
-
-from picochat.engine import SamplingConfig, generate
-from picochat.tokenizer import render_chat_prompt
+from picochat.inference.engine import SamplingConfig, generate
+from picochat.tokenizer import Tokenizer as Encoding, render_chat_prompt
 
 
 class ChatMessage(BaseModel):

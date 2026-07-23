@@ -16,9 +16,9 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import Dataset
 
-from picochat.dataloader import PretrainDataModule
-from picochat.gpt import MixtureOfExperts, TransformerLM
-from picochat.trainer import GPT, LMTrainerMixin
+from picochat.data.dataloader import PretrainDataModule
+from picochat.model import MixtureOfExperts, TransformerLM
+from picochat.training import GPT, LMTrainerMixin
 
 
 def _init_pg(rank: int, world_size: int, init_file: str) -> None:

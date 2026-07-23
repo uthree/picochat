@@ -1,14 +1,12 @@
 import pytest
 import torch
 
-from picochat.sparse_attn import _HAS_FLA, NativeSparseAttention, PartialRoPE
+from picochat.model.sparse_attn import _HAS_FLA, NativeSparseAttention, PartialRoPE
 
 
 def _nsa(d_model=32, n_heads=4, **kw):
     # small blocks so tests exercise compression/selection on short sequences
-    defaults = dict(
-        n_kv_heads=1, block_size=4, n_selected=4, window=4, max_seq_len=256
-    )
+    defaults = dict(n_kv_heads=1, block_size=4, n_selected=4, window=4, max_seq_len=256)
     defaults.update(kw)
     return NativeSparseAttention(d_model, n_heads, **defaults)
 
@@ -142,7 +140,12 @@ _CUDA_OK = _HAS_FLA and torch.cuda.is_available()
 def _kernel_nsa():
     # group size 16 (16 q heads, MQA) as the fla kernels require
     return NativeSparseAttention(
-        256, 16, n_kv_heads=1, block_size=64, n_selected=4, window=128,
+        256,
+        16,
+        n_kv_heads=1,
+        block_size=64,
+        n_selected=4,
+        window=128,
         max_seq_len=1024,
     )
 

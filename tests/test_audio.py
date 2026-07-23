@@ -6,9 +6,9 @@ soft tokens."""
 import pytest
 import torch
 
-from picochat import audio
-from picochat.audio import AudioConfig, AudioEncoder, AudioProcessor
-from picochat.gpt import TransformerLM
+from picochat.model import audio
+from picochat.model.audio import AudioConfig, AudioEncoder, AudioProcessor
+from picochat.model import TransformerLM
 from picochat.tokenizer import AUDIO_TOKEN, IMAGE_TOKEN, SPECIAL_TOKENS, train_tokenizer
 
 SR = 16000

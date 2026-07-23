@@ -1,4 +1,4 @@
-"""GRPO post-training from a YAML recipe (see picochat.grpo, picochat.reward).
+"""GRPO post-training from a YAML recipe (see picochat.rl.grpo, picochat.rl.reward).
 
     python scripts/grpo_train.py --config configs/grpo/smoke.yml
 
@@ -11,7 +11,7 @@ from a JSONL file (one object per line):
     {"prompt": "<instruction>"}                 # no test -> judged by the LLM
 
 Each prompt is rendered as a single ChatML user turn; the model's reply is
-rewarded by picochat.reward (test pass/fail backbone + external judge for the
+rewarded by picochat.rl.reward (test pass/fail backbone + external judge for the
 untested ones). The judge is any OpenAI-compatible endpoint -- `vllm serve ...`
 in production, or the deterministic MockJudge for single-GPU verification.
 """
@@ -23,11 +23,11 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
-from picochat import sandbox
+from picochat.rl import sandbox
 from picochat.config import load_config
-from picochat.grpo import GRPOModule, grpo_collate, load_tasks
-from picochat.reward import HTTPJudge, MockJudge, RewardModel, RewardConfig
-from picochat.trainer import load_lm_from_checkpoint
+from picochat.rl.grpo import GRPOModule, grpo_collate, load_tasks
+from picochat.rl.reward import HTTPJudge, MockJudge, RewardModel, RewardConfig
+from picochat.training import load_lm_from_checkpoint
 from picochat.tokenizer import PAD_TOKEN, load_tokenizer
 
 
@@ -71,7 +71,9 @@ def main():
     # Rebuild policy + reference from the checkpoint's own model_config so they
     # start identical (KL begins at 0); load the file once for both.
     ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
-    policy, model_config = load_lm_from_checkpoint(init_from, tokenizer.n_vocab, ckpt=ckpt)
+    policy, model_config = load_lm_from_checkpoint(
+        init_from, tokenizer.n_vocab, ckpt=ckpt
+    )
     reference, _ = load_lm_from_checkpoint(init_from, tokenizer.n_vocab, ckpt=ckpt)
     model_config = {**model_config, "vocab_size": tokenizer.n_vocab}
 

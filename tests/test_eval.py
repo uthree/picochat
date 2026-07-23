@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from picochat.tasks import (
+from picochat.evals.tasks import (
     MCExample,
     TASKS,
     encode_choice,
@@ -13,7 +13,7 @@ from picochat.tasks import (
     score_requests,
     summarize,
 )
-from picochat.gpt import TransformerLM
+from picochat.model import TransformerLM
 from picochat.tokenizer import BOS_TOKEN, IM_START, SPECIAL_TOKENS
 
 

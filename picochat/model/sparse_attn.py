@@ -79,7 +79,9 @@ class PartialRoPE(nn.Module):
         self.max_seq_len = max_seq_len
         if rot > 0:
             t = torch.arange(max_seq_len)[:, None].float()
-            f = (base ** (torch.linspace(0.0, 1.0, rot // 2).repeat_interleave(2)))[None]
+            f = (base ** (torch.linspace(0.0, 1.0, rot // 2).repeat_interleave(2)))[
+                None
+            ]
             theta = t / f
             self.register_buffer("sin", theta.sin(), persistent=False)
             self.register_buffer("cos", theta.cos(), persistent=False)
@@ -164,10 +166,10 @@ class NativeSparseAttention(nn.Module):
         )
 
     def _qkv(self, x: Tensor, pos: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        b, l, _ = x.shape
-        q = self.proj_q(x).reshape(b, l, self.n_heads, self.d_head)
-        k = self.proj_k(x).reshape(b, l, self.n_kv_heads, self.d_head)
-        v = self.proj_v(x).reshape(b, l, self.n_kv_heads, self.d_head)
+        b, seq, _ = x.shape
+        q = self.proj_q(x).reshape(b, seq, self.n_heads, self.d_head)
+        k = self.proj_k(x).reshape(b, seq, self.n_kv_heads, self.d_head)
+        v = self.proj_v(x).reshape(b, seq, self.n_kv_heads, self.d_head)
         return self.rope(q, pos), self.rope(k, pos), v
 
     def _gates(self, x: Tensor) -> Tensor:
@@ -180,7 +182,9 @@ class NativeSparseAttention(nn.Module):
         return t.repeat_interleave(self.n_rep, dim=1) if self.n_rep > 1 else t
 
     # -- reference path ----------------------------------------------------
-    def _reference(self, q: Tensor, k: Tensor, v: Tensor, g: Tensor, q_pos: Tensor) -> Tensor:
+    def _reference(
+        self, q: Tensor, k: Tensor, v: Tensor, g: Tensor, q_pos: Tensor
+    ) -> Tensor:
         """Dense-masked pure-PyTorch NSA over ONE sequence segment, matching
         fla's kernel semantics exactly (see module docstring). q (b, Lq, HQ, d)
         and g (b, Lq, HQ, 3) cover the query positions `q_pos` (0-based within
@@ -221,9 +225,7 @@ class NativeSparseAttention(nn.Module):
             out_cmp = p_cmp @ self._rep(vc)
             # importance = p summed over the GQA group (selection is shared
             # across the group's query heads)
-            imp[..., :nb] = rearrange(
-                p_cmp, "b (h g) l n -> b h g l n", h=h
-            ).sum(2)
+            imp[..., :nb] = rearrange(p_cmp, "b (h g) l n -> b h g l n", h=h).sum(2)
 
         # --- selection: top-n blocks per KV head among blocks 0..cur, with the
         # sink (0), previous and current blocks forced to maximal importance
@@ -286,17 +288,19 @@ class NativeSparseAttention(nn.Module):
         # doc_ids_to_cu_seqlens); each segment is treated as an independent
         # sequence. `doc_ids` is accepted for interface symmetry but unused --
         # cu_seqlens carries the same information here.
-        b, l, _ = x.shape
-        pos = torch.arange(l, device=x.device)
+        b, seq, _ = x.shape
+        pos = torch.arange(seq, device=x.device)
         q, k, v = self._qkv(x, pos)  # RoPE'd per row (relative offsets survive
         # flattening: RoPE is relative under dot products)
         g = self._gates(x)
 
         if self._use_kernel(x):
             if cu_seqlens is not None:
-                q, k, v, g = (u.reshape(1, b * l, *u.shape[2:]) for u in (q, k, v, g))
+                q, k, v, g = (u.reshape(1, b * seq, *u.shape[2:]) for u in (q, k, v, g))
             o = _fla_parallel_nsa(
-                q, k, v,
+                q,
+                k,
+                v,
                 g_cmp=g[..., 0].contiguous(),
                 g_slc=g[..., 1].contiguous(),
                 block_counts=self.n_selected,
@@ -305,18 +309,22 @@ class NativeSparseAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
             o_win = _fla_parallel_attn(
-                q, k, v,
+                q,
+                k,
+                v,
                 scale=self.scale,
                 window_size=self.window,
                 cu_seqlens=cu_seqlens,
             )
             o = o + g[..., 2, None] * o_win
-            o = o.reshape(b, l, self.d_model)
+            o = o.reshape(b, seq, self.d_model)
         elif cu_seqlens is not None:
-            flat = (u.reshape(1, b * l, *u.shape[2:]) for u in (q, k, v, g))
-            o = self._reference_segments(*flat, cu_seqlens).reshape(b, l, self.d_model)
+            flat = (u.reshape(1, b * seq, *u.shape[2:]) for u in (q, k, v, g))
+            o = self._reference_segments(*flat, cu_seqlens).reshape(
+                b, seq, self.d_model
+            )
         else:
-            o = self._reference(q, k, v, g, pos).reshape(b, l, self.d_model)
+            o = self._reference(q, k, v, g, pos).reshape(b, seq, self.d_model)
         return self.proj_o(o)
 
     def decode(
@@ -326,8 +334,8 @@ class NativeSparseAttention(nn.Module):
         # history and re-derive pooling / selection / window per step. The
         # cache grows in the sequence dim, so speculative-decode rollback can
         # snapshot/restore it like an ordinary KV cache.
-        b, l, _ = x.shape
-        q_pos = torch.arange(pos, pos + l, device=x.device)
+        b, seq, _ = x.shape
+        q_pos = torch.arange(pos, pos + seq, device=x.device)
         q, k, v = self._qkv(x, q_pos)
         if cache is not None:
             k = torch.cat([cache["k"], k], dim=1)
@@ -338,7 +346,9 @@ class NativeSparseAttention(nn.Module):
             # Fresh-prefill fast path: with no history this is exactly the
             # training forward, so the O(T^2)-free kernels handle long prompts.
             o = _fla_parallel_nsa(
-                q, k, v,
+                q,
+                k,
+                v,
                 g_cmp=g[..., 0].contiguous(),
                 g_slc=g[..., 1].contiguous(),
                 block_counts=self.n_selected,
@@ -348,7 +358,7 @@ class NativeSparseAttention(nn.Module):
             o = o + g[..., 2, None] * _fla_parallel_attn(
                 q, k, v, scale=self.scale, window_size=self.window
             )
-            o = o.reshape(b, l, self.d_model)
+            o = o.reshape(b, seq, self.d_model)
         else:
-            o = self._reference(q, k, v, g, q_pos).reshape(b, l, self.d_model)
+            o = self._reference(q, k, v, g, q_pos).reshape(b, seq, self.d_model)
         return self.proj_o(o), new_cache

@@ -1,9 +1,9 @@
 import pytest
 import torch
 
-from picochat.gpt import TransformerLM
-from picochat.param_estimate import estimate_num_params
-from picochat.presets import MODEL_PRESETS, build_lm, estimate_preset_params
+from picochat.model import TransformerLM
+from picochat.model.estimate import estimate_num_params
+from picochat.model.presets import MODEL_PRESETS, build_lm, estimate_preset_params
 
 
 # ---------------------------------------------------------------------------
@@ -112,21 +112,25 @@ def test_preset_dims_are_consistent(size):
     cfg = MODEL_PRESETS[size]
     assert cfg["d_model"] % cfg["n_heads"] == 0  # heads tile d_model
     assert cfg["n_heads"] % cfg["n_kv_heads"] == 0  # GQA grouping
-    assert (cfg["d_model"] // cfg["n_heads"]) % 2 == 0  # even d_head (partial-RoPE friendly)
+    assert (
+        cfg["d_model"] // cfg["n_heads"]
+    ) % 2 == 0  # even d_head (partial-RoPE friendly)
 
 
 def test_dense_growth_chain_is_width_compatible():
-    # 200m -> 1b -> 8b are meant to grow by HyperCloning (picochat.grow): each
+    # 200m -> 1b -> 8b are meant to grow by HyperCloning (picochat.model.grow): each
     # step keeps d_head fixed and multiplies every width field by one integer
     # factor r. A preset edit that breaks that (e.g. a stray d_head) must fail
     # here, not at grow time.
-    from picochat.grow import _norm_cfg
+    from picochat.model.grow import _norm_cfg
 
     chain = ["200m", "1b", "8b"]
     for lo, hi in zip(chain, chain[1:]):
         a, b = _norm_cfg(MODEL_PRESETS[lo]), _norm_cfg(MODEL_PRESETS[hi])
         assert a["d_head"] == b["d_head"], f"{lo}->{hi}: d_head must match"
-        assert b["d_model"] % a["d_model"] == 0, f"{lo}->{hi}: d_model not an integer multiple"
+        assert b["d_model"] % a["d_model"] == 0, (
+            f"{lo}->{hi}: d_model not an integer multiple"
+        )
         r = b["d_model"] // a["d_model"]
         for f in ("n_heads", "n_kv_heads", "nsa_kv_heads", "d_ffn"):
             assert b[f] == r * a[f], f"{lo}->{hi}: {f} must scale x{r} for width growth"
@@ -291,7 +295,10 @@ def test_estimate_active_params_shared_bank_saturates():
     assert estimate_num_params(**cfg, active_only=True) == estimate_num_params(**cfg)
     # a large pool doesn't saturate: only n_layers * n_active experts count
     big = dict(cfg, n_experts=32)
-    total, active = estimate_num_params(**big), estimate_num_params(**big, active_only=True)
+    total, active = (
+        estimate_num_params(**big),
+        estimate_num_params(**big, active_only=True),
+    )
     assert total - active == (32 - 4 * 2) * 3 * 16 * 64
 
 

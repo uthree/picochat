@@ -40,14 +40,14 @@ from textual.widgets import Input, Static
 from textual.worker import get_current_worker
 
 from picochat.tokenizer import render_chat_prompt
-from picochat.engine import (
+from picochat.inference.engine import (
     SamplingConfig,
     add_sampling_args,
     generate,
     resolve_device,
     sampling_from_args,
 )
-from picochat.trainer import load_gpt_checkpoint
+from picochat.training import load_gpt_checkpoint
 
 DEFAULT_THEME = "ansi-dark"
 

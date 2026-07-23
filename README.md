@@ -4,7 +4,7 @@
 A project inspired by [nanochat](https://github.com/karpathy/nanochat): a
 minimal chat-LLM stack you can train from scratch for roughly $100 at the
 smallest rung, built so the same code scales up unchanged to much larger models.
-The sequence mixer is a hybrid of [Gated DeltaNet](https://arxiv.org/abs/2412.06464)
+The sequence mixer is a hybrid of [Gated DeltaNet-2](https://arxiv.org/abs/2605.22791)
 linear-attention layers and [Native Sparse Attention](https://arxiv.org/abs/2502.11089)
 layers (3:1) for long context at a fraction of the KV cost.
 
@@ -38,8 +38,8 @@ uv pip install -e .    # install dependencies
 uv pip install -e ".[kernels]"
 ```
 On Linux the base install pulls in `fla-core` (flash-linear-attention's Triton
-kernels) for the Gated DeltaNet layers; on macOS/Windows it is skipped and the
-model uses the built-in pure-PyTorch implementation (also the CPU path
+kernels) for the Gated DeltaNet-2 layers; on macOS/Windows it is skipped and
+the model uses the built-in pure-PyTorch implementation (also the CPU path
 everywhere). Both compute the same result.
 
 ### 2. Train the tokenizer
@@ -142,29 +142,20 @@ uv run pytest
 ```
 
 ## Project layout
-A flat package, one file per concern (following
-[nanochat](https://github.com/karpathy/nanochat)):
+The package is organized by domain (the project started as a nanochat-style
+flat package, but has outgrown it), with `scripts/` holding one CLI per
+pipeline step:
 
-| Module | Responsibility |
+| Package / module | Responsibility |
 |---|---|
-| `picochat/gpt.py` | the model: blocks (RMSNorm, SwiGLU, MoE, depth-attention residuals) up through `TransformerLM`, interleaving the two mixers |
-| `picochat/linear_attn.py` | Gated DeltaNet: the linear-attention (recurrent) mixer -- chunkwise-parallel training + O(1) decode, pure-PyTorch with optional `fla` kernels |
-| `picochat/sparse_attn.py` | Native Sparse Attention: the sparse-softmax (compressed / selected / window) mixer with partial RoPE |
-| `picochat/presets.py` | the scale-ladder presets (`configs/presets.yml`) and the `build_lm` factory |
-| `picochat/param_estimate.py` | `estimate_num_params`: size a config without building the model |
-| `picochat/trainer.py` | the LightningModules that train it (`GPT` for pretraining, `SFTModule` for SFT) and the shared Muon/AdamW + LR-schedule scaffolding |
-| `picochat/grpo.py` | GRPO RL post-training: rollouts (single- and multi-turn/agentic), group advantages, the clipped-surrogate + KL loss |
-| `picochat/reward.py` | verifiable rewards for GRPO: a test-runner backbone, an LLM judge, and the multi-turn code-fixing environment |
-| `picochat/sandbox.py` | isolated (bubblewrap / hardened-subprocess) execution of the untrusted code GRPO rewards |
-| `picochat/engine.py` | sampling, KV-cached streaming generation, and the shared device/sampling CLI helpers |
-| `picochat/config.py` | config loading and the multi-device (linear-scaling) launch helpers shared across the training CLIs |
+| `picochat/model/` | the model. `blocks.py` (RMSNorm, SwiGLU, depth-attention residuals), `moe.py` (MoE + shareable ExpertBank), `linear_attn.py` (Gated DeltaNet-2), `sparse_attn.py` (Native Sparse Attention), `transformer.py` (`TransformerLayer` up through `TransformerLM`), `presets.py` (the scale ladder + `build_lm`), `estimate.py` (`estimate_num_params`), `grow.py` (width/depth/MoE-upcycle growth), `audio.py` (soft-token audio input) |
+| `picochat/training/` | training. `modules.py` (the LightningModules: `GPT` for pretraining, `SFTModule` for SFT, and the shared `LMTrainerMixin`), `optim.py` (Muon/AdamW param split + LR schedule), `checkpoint.py` (loading checkpoints back into models), `kernels.py` (optional [HF `kernels`](https://github.com/huggingface/kernels) fused-loss integration, see below) |
+| `picochat/data/` | data. `sources.py` (HF Hub streaming sources for pretraining text and SFT conversations), `dataloader.py` (sequence packing, the sharded on-disk token format, Datasets/samplers/DataModule) |
+| `picochat/rl/` | RL post-training. `grpo.py` (rollouts, group advantages, the clipped-surrogate + KL loss), `reward.py` (verifiable rewards: test runner, LLM judge, multi-turn code-fixing env), `sandbox.py` (bubblewrap / hardened-subprocess isolation for the untrusted code rewards execute) |
+| `picochat/evals/` | evaluation. `tasks.py` (likelihood-based multiple-choice benchmarks: hellaswag, arc, ...) |
+| `picochat/inference/` | inference. `engine.py` (sampling, KV-cached streaming generation, speculative decoding, device/sampling CLI helpers), `api.py` (OpenAI-compatible Chat Completions endpoints) |
 | `picochat/tokenizer.py` | BPE tokenizer (rustbpe training / tiktoken inference), special tokens, and the ChatML rendering built on them |
-| `picochat/dataset.py` | where raw data comes from: HF Hub sources for pretraining text and SFT conversations |
-| `picochat/dataloader.py` | sequence packing, the sharded on-disk token format, Datasets/samplers/DataModule |
-| `picochat/tasks.py` | likelihood-based multiple-choice benchmarks (hellaswag, arc, ...) |
-| `picochat/audio.py` | soft-token audio input path (Qwen-style, for multimodal experiments) |
-| `picochat/kernels.py` | optional [HF `kernels`](https://github.com/huggingface/kernels) integration with plain-PyTorch fallback (see below) |
-| `picochat/api.py` | OpenAI-compatible Chat Completions endpoints |
+| `picochat/config.py` | config loading and the multi-device (linear-scaling) launch helpers shared across the training CLIs |
 | `scripts/` | one CLI per pipeline step: `tok_train` → `base_setup` → `base_train` → `sft_setup` → `sft_train` → `grpo_train` → `base_eval`/`code_eval`/`chat`/`api` |
 
 ## Performance
@@ -183,8 +174,8 @@ future work.
 
 Training compiles the model with `torch.compile`. On Linux the base install
 includes [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)'s
-Triton kernels (`fla-core`), used on CUDA by *both* mixers: the Gated DeltaNet
-layers (chunked gated delta rule) and the Native Sparse Attention layers
+Triton kernels (`fla-core`), used on CUDA by *both* mixers: the Gated DeltaNet-2
+layers (chunked GDN-2 rule, `fla.ops.gdn2`) and the Native Sparse Attention layers
 (`parallel_nsa` for the fused compression/selection branches plus
 `parallel_attn` for the sliding window) -- pure-PyTorch reference
 implementations are the fallback and the CPU/test path. On top of that,
@@ -205,15 +196,18 @@ values and gradients as the plain loss; verified in `tests/test_kernels.py`).
 ## Model Architecture
 A decoder-only Transformer (pre-RMSNorm, no biases, untied embeddings) whose
 sequence mixer is a **hybrid** stack: within each block of `layers_per_block`
-layers, the first layers are [Gated DeltaNet](https://arxiv.org/abs/2412.06464)
+layers, the first layers are [Gated DeltaNet-2](https://arxiv.org/abs/2605.22791)
 linear-attention mixers and the block-tail layer is
 [Native Sparse Attention](https://arxiv.org/abs/2502.11089) -- a 3:1 GDN:NSA
 ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
-- [Gated DeltaNet](https://arxiv.org/abs/2412.06464): a recurrent linear-
-  attention mixer (Mamba2 gating + the delta rule) with a fixed-size state
-  instead of a growing KV cache. It learns positions implicitly from its
-  recurrence, so these layers use **no RoPE**. Chunkwise-parallel training and
-  O(1)-per-token decode, with exact pure-PyTorch kernels and optional
+- [Gated DeltaNet-2](https://arxiv.org/abs/2605.22791): a recurrent linear-
+  attention mixer with a fixed-size state instead of a growing KV cache. It
+  refines Gated DeltaNet / KDA by decoupling the single scalar gate into two
+  independent channel-wise gates -- an erase gate on the key axis and a write
+  gate on the value axis -- on top of KDA's channel-wise decay. It learns
+  positions implicitly from its recurrence, so these layers use **no RoPE**.
+  Chunkwise-parallel training and O(1)-per-token decode, with exact
+  pure-PyTorch kernels and optional
   [flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
   Triton kernels on CUDA.
 - [Native Sparse Attention](https://arxiv.org/abs/2502.11089): sparse softmax
@@ -247,17 +241,18 @@ ratio at the default `layers_per_block: 4` (Qwen3-Next-style). Plus:
 - [ChatML](https://github.com/openai/openai-python/blob/release-v0.28.0/chatml.md)
   chat format
 
-Presets (`configs/presets.yml`), named by total parameter count: `200m`
-≈0.2B, `1b` ≈1.0B and `8b` ≈8.0B (dense); at 35B/120B the ladder is MoE-only,
-each in two variants matched on total params -- `35b-moe` ≈35.5B total / 2.5B
-active and `120b-moe` ≈118B total / 6.2B active (fine-grained LatentMoE,
-per-layer expert pools), `35b-moe-shared` ≈35.5B / 3.4B active and
-`120b-moe-shared` ≈118B / 8.1B active (coarse-grained, one expert pool shared
+Presets (`configs/presets.yml`), named by nominal parameter count: `200m`
+≈0.22B, `1b` ≈1.1B and `8b` ≈8.7B (dense; the GDN-2 channel-wise gates add a
+few percent over the original name targets); at 35B/120B the ladder is
+MoE-only, each in two variants matched on total params -- `35b-moe` ≈36.0B
+total / 2.4B active and `120b-moe` ≈119B total / 6.2B active (fine-grained
+LatentMoE, per-layer expert pools), `35b-moe-shared` ≈35.8B / 3.3B active and
+`120b-moe-shared` ≈119B / 8.1B active (coarse-grained, one expert pool shared
 across layers).
 
 The dense rungs form a **growth chain**: they share a constant `d_head` of 64
 and step `d_model` ×2 (1024 → 2048 → 4096), so a trained rung can *grow* into
-the next instead of pretraining from scratch (`picochat.grow`) -- HyperCloning
+the next instead of pretraining from scratch (`picochat.model.grow`) -- HyperCloning
 widens it (replicating heads at a fixed head size, exactly function-preserving),
 then whole blocks are stacked for depth. A config's `grow_from` points at the
 smaller checkpoint; dense→MoE upcycling adds a zero-initialized routed branch to

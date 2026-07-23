@@ -8,10 +8,10 @@ import lightning as L
 import torch
 from torch.utils.data import DataLoader
 
-from picochat import grpo
-from picochat.engine import SamplingConfig
-from picochat.gpt import TransformerLM
-from picochat.reward import MockJudge, RewardModel, StepResult
+from picochat.rl import grpo
+from picochat.inference.engine import SamplingConfig
+from picochat.model import TransformerLM
+from picochat.rl.reward import MockJudge, RewardModel, StepResult
 from picochat.tokenizer import EOS_TOKEN, IM_END, IM_START
 
 VOCAB = 40

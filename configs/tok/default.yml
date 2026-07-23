@@ -15,7 +15,7 @@ total_chars: 2000000000
 # byte budget and stops early.
 streaming: true
 
-# The mixture mirrors the pretraining corpus (configs/base_setup/base.yml):
+# The mixture mirrors the pretraining corpus (configs/base_setup/default.yml):
 # BPE is frequency-based, so merges should be allocated where tokens are
 # actually spent -- English STEM/educational prose + code dominate, Japanese is
 # the main non-English (user-facing) language, and the other six languages get

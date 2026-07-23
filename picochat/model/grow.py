@@ -153,8 +153,19 @@ def _widen_key(
         return W.repeat(r) / r
     if k.endswith(".conv1d.weight"):
         return _widen_conv(W, r, key_dim, value_dim)
+    if k.endswith(".f_proj.0.weight"):
+        # GDN-2 decay-gate bottleneck (d_head, d_model): d_head is held fixed,
+        # so only the input is widened.
+        return _in(W, r, noise, gen)
+    if k.endswith(".f_proj.1.weight"):
+        # GDN-2 decay-gate expansion (key_dim, d_head): the bottleneck input is
+        # unchanged, the output tiles per copied head (copy-major, matching the
+        # widened proj_k layout). Noise-free so the r copies stay exact.
+        return W.repeat(r, 1)
     if k.endswith(".dt_bias") or k.endswith(".A_log"):
-        return W.repeat(r)  # one scalar per head -> replicate per copied head
+        # per key channel (dt_bias) / per key head (A_log) -> replicate per
+        # copied head (copy-major, matching the widened proj_k layout)
+        return W.repeat(r)
     if k.endswith(".norm.weight"):
         return W.clone()  # per-d_head (d_head unchanged)
     if k.endswith(".out_gain"):
@@ -169,7 +180,7 @@ def _widen_key(
             return _both(W, r, 0.0, gen)
         return W.repeat(r, 1)
     # Everything else is a 2D linear with both dims d-widened (all attention/FFN
-    # projections, the per-head a/b gates, the NSA branch gate).
+    # projections, the channel-wise b/w gates, the NSA branch gate).
     return _both(W, r, noise, gen)
 
 
@@ -225,7 +236,11 @@ def _copy_layer(
             continue
         tail = k[len(pre) :]
         nk = _layer_prefix(dst_i) + tail
-        out[nk] = torch.zeros_like(W) if (zero_residual and tail in _RESIDUAL_WRITE) else W.clone()
+        out[nk] = (
+            torch.zeros_like(W)
+            if (zero_residual and tail in _RESIDUAL_WRITE)
+            else W.clone()
+        )
 
 
 def grow_depth(
@@ -253,7 +268,11 @@ def grow_depth(
     assert L_s % lpb == 0 and L_t % lpb == 0, "layer counts must be whole blocks"
     for f in ("d_model", "n_heads", "n_kv_heads", "nsa_kv_heads", "d_ffn", "n_experts"):
         assert src[f] == tgt[f], f"grow_depth cannot change {f}"
-    out = {k: W.clone() for k, W in state.items() if not k.startswith("transformer.layers.")}
+    out = {
+        k: W.clone()
+        for k, W in state.items()
+        if not k.startswith("transformer.layers.")
+    }
     for i in range(L_s):
         _copy_layer(state, out, i, i, zero_residual=False)
     for i in range(L_s, L_t):
@@ -307,7 +326,11 @@ def upcycle_to_moe(
     # bank per layer. A shared bank appears in the state_dict under every layer's
     # keys (aliased storage); writing the same tensors to each keeps them consistent.
     def make_bank() -> dict[str, Tensor]:
-        wd = torch.zeros(ne * io, d_expert) if not latent else _fresh((ne * io, d_expert), std, gen)
+        wd = (
+            torch.zeros(ne * io, d_expert)
+            if not latent
+            else _fresh((ne * io, d_expert), std, gen)
+        )
         return {
             "bank.weight_up": _fresh((ne * d_expert, io), std, gen),
             "bank.weight_gate": _fresh((ne * d_expert, io), std, gen),
@@ -336,7 +359,9 @@ def _reinit_ffn(out, i, d_model, d_ffn, n_layers, std, gen) -> None:
     out[p + "proj_up.weight"] = _fresh((d_ffn, d_model), std, gen)
     out[p + "proj_gate.weight"] = _fresh((d_ffn, d_model), std, gen)
     # residual-write projection: the depth-scaled std TransformerLM._init_weights uses
-    out[p + "proj_down.weight"] = _fresh((d_model, d_ffn), std / (2 * n_layers) ** 0.5, gen)
+    out[p + "proj_down.weight"] = _fresh(
+        (d_model, d_ffn), std / (2 * n_layers) ** 0.5, gen
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -349,15 +374,24 @@ def _adjust_mtp(state: dict[str, Tensor], src: dict, tgt: dict) -> dict[str, Ten
     are added zero-initialized (MTPHead is the identity at init -- its residual
     transform outputs zero -- so adding one is function-preserving)."""
     assert src["mtp_rank"] == tgt["mtp_rank"], "changing mtp_rank is unsupported"
-    n_s, n_t, d_model, rank = src["n_mtp"], tgt["n_mtp"], tgt["d_model"], tgt["mtp_rank"]
+    n_s, n_t, d_model, rank = (
+        src["n_mtp"],
+        tgt["n_mtp"],
+        tgt["d_model"],
+        tgt["mtp_rank"],
+    )
     out = {k: v for k, v in state.items() if not k.startswith("mtp_heads.")}
     for j in range(min(n_s, n_t)):  # carry over existing heads
-        for suf in (["proj_in.weight", "out.weight"] if rank else ["out.weight"]):
+        for suf in ["proj_in.weight", "out.weight"] if rank else ["out.weight"]:
             out[f"mtp_heads.{j}.{suf}"] = state[f"mtp_heads.{j}.{suf}"].clone()
     for j in range(n_s, n_t):  # fresh identity heads
-        out[f"mtp_heads.{j}.out.weight"] = torch.zeros(d_model, d_model if rank is None else rank)
+        out[f"mtp_heads.{j}.out.weight"] = torch.zeros(
+            d_model, d_model if rank is None else rank
+        )
         if rank is not None:
-            out[f"mtp_heads.{j}.proj_in.weight"] = torch.randn(rank, d_model) * tgt["init_std"]
+            out[f"mtp_heads.{j}.proj_in.weight"] = (
+                torch.randn(rank, d_model) * tgt["init_std"]
+            )
     return out
 
 

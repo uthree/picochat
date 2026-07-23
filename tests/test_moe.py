@@ -3,7 +3,7 @@ import copy
 import pytest
 import torch
 
-from picochat.gpt import MixtureOfExperts, Transformer, moe_modules
+from picochat.model import MixtureOfExperts, Transformer, moe_modules
 
 
 def _moe_transformer(grad_checkpoint: bool) -> Transformer:
@@ -194,7 +194,11 @@ def test_share_experts_single_bank_but_per_layer_routing():
     total_unshared = sum(
         p.numel()
         for p in Transformer(
-            d_model=32, n_heads=4, n_layers=3, n_experts=4, d_expert=16,
+            d_model=32,
+            n_heads=4,
+            n_layers=3,
+            n_experts=4,
+            d_expert=16,
             layers_per_block=1,
         ).parameters()
     )

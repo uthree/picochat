@@ -5,8 +5,8 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from picochat.gpt import TransformerLM
-from picochat.trainer import GPT
+from picochat.model import TransformerLM
+from picochat.training import GPT
 
 
 class _RandomTokenDataset(Dataset):

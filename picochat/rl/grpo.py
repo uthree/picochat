@@ -1,11 +1,11 @@
 """GRPO (Group Relative Policy Optimization) post-training.
 
-The RL stage for coding-agent ability (see picochat.reward for the reward
+The RL stage for coding-agent ability (see picochat.rl.reward for the reward
 side). One step:
 
   1. For each prompt, sample a *group* of `group_size` rollouts from the
      current policy (KV-cached sampling, `rollout`).
-  2. Score every rollout (picochat.reward.RewardModel): test pass/fail as the
+  2. Score every rollout (picochat.rl.reward.RewardModel): test pass/fail as the
      backbone, an external LLM judge where tests can't reach.
   3. Turn the group's rewards into advantages by normalizing within the group
      (`group_advantages`) -- GRPO's trick for dropping the value model: the
@@ -24,7 +24,7 @@ Multi-step (agentic) RL: with `max_turns > 1`, a tested task runs as an episode
 instead of a single response -- the policy proposes code, `agent_rollout` runs
 the tests, and on failure feeds the error back as an observation so the policy
 can revise, up to the turn budget. The whole trajectory is one member of the
-GRPO group and is scored by `picochat.reward.trajectory_reward`, which is tuned
+GRPO group and is scored by `picochat.rl.reward.trajectory_reward`, which is tuned
 to value eventually reaching a correct answer and staying stable across a long
 trial-and-error episode over solving in one shot. Only the policy's own tokens
 train (observations are masked out); everything downstream -- advantages, loss,
@@ -42,9 +42,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from picochat.engine import SamplingConfig, chat_stop_ids, sample
-from picochat.gpt import TransformerLM
-from picochat.reward import (
+from picochat.inference.engine import SamplingConfig, chat_stop_ids, sample
+from picochat.model.transformer import TransformerLM
+from picochat.rl.reward import (
     AgentRewardConfig,
     CodeAgentEnv,
     CodeTask,
@@ -52,7 +52,7 @@ from picochat.reward import (
     trajectory_reward,
 )
 from picochat.tokenizer import render_chat_prompt, render_turn
-from picochat.trainer import LMTrainerMixin
+from picochat.training.modules import LMTrainerMixin
 
 
 def load_tasks(path: str, tokenizer, system: str | None) -> list[dict]:
@@ -198,9 +198,7 @@ def agent_rollout(
         if room <= 0:
             break
 
-        toks, cache, pos = _generate_turn(
-            model, cache, pos, nxt, cfg, stop_ids, room
-        )
+        toks, cache, pos = _generate_turn(model, cache, pos, nxt, cfg, stop_ids, room)
         token_ids.extend(toks)
         action_mask.extend([1] * len(toks))
 

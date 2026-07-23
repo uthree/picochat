@@ -10,10 +10,9 @@ from dataclasses import dataclass
 from typing import Iterator
 
 import torch
-from tiktoken import Encoding
 from torch import Tensor
 
-from picochat.tokenizer import EOS_TOKEN, IM_END
+from picochat.tokenizer import EOS_TOKEN, IM_END, Tokenizer as Encoding
 
 
 @dataclass
@@ -239,7 +238,9 @@ def generate_speculative(
             # last accepted token (the correction true[accepted] and the fresh
             # drafts then come from this recommit forward).
             cache, pos = base, base_pos
-            commit = torch.tensor([cand[: accepted + 1]], dtype=torch.long, device=device)
+            commit = torch.tensor(
+                [cand[: accepted + 1]], dtype=torch.long, device=device
+            )
             logits, mtp, cache, pos = model.decode_heads(commit, cache, pos)
         # draft afresh from the last committed position (index `accepted` in the
         # chunk that produced the current logits/mtp).
@@ -261,11 +262,15 @@ def resolve_device(spec: str | None) -> torch.device:
     return torch.device("cpu")
 
 
-def add_sampling_args(parser, *, temperature: float = 0.8, temp_help: str = "0 -> greedy decoding") -> None:
+def add_sampling_args(
+    parser, *, temperature: float = 0.8, temp_help: str = "0 -> greedy decoding"
+) -> None:
     """Add the shared --temperature/--top-k/--top-p/--max-new-tokens flags to an
     argparse parser (used by chat.py, api.py and code_eval.py); pair with
     sampling_from_args."""
-    parser.add_argument("--temperature", type=float, default=temperature, help=temp_help)
+    parser.add_argument(
+        "--temperature", type=float, default=temperature, help=temp_help
+    )
     parser.add_argument("--top-k", type=int, default=50, help="0 -> disabled")
     parser.add_argument("--top-p", type=float, default=1.0, help="1.0 -> disabled")
     parser.add_argument("--max-new-tokens", type=int, default=256)

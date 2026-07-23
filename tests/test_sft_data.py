@@ -1,12 +1,12 @@
 import pytest
 import torch
 
-from picochat.dataloader import (
+from picochat.data.dataloader import (
     SFTDataset,
     SFTTensorDataset,
     pack_examples,
 )
-from picochat.dataset import (
+from picochat.data.sources import (
     CHAT_PRESETS,
     ChatDatasetSpec,
     _aya_kor_to_messages,

@@ -1,5 +1,5 @@
 """The training CLIs' config-to-dataset wiring (scripts/base_train.py,
-scripts/sft_train.py) and the checkpoint-loading helpers in picochat.trainer
+scripts/sft_train.py) and the checkpoint-loading helpers in picochat.training
 they build on."""
 
 import numpy as np
@@ -7,9 +7,9 @@ import pytest
 import torch
 from torch.utils.data import ConcatDataset
 
-from picochat.dataloader import DTYPE, ShardWriter, write_meta
-from picochat.presets import build_lm
-from picochat.trainer import GPT, load_lm_from_checkpoint
+from picochat.data.dataloader import DTYPE, ShardWriter, write_meta
+from picochat.model.presets import build_lm
+from picochat.training import GPT, load_lm_from_checkpoint
 from scripts import base_train, sft_train
 
 BLOCK_SIZE = 8
@@ -152,15 +152,27 @@ def test_grow_init_warm_starts_from_smaller_checkpoint(tmp_path):
     # scripts.base_train.grow_init should widen a smaller saved model into a
     # larger one (HyperCloning) -- exactly function-preserving at init.
     src_cfg = dict(
-        size="1b", vocab_size=64, max_seq_len=32,
-        d_model=16, n_heads=2, n_kv_heads=1, nsa_kv_heads=1,
-        n_layers=4, layers_per_block=2, d_ffn=48,
+        size="1b",
+        vocab_size=64,
+        max_seq_len=32,
+        d_model=16,
+        n_heads=2,
+        n_kv_heads=1,
+        nsa_kv_heads=1,
+        n_layers=4,
+        layers_per_block=2,
+        d_ffn=48,
     )
     path, src_lm = _save_ckpt(tmp_path, src_cfg)
     src_lm.eval()
 
     tgt_cfg = dict(  # width x2: d_head stays 8
-        src_cfg, d_model=32, n_heads=4, n_kv_heads=2, nsa_kv_heads=2, d_ffn=96,
+        src_cfg,
+        d_model=32,
+        n_heads=4,
+        n_kv_heads=2,
+        nsa_kv_heads=2,
+        d_ffn=96,
     )
     tgt_gpt = GPT(build_lm(**tgt_cfg), compile=False, model_config=tgt_cfg)
     base_train.grow_init(tgt_gpt, path, tgt_cfg)

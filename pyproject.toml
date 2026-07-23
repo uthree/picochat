@@ -12,7 +12,6 @@ dependencies = [
     "rustbpe>=0.1.0",
     "tensorboard>=2.20.0",
     "textual>=8.0.0",
-    "tiktoken>=0.13.0",
     "torch>=2.12.1",
     "tqdm>=4.68.3",
     "setuptools<82",
@@ -26,6 +25,7 @@ dependencies = [
     # import guard in picochat/linear_attn.py falls back to the exact pure-
     # PyTorch implementation, which also serves CPU everywhere.
     "fla-core[cuda]>=0.5.0 ; sys_platform == 'linux'",
+    "tiktoken>=0.13.0",
 ]
 
 [project.optional-dependencies]

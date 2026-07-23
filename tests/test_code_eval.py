@@ -1,11 +1,11 @@
 """Generative pass@1 code eval (scripts/code_eval.py) and the shared GRPO task
-loader it reuses (picochat.grpo.load_tasks)."""
+loader it reuses (picochat.rl.grpo.load_tasks)."""
 
 import torch
 
-from picochat.engine import SamplingConfig
-from picochat.grpo import load_tasks
-from picochat.reward import CodeTask
+from picochat.inference.engine import SamplingConfig
+from picochat.rl.grpo import load_tasks
+from picochat.rl.reward import CodeTask
 from picochat.tokenizer import BOS_TOKEN, IM_END, SPECIAL_TOKENS
 from scripts.code_eval import evaluate_tasks
 

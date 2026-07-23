@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from picochat.dataset import Mixture, iter_mixture, spec_from_entry
+from picochat.data.sources import Mixture, iter_mixture, spec_from_entry
 from picochat.tokenizer import SPECIAL_TOKENS, train_tokenizer
 
 

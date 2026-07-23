@@ -2,13 +2,13 @@
 # one setup, one run, one checkpoint -- less to manage, no repacking between
 # stages). Corpus focus: STEM / educational + computing & coding, long context
 # (16k rows), with just enough non-English for conversational coverage (see
-# configs/base_setup/base.yml for the selection rationale).
+# configs/base_setup/default.yml for the selection rationale).
 
 tokenizer: weights/tokenizer.json
 output_dir: weights/base
 init_from: null # same-architecture warm-start (continual learning); null = from scratch
 # grow_from: weights/200m/last.ckpt  # transfer-learn across scales: grow a SMALLER
-#   # trained checkpoint into this preset (picochat.grow) -- HyperCloning width,
+#   # trained checkpoint into this preset (picochat.model.grow) -- HyperCloning width,
 #   # block-stacked depth, dense->MoE upcycle, as the shapes require. The source
 #   # architecture is read from its own saved model_config, so only the path is
 #   # needed; takes precedence over init_from. Dict form for tuning:
@@ -24,7 +24,7 @@ model:
 
 data:
     data_dir: data # joined with each dataset path/val_bin filename below
-    block_size: 16384 # must match configs/base_setup/base.yml
+    block_size: 16384 # must match configs/base_setup/default.yml
 
     datasets:
         # weights are total sampling mass per source (GroupWeightedIndexSampler),
@@ -52,7 +52,7 @@ data:
         - { path: wikipedia-fr, weight: 0.25 }
         - { path: wikipedia-de, weight: 0.25 }
         - { path: wikipedia-ru, weight: 0.25 }
-    val_bin: # per-dataset validation splits (see configs/base_setup/base.yml)
+    val_bin: # per-dataset validation splits (see configs/base_setup/default.yml)
         - tiny-codes.val
         - python-codes.val
         - tiny-textbooks.val

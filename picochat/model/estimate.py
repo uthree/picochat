@@ -12,19 +12,24 @@ from __future__ import annotations
 
 
 def _gdn_params(d_model: int, n_heads: int, kv_dim: int, conv_size: int) -> int:
-    """Gated DeltaNet mixer (linear_attn.GatedDeltaNet), one layer. d_head =
-    d_model // n_heads; value_dim = n_heads * d_head = d_model."""
+    """Gated DeltaNet-2 mixer (linear_attn.GatedDeltaNet2), one layer. d_head =
+    d_model // n_heads; value_dim = n_heads * d_head = d_model; n_kv_heads =
+    kv_dim // d_head."""
     d_head = d_model // n_heads
     value_dim = d_model
     conv_dim = 2 * kv_dim + value_dim
+    n_kv_heads = kv_dim // d_head
     return (
         d_model * kv_dim  # proj_q
         + d_model * kv_dim  # proj_k
         + d_model * value_dim  # proj_v
         + d_model * value_dim  # proj_z (output gate)
-        + d_model * n_heads  # a_proj
-        + d_model * n_heads  # b_proj
-        + 2 * n_heads  # dt_bias, A_log
+        + d_model * d_head
+        + d_head * kv_dim  # f_proj (low-rank decay gate)
+        + d_model * kv_dim  # b_proj (channel-wise erase gate)
+        + d_model * value_dim  # w_proj (channel-wise write gate)
+        + kv_dim
+        + n_kv_heads  # dt_bias (per key channel), A_log (per key head)
         + conv_dim * conv_size  # depthwise short conv
         + d_head  # GatedRMSNorm weight
         + value_dim * d_model  # proj_o
@@ -95,7 +100,7 @@ def estimate_num_params(
     expert_hidden = ffn_hidden if d_expert is None else d_expert
 
     # Layer split: the block-tail layers ((i+1) % layers_per_block == 0) are NSA
-    # (global) mixers; the rest are Gated DeltaNet (linear) mixers.
+    # (global) mixers; the rest are Gated DeltaNet-2 (linear) mixers.
     nsa_layers = n_layers // layers_per_block
     gdn_layers = n_layers - nsa_layers
     gdn = _gdn_params(d_model, n_heads, kv_dim, conv_size)

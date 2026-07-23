@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from picochat import reward as R
+from picochat.rl import reward as R
 
 
 def test_extract_code_prefers_last_fence():

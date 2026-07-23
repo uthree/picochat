@@ -36,8 +36,7 @@ from picochat.tokenizer import (
     AUDIO_EOS_TOKEN,
     AUDIO_TOKEN,
     BOS_TOKEN,
-    IM_END,
-    IM_START,
+    render_turn,
 )
 
 
@@ -182,14 +181,20 @@ def render_audio_prompt(
     tokens). Returns (input_ids, mels) where mels are the per-clip log-mel
     features in placeholder order, ready for AudioEncoder + scatter_audio_embeds.
 
-    Mirrors picochat.tokenizer.render_chat_prompt: leading BOS, each turn as
-    `<|im_start|>{role}\\n{body}<|im_end|>\\n`, then a bare assistant header.
+    The ChatML frame (leading BOS, `<|im_start|>{role}\\n...<|im_end|>\\n` per
+    turn, trailing bare assistant header) comes from
+    picochat.tokenizer.render_turn -- the same spans render_chat_prompt emits
+    -- so this renderer can never drift from the text-only chat format; only
+    the audio-part expansion is added here.
     """
     sp = tokenizer.encode_single_token
     ids = [sp(BOS_TOKEN)]
     mels: list[Tensor] = []
     for msg in messages:
-        ids += [sp(IM_START), *tokenizer.encode_ordinary(f"{msg['role']}\n")]
+        # render_turn with empty content: header = <|im_start|>{role}\n,
+        # closing = <|im_end|>, tail = \n. The parts loop fills the body.
+        header, closing, tail = render_turn(msg["role"], "", tokenizer)
+        ids += header
         content = msg["content"]
         parts = (
             [{"type": "text", "text": content}] if isinstance(content, str) else content
@@ -208,6 +213,7 @@ def render_audio_prompt(
                 mels.append(mel)
             else:
                 raise ValueError(f"unknown content part type: {part['type']!r}")
-        ids += [sp(IM_END), *tokenizer.encode_ordinary("\n")]
-    ids += [sp(IM_START), *tokenizer.encode_ordinary("assistant\n")]
+        ids += closing + tail
+    header, _, _ = render_turn("assistant", "", tokenizer)
+    ids += header
     return ids, mels

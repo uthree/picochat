@@ -10,8 +10,8 @@ is exercised in each."""
 import pytest
 import torch
 
-from picochat.engine import SamplingConfig, generate, generate_speculative
-from picochat.gpt import TransformerLM
+from picochat.inference.engine import SamplingConfig, generate, generate_speculative
+from picochat.model import TransformerLM
 from picochat.tokenizer import (
     EOS_TOKEN,
     IM_END,
@@ -49,9 +49,7 @@ def _model(vocab, n_mtp, **kw):
     kw.setdefault("d_model", 32)
     kw.setdefault("n_heads", 4)
     kw.setdefault("n_layers", 4)
-    return TransformerLM(
-        vocab_size=vocab, max_seq_len=128, n_mtp=n_mtp, **kw
-    ).eval()
+    return TransformerLM(vocab_size=vocab, max_seq_len=128, n_mtp=n_mtp, **kw).eval()
 
 
 def test_decode_heads_shapes():
@@ -90,7 +88,9 @@ def test_mtp_low_rank_head_is_cheaper():
     [
         dict(n_layers=4, layers_per_block=1),  # all full attention, own blocks
         dict(n_layers=4, layers_per_block=2, window_size=4),  # windowed + blocks
-        dict(n_layers=4, n_experts=6, n_active=2, d_expert=16, layers_per_block=1),  # MoE
+        dict(
+            n_layers=4, n_experts=6, n_active=2, d_expert=16, layers_per_block=1
+        ),  # MoE
         dict(n_layers=4, layers_per_block=1, mtp_rank=8),  # low-rank MTP heads
     ],
 )

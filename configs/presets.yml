@@ -15,11 +15,11 @@
 #        - <rung>-moe-shared coarse-grained, one shared pool        -- 35b / 120b
 #
 # Sequence mixer (all rungs): a hybrid stack interleaving, per block of
-# `layers_per_block` layers, (layers_per_block - 1) Gated DeltaNet linear-
+# `layers_per_block` layers, (layers_per_block - 1) Gated DeltaNet-2 linear-
 # attention layers with 1 Native Sparse Attention layer as the block tail --
 # a 3:1 GDN:NSA ratio at the default lpb=4 (Qwen3-Next-style).
 #
-#   - Gated DeltaNet (arXiv:2412.06464): a recurrent linear-attention mixer with
+#   - Gated DeltaNet-2 (arXiv:2605.22791): a recurrent linear-attention mixer with
 #     a fixed-size state (no growing KV cache) that learns positions implicitly
 #     from its recurrence -- so these layers use NO RoPE.
 #   - Native Sparse Attention (arXiv:2502.11089): sparse softmax over a
@@ -52,14 +52,14 @@
 #
 # Multi-token prediction: 8b and every larger preset carry n_mtp extra heads
 # (offsets +2.., Medusa-style, reusing the shared lm head) for self-speculative
-# decoding (picochat.engine.generate_speculative). Counted in the total but NOT
+# decoding (picochat.inference.engine.generate_speculative). Counted in the total but NOT
 # in the active figure. Smaller presets omit them.
 #
 # Sizes assume a 64k (65536) vocab with an untied lm head (embedding + head
 # together are 131072*d_model params). CJK splits per-character in the tokenizer
 # so the vocab needs no kanji-compound merges (see configs/tok/default.yml).
 #
-# Growth chain (picochat.grow / a config's grow_from): the dense rungs share a
+# Growth chain (picochat.model.grow / a config's grow_from): the dense rungs share a
 # constant d_head of 64 and step d_model x2 (1024 -> 2048 -> 4096), so a trained
 # rung *grows* into the next instead of training from scratch -- HyperCloning
 # widens it (replicating heads, d_head fixed) then whole blocks are stacked for
@@ -81,7 +81,7 @@
 # depth arrives when it grows into 1b. Also the default target for the smoke
 # test and base pretraining.
 # --------------------------------------------------------------------------
-200m: # ~0.21B params (dense)
+200m: # ~0.22B params (dense)
     d_model: 1024
     n_layers: 8
     n_heads: 16  # d_head 64; multiple of 16 so the NSA kernel group (MQA) fits
@@ -96,7 +96,7 @@
 # 1B -- one width-double + a depth grow above 200m (grow_state_dict: 200m ->
 # width x2 -> 8 layers @ d_model 2048 -> stack blocks -> 20 layers). d_head 64.
 # --------------------------------------------------------------------------
-1b: # ~1.0B params (dense)
+1b: # ~1.1B params (dense)
     d_model: 2048
     n_layers: 20
     n_heads: 32  # d_head 64; NSA kernel group 32/2 = 16
@@ -112,7 +112,7 @@
 # @ d_model 4096 -> stack blocks -> 48 layers). d_head 64; top of the dense
 # growth chain.
 # --------------------------------------------------------------------------
-8b: # ~8.0B params (dense; + 3 lightweight MTP heads)
+8b: # ~8.7B params (dense; + 3 lightweight MTP heads)
     d_model: 4096
     n_layers: 48
     n_heads: 64  # d_head 64; NSA kernel group 64/4 = 16
@@ -128,7 +128,10 @@
 # 35B -- MoE only (no dense past 8b). Narrow backbone (d_model 2560) + small
 # dense/shared FFN + a big routed pool, so per-token activation is ~7-10%.
 # --------------------------------------------------------------------------
-35b-moe: # ~35.7B total / ~2.1B active -- LatentMoE, fine-grained
+# The two 35b variants share this backbone (a "_"-prefixed key is an anchor
+# carrier, not a preset -- see presets.load_presets); only the MoE fields
+# differ below.
+_35b-backbone: &backbone-35b
     d_model: 2560
     n_layers: 40
     n_heads: 32  # d_head 80; multiple of 16 for the NSA kernel group
@@ -137,34 +140,29 @@
     vocab_size: 65536
     window_size: 512
     layers_per_block: 6
+    n_mtp: 3  # multi-token prediction heads (draft up to 4 tokens/step)
+
+35b-moe: # ~36.0B total / ~2.4B active -- LatentMoE, fine-grained
+    <<: *backbone-35b
     d_ffn: 1024      # small always-on dense/shared FFN (keeps active low)
     n_experts: 540   # +10 vs the freed-embedding baseline, restoring the ~35.5B rung
     n_active: 6
     d_expert: 512    # fine-grained
     d_latent: 1024   # LatentMoE: experts run in a d_model/2.5 latent space
-    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-35b-moe-shared: # ~35.6B total / ~3.0B active -- coarse-grained, shared pool
-    d_model: 2560
-    n_layers: 40
-    n_heads: 32  # d_head 80; multiple of 16 for the NSA kernel group
-    n_kv_heads: 4
-    nsa_kv_heads: 2  # NSA GQA-16 (32/2)
-    vocab_size: 65536
-    window_size: 512
-    layers_per_block: 6
+35b-moe-shared: # ~35.8B total / ~3.3B active -- coarse-grained, shared pool
+    <<: *backbone-35b
     d_ffn: 768       # small always-on dense/shared FFN
     n_experts: 1920  # +26 vs the freed-embedding baseline, restoring the ~35.5B rung
     n_active: 2
     d_expert: 2304   # coarse: ~4.5x the fine variant's experts
     share_experts: true
-    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
 # --------------------------------------------------------------------------
 # 120B -- MoE only. Narrow backbone (d_model 3584) + small dense/shared FFN +
 # a big routed pool; per-token activation is ~5-7%.
 # --------------------------------------------------------------------------
-120b-moe: # ~118B total / ~5.6B active -- LatentMoE, fine-grained
+_120b-backbone: &backbone-120b
     d_model: 3584
     n_layers: 48
     n_heads: 32  # d_head 112; multiple of 16 for the NSA kernel group
@@ -173,25 +171,19 @@
     vocab_size: 65536
     window_size: 512
     layers_per_block: 6
-    d_ffn: 1792      # small always-on dense/shared FFN
+    d_ffn: 1792  # small always-on dense/shared FFN
+    n_mtp: 3  # multi-token prediction heads (draft up to 4 tokens/step)
+
+120b-moe: # ~119B total / ~6.2B active -- LatentMoE, fine-grained
+    <<: *backbone-120b
     n_experts: 576   # +4 vs the freed-embedding baseline, restoring the ~118B rung
     n_active: 8
     d_expert: 768    # fine-grained
     d_latent: 1792   # LatentMoE latent space (d_model/2)
-    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)
 
-120b-moe-shared: # ~118B total / ~7.5B active -- coarse-grained, shared pool
-    d_model: 3584
-    n_layers: 48
-    n_heads: 32  # d_head 112; multiple of 16 for the NSA kernel group
-    n_kv_heads: 4
-    nsa_kv_heads: 2  # NSA GQA-16 (32/2)
-    vocab_size: 65536
-    window_size: 512
-    layers_per_block: 6
-    d_ffn: 1792      # small always-on dense/shared FFN
+120b-moe-shared: # ~119B total / ~8.1B active -- coarse-grained, shared pool
+    <<: *backbone-120b
     n_experts: 2976  # +28 vs the freed-embedding baseline, restoring the ~118B rung
     n_active: 2
     d_expert: 3584   # coarse: ~4.7x the fine variant's experts (= d_model)
     share_experts: true
-    n_mtp: 3         # multi-token prediction heads (draft up to 4 tokens/step)

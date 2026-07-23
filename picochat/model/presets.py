@@ -1,9 +1,9 @@
 """The model scale ladder and the factory helpers that size and build it.
 
-Config-loading / factory glue kept out of gpt.py (which is just the model
-definition): the {size: hyperparameters} presets live in configs/presets.yml so
-they sit with the other recipes, and `build_lm` / `estimate_preset_params` turn
-a preset name into a model / a parameter count.
+Config-loading / factory glue kept out of transformer.py (which is just the
+model definition): the {size: hyperparameters} presets live in
+configs/presets.yml so they sit with the other recipes, and `build_lm` /
+`estimate_preset_params` turn a preset name into a model / a parameter count.
 """
 
 from __future__ import annotations
@@ -12,28 +12,30 @@ from pathlib import Path
 
 import yaml
 
-from picochat.gpt import TransformerLM
-from picochat.param_estimate import estimate_num_params
+from picochat.model.transformer import TransformerLM
+from picochat.model.estimate import estimate_num_params
 
 # Scale ladder: total-param rungs 200m/1b/8b/35b/120b, each crossed with a
 # dense / -moe / -moe-shared architecture variant (dense up to 8b, MoE from 1b),
 # kept in configs/presets.yml so the hyperparameters live with the other recipes
 # (see that file for the naming and sizing rationale).
-PRESETS_FILE = Path(__file__).resolve().parents[1] / "configs" / "presets.yml"
+PRESETS_FILE = Path(__file__).resolve().parents[2] / "configs" / "presets.yml"
 
 
 def load_presets(path: str | Path = PRESETS_FILE) -> dict[str, dict]:
-    """Load the {size: hyperparameters} scale ladder consumed by build_lm."""
+    """Load the {size: hyperparameters} scale ladder consumed by build_lm.
+
+    Top-level keys starting with "_" are YAML anchor carriers (e.g. the
+    backbone block two MoE variants of a rung share), not presets."""
     with open(path) as f:
-        return yaml.safe_load(f)
+        presets = yaml.safe_load(f)
+    return {k: v for k, v in presets.items() if not k.startswith("_")}
 
 
 MODEL_PRESETS: dict[str, dict] = load_presets()
 
 
-def _resolve_preset(
-    size: str, vocab_size: int | None = None, **overrides
-) -> dict:
+def _resolve_preset(size: str, vocab_size: int | None = None, **overrides) -> dict:
     """Resolve a preset name + overrides into a model config dict. Shared by
     build_lm and estimate_preset_params so they always describe the same model."""
     if size not in MODEL_PRESETS:
@@ -44,11 +46,9 @@ def _resolve_preset(
     return cfg
 
 
-def resolve_config(
-    size: str, vocab_size: int | None = None, **overrides
-) -> dict:
+def resolve_config(size: str, vocab_size: int | None = None, **overrides) -> dict:
     """The full model-config dict build_lm(size, ...) would construct (preset +
-    overrides + vocab), without building anything. picochat.grow uses it to read
+    overrides + vocab), without building anything. picochat.model.grow uses it to read
     a source/target model's shapes when warm-starting one from the other."""
     return _resolve_preset(size, vocab_size, **overrides)
 

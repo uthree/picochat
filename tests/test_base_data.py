@@ -4,8 +4,8 @@ import torch
 from lightning.pytorch.utilities.model_helpers import is_overridden
 from torch.utils.data import Dataset
 
-from picochat.dataloader import PretrainDataModule
-from picochat.dataset import (
+from picochat.data.dataloader import PretrainDataModule
+from picochat.data.sources import (
     CHAT_PRESETS,
     TEXT_PRESETS,
     DatasetSpec,
@@ -90,7 +90,7 @@ def test_train_dataloader_unweighted_uses_chunked_uniform_sampler():
     # Without weights the loader must not fall back to DataLoader(shuffle=True):
     # its RandomSampler materializes a full randperm(len) up front, which OOMs
     # on a large corpus. It should use the lazy, in-range UniformIndexSampler.
-    from picochat.dataloader import UniformIndexSampler
+    from picochat.data.dataloader import UniformIndexSampler
 
     ds = _RandomTokenDataset(40, 6, n=32)
     dm = PretrainDataModule(ds, None, batch_size=4, num_workers=0)
@@ -105,7 +105,7 @@ def test_samplers_seeded_streams_are_deterministic_and_rank_distinct():
     # Per-rank seeding is how multi-GPU decorrelates the IID samplers (see
     # PretrainDataModule): same seed -> same stream, different seed (rank) ->
     # a different stream.
-    from picochat.dataloader import GroupWeightedIndexSampler, UniformIndexSampler
+    from picochat.data.dataloader import GroupWeightedIndexSampler, UniformIndexSampler
 
     def uniform(seed):
         return list(iter(UniformIndexSampler(1000, 64, seed=seed)))
@@ -125,7 +125,7 @@ def test_samplers_seeded_streams_are_deterministic_and_rank_distinct():
 def test_sampler_reiteration_continues_the_stream():
     # A second "epoch" must not replay the first: the generator persists across
     # __iter__ calls (a replayed stream would train on the same batches twice).
-    from picochat.dataloader import UniformIndexSampler
+    from picochat.data.dataloader import UniformIndexSampler
 
     sampler = UniformIndexSampler(1000, 32, seed=7)
     assert list(iter(sampler)) != list(iter(sampler))
@@ -178,7 +178,7 @@ def test_no_val_dataset_hides_val_dataloader_hook():
 # ---------------------------------------------------------------------------
 import numpy as np  # noqa: E402
 
-from picochat.dataloader import (  # noqa: E402
+from picochat.data.dataloader import (  # noqa: E402
     DTYPE,
     PackedDataset,
     ShardWriter,
@@ -422,7 +422,7 @@ def test_chat_spec_from_entry_split_override_copies():
 def test_iter_texts_max_chars_includes_budget_crossing_doc(monkeypatch):
     texts = ["aaaa", "bbbb", "cccc"]
     monkeypatch.setattr(
-        "picochat.dataset.load_dataset",
+        "picochat.data.sources.load_dataset",
         lambda *a, **k: [{"text": t} for t in texts],
     )
     spec = DatasetSpec("fake")
@@ -434,7 +434,7 @@ def test_iter_texts_max_chars_includes_budget_crossing_doc(monkeypatch):
 
 def test_iter_texts_skips_empty_docs(monkeypatch):
     monkeypatch.setattr(
-        "picochat.dataset.load_dataset",
+        "picochat.data.sources.load_dataset",
         lambda *a, **k: [{"text": "x"}, {"text": ""}, {"text": "  "}, {"text": "y"}],
     )
     assert list(iter_texts(DatasetSpec("fake"))) == ["x", "y"]
@@ -442,7 +442,7 @@ def test_iter_texts_skips_empty_docs(monkeypatch):
 
 def test_iter_mixture_budgets_chars_per_source(monkeypatch):
     monkeypatch.setattr(
-        "picochat.dataset.load_dataset",
+        "picochat.data.sources.load_dataset",
         lambda *a, **k: [{"text": "x" * 10} for _ in range(100)],
     )
     mix = Mixture(

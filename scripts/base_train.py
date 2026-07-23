@@ -26,10 +26,10 @@ from picochat.config import (
     resolve_num_devices,
     scale_for_devices,
 )
-from picochat.dataloader import PackedDataset, PretrainDataModule
-from picochat.grow import grow_state_dict
-from picochat.presets import build_lm, resolve_config
-from picochat.trainer import GPT, _model_config_from_ckpt
+from picochat.data.dataloader import PackedDataset, PretrainDataModule
+from picochat.model.grow import grow_state_dict
+from picochat.model.presets import build_lm, resolve_config
+from picochat.training import GPT, _model_config_from_ckpt
 from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 
 # Fields under `model:` that override the scale-ladder preset.
@@ -93,7 +93,7 @@ def make_dataset(bins, block_size: int, weights=None):
 def grow_init(gpt, grow_from, target_model_config: dict) -> None:
     """Warm-start `gpt`'s weights by *growing* a smaller trained checkpoint into
     this (larger) architecture -- transfer learning across scales instead of
-    training the bigger model from scratch (see picochat.grow).
+    training the bigger model from scratch (see picochat.model.grow).
 
     `grow_from` is the source checkpoint path, or a dict {path, noise?, seed?}.
     The source architecture is read from its own saved `model_config`, so only
@@ -162,7 +162,7 @@ def main():
     output_dir = cfg.get("output_dir", "weights")
     init_from = args.init_from or cfg.get("init_from")
     # Grow a smaller trained checkpoint into this (larger) architecture instead
-    # of warm-starting same-shape weights -- see grow_init / picochat.grow.
+    # of warm-starting same-shape weights -- see grow_init / picochat.model.grow.
     grow_from = cfg.get("grow_from")
 
     tokenizer = load_tokenizer(tokenizer_path)
@@ -260,9 +260,9 @@ def main():
         # None -> auto (compile only where torch.compile is supported).
         compile=trainer_cfg.get("compile", None),
         # Opt-in memory saver: fold the lm-head into a Liger fused
-        # cross-entropy kernel so the (b*l, 128k-vocab) logits are never
+        # cross-entropy kernel so the (b*l, 64k-vocab) logits are never
         # materialized -- roughly halves peak memory at some step-time cost
-        # on smaller GPUs (see picochat.kernels). Needs `pip install
+        # on smaller GPUs (see picochat.training.kernels). Needs `pip install
         # picochat[kernels]`; true insists (errors if unavailable).
         fused_loss=trainer_cfg.get("fused_loss", False),
         # Used to render generated-text samples to TensorBoard during validation.

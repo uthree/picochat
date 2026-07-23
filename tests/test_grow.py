@@ -1,4 +1,4 @@
-"""Growth / upcycling (picochat.grow): a small model's trained weights warm-start
+"""Growth / upcycling (picochat.model.grow): a small model's trained weights warm-start
 a larger one. The headline property is function preservation -- at init the grown
 model computes the (nearly) identical function -- so each test grows a small
 model's state_dict, loads it into the larger model, and compares their outputs.
@@ -10,8 +10,8 @@ import copy
 import pytest
 import torch
 
-from picochat.gpt import TransformerLM
-from picochat.grow import (
+from picochat.model import TransformerLM
+from picochat.model.grow import (
     grow_depth,
     grow_state_dict,
     grow_width,
@@ -82,9 +82,11 @@ def test_grow_width_symmetry_broken(x):
     # while breaking the tie.
     src_cfg = dict(BASE)
     src = _build(src_cfg, seed=1)
-    grown = grow_width(src.state_dict(), _norm(src_cfg), _norm(_widen(BASE, 2)), noise=0.02)
+    grown = grow_width(
+        src.state_dict(), _norm(src_cfg), _norm(_widen(BASE, 2)), noise=0.02
+    )
     w = grown["transformer.layers.0.ffn.proj_up.weight"]  # (2*d_ffn, 2*d_model)
-    d_ffn, d_model = BASE["d_ffn"], BASE["d_model"]
+    d_ffn = BASE["d_ffn"]
     top, bot = w[:d_ffn], w[d_ffn:]  # the two output copies
     assert not torch.allclose(top, bot)
 
@@ -204,8 +206,8 @@ def test_grow_real_preset_widths_200m_to_1b():
     # 16->32, n_kv 4->8, nsa_kv 1->2, d_ffn 2048->4096): grow the real 200m
     # preset into the real 1b preset and load strict. Layer counts are cut (real
     # width, few layers) so the 2048-wide build stays light.
-    from picochat.gpt import TransformerLM
-    from picochat.presets import resolve_config
+    from picochat.model import TransformerLM
+    from picochat.model.presets import resolve_config
 
     src_cfg = resolve_config("200m", vocab_size=128, n_layers=4)
     tgt_cfg = resolve_config("1b", vocab_size=128, n_layers=8)
@@ -235,6 +237,6 @@ def test_grow_width_requires_constant_d_head():
 
 # small local mirror of grow._norm_cfg so tests read declaratively
 def _norm(cfg):
-    from picochat.grow import _norm_cfg
+    from picochat.model.grow import _norm_cfg
 
     return _norm_cfg(copy.deepcopy(cfg))

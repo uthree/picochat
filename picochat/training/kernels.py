@@ -5,8 +5,8 @@ flash_attention.py wrapper).
 The only kernel used today is Liger's fused linear cross-entropy
 (kernels-community/liger-kernels): it folds the lm-head matmul into a chunked
 cross-entropy so the (b*l, vocab) logits tensor is never materialized. With a
-128k vocab the logits are by far the largest activation of a training step
-(batch 8 x 2048 tokens x 128k vocab in bf16 is ~4 GiB *before* the fp32
+64k vocab the logits are by far the largest activation of a training step
+(batch 8 x 2048 tokens x 64k vocab in bf16 is ~2 GiB *before* the fp32
 softmax the plain loss needs), so the fused path frees enough memory for a
 several-times-larger batch at the same model size. Attention and the other
 blocks stay on FlexAttention/torch.compile, which already fuse well and --

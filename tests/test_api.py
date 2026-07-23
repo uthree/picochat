@@ -2,8 +2,8 @@ import json
 
 from fastapi.testclient import TestClient
 
-from picochat.api import create_app
-from picochat.engine import SamplingConfig
+from picochat.inference.api import create_app
+from picochat.inference.engine import SamplingConfig
 from picochat.tokenizer import IM_END
 from tests.test_generate import ByteTokenizer, ScriptedModel
 

@@ -6,6 +6,11 @@ from typing import Iterator
 import rustbpe
 import tiktoken
 
+# The runtime tokenizer type: picochat's tokenizer IS a tiktoken.Encoding
+# (built from rustbpe-trained ranks by load_tokenizer/train_tokenizer); the
+# alias gives the rest of the package a backend-neutral name to annotate with.
+Tokenizer = tiktoken.Encoding
+
 # GPT-2's pattern, adapted for a multilingual + code BPE whose goal is
 # *semantically decomposable* tokens -- morpheme-ish units, not whole compound
 # words merged into one token. Two changes vs GPT-2:

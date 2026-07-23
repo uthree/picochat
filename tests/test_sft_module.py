@@ -2,8 +2,8 @@ import lightning as L
 import pytest
 import torch
 
-from picochat.trainer import SFTModule
-from picochat.gpt import TransformerLM
+from picochat.training import SFTModule
+from picochat.model import TransformerLM
 
 PAD_ID = 0
 
@@ -90,7 +90,7 @@ def test_loss_shifts_labels_by_one():
 
 
 def test_training_step_with_packed_doc_ids(sft_module):
-    # packed batches (see picochat.dataloader.pack_examples) carry doc_ids;
+    # packed batches (see picochat.data.dataloader.pack_examples) carry doc_ids;
     # the step must route them through to the model's document mask
     batch = _batch()
     batch["doc_ids"] = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]]).expand(2, -1)

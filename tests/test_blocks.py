@@ -1,6 +1,6 @@
 import torch
 
-from picochat.gpt import (
+from picochat.model import (
     DepthAttention,
     SwiGLU,
     Transformer,
@@ -106,9 +106,9 @@ def test_transformer_interleaves_linear_and_sparse_layers():
     model = Transformer(d_model=32, n_heads=4, n_layers=4, layers_per_block=2)
     kinds = [type(layer.attn).__name__ for layer in model.layers]
     assert kinds == [
-        "GatedDeltaNet",
+        "GatedDeltaNet2",
         "NativeSparseAttention",
-        "GatedDeltaNet",
+        "GatedDeltaNet2",
         "NativeSparseAttention",
     ]
 

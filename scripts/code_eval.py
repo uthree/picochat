@@ -6,14 +6,14 @@ code, the reply's code is executed against the task's unit tests, and pass@1 is
 the fraction of tasks whose tests pass. Run it on the checkpoints before and
 after grpo_train.py to measure what the RL stage bought.
 
-Tasks use GRPO's own JSONL format (picochat.grpo.load_tasks, e.g.
+Tasks use GRPO's own JSONL format (picochat.rl.grpo.load_tasks, e.g.
 configs/grpo/sample_tasks.jsonl):
 
     {"prompt": "<instruction>", "test": "<python asserting on the answer>"}
 
 Each prompt is rendered as a ChatML user turn (optionally behind --system); the
 reply's last fenced code block runs against `test` in the isolation sandbox
-(picochat.sandbox, same as GRPO training). Tasks without a `test` field are
+(picochat.rl.sandbox, same as GRPO training). Tasks without a `test` field are
 skipped -- they would need the LLM judge, and this eval stays verifiable-only.
 Decoding is greedy by default: deterministic, and on an MTP checkpoint
 generate() routes it through self-speculative decoding automatically.
@@ -25,17 +25,17 @@ generate() routes it through self-speculative decoding automatically.
 import argparse
 import json
 
-from picochat import sandbox
-from picochat.engine import (
+from picochat.rl import sandbox
+from picochat.inference.engine import (
     SamplingConfig,
     add_sampling_args,
     generate,
     resolve_device,
     sampling_from_args,
 )
-from picochat.grpo import load_tasks
-from picochat.reward import extract_code, run_tests_verbose
-from picochat.trainer import load_gpt_checkpoint
+from picochat.rl.grpo import load_tasks
+from picochat.rl.reward import extract_code, run_tests_verbose
+from picochat.training import load_gpt_checkpoint
 
 
 def evaluate_tasks(
@@ -72,7 +72,10 @@ def evaluate_tasks(
             }
         )
         head = s["prompt_str"].replace("\n", " ")[:60]
-        print(f"[{i + 1}/{len(samples)}] {'PASS' if passed else 'FAIL'}  {head}", flush=True)
+        print(
+            f"[{i + 1}/{len(samples)}] {'PASS' if passed else 'FAIL'}  {head}",
+            flush=True,
+        )
     return results
 
 

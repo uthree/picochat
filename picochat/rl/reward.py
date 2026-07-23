@@ -34,7 +34,7 @@ from typing import Protocol
 
 from openai import AsyncOpenAI
 
-from picochat import sandbox
+from picochat.rl import sandbox
 
 _CODE_FENCE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
 
@@ -73,7 +73,7 @@ def run_tests_verbose(code: str, task: CodeTask) -> tuple[bool, str]:
     """Execute `setup + code + test_code` and return `(passed, output)`: a clean
     exit (assertions hold, no exception) is a pass, and `output` is the captured
     stdout+stderr (the failure message on a fail). Runs in a throwaway temp dir
-    under the isolation sandbox (picochat.sandbox: bubblewrap where available,
+    under the isolation sandbox (picochat.rl.sandbox: bubblewrap where available,
     else a hardened subprocess) with a wall-clock timeout; any failure mode
     (assertion, exception, timeout, unparseable code) is a non-pass with a
     human-readable reason rather than an exception into the caller. The output
@@ -300,7 +300,7 @@ class RewardModel:
 # an episode: the policy proposes code, the environment runs the task's tests
 # and -- on failure -- feeds the captured error back as an observation so the
 # policy can revise, repeating until the tests pass or a turn budget is hit
-# (the token generation loop lives in picochat.grpo.agent_rollout). The reward
+# (the token generation loop lives in picochat.rl.grpo.agent_rollout). The reward
 # then scores the whole *trajectory*, deliberately valuing eventually reaching a
 # correct answer and staying stable across a long trial-and-error episode over
 # one-shot correctness (see trajectory_reward).
