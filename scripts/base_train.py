@@ -29,6 +29,7 @@ from picochat.config import (
 from picochat.data.dataloader import PackedDataset, PretrainDataModule
 from picochat.model.grow import grow_state_dict
 from picochat.model.presets import build_lm, resolve_config
+from picochat.training.callbacks import benchmark_callback_from_config
 from picochat.training import GPT, _model_config_from_ckpt
 from picochat.tokenizer import BOS_TOKEN, PAD_TOKEN, load_tokenizer
 
@@ -305,6 +306,11 @@ def main():
         every_n_train_steps=val_check_interval if monitor is None else None,
     )
 
+    # Optional in-training benchmark evaluation (trainer.benchmark_eval in the
+    # config): tracks MCQ accuracy next to the loss curves. chat=False renders
+    # items as plain text (base checkpoints).
+    bench_cb = benchmark_callback_from_config(trainer_cfg, tokenizer, chat=False)
+
     trainer = L.Trainer(
         accelerator=args.accelerator,
         devices=args.devices,
@@ -321,7 +327,7 @@ def main():
         # DistributedSampler; Lightning's wrapper would materialize the whole
         # index stream per rank (see PretrainDataModule).
         use_distributed_sampler=False,
-        callbacks=[ckpt_cb],
+        callbacks=[cb for cb in (ckpt_cb, bench_cb) if cb is not None],
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 

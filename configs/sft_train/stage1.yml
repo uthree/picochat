@@ -32,6 +32,12 @@ optim:
     max_steps: 2000
 
 trainer:
+    # In-training benchmark tracking (items rendered as ChatML turns);
+    # see configs/base_train/default.yml for the knobs.
+    benchmark_eval:
+        tasks: [hellaswag, arc_easy]
+        limit: 300
+        every_n_steps: 500
     batch_size: 16
     accumulate: 1
     grad_clip: 1.0

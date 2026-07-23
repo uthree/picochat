@@ -70,6 +70,14 @@ optim:
     max_steps: 150000
 
 trainer:
+    # In-training benchmark tracking: a capped MCQ sweep every N optimizer
+    # steps, logged to TensorBoard as bench/<task>/acc(_norm) next to the
+    # loss -- data-mixture / LR problems show up mid-run. Rank 0 only; the
+    # first sweep may download the task datasets from the HF Hub.
+    benchmark_eval:
+        tasks: [hellaswag, arc_easy]
+        limit: 300
+        every_n_steps: 2000
     # 16k-token rows: one row per micro-batch, accumulate to keep the update
     # size at 32,768 tokens (the old stage 2's tokens/update).
     batch_size: 1
