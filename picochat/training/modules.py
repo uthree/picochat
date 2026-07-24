@@ -88,6 +88,9 @@ class LMTrainerMixin:
         # Running count of optimizer steps skipped because the gradient went
         # non-finite (see _optimizer_step's spike protection).
         self._skipped_steps = 0
+        # How many more non-finite-gradient events to diagnose in detail (which
+        # parameters overflowed); budgeted to keep the log readable.
+        self._nonfinite_diag_budget = 5
         # Set by configure_optimizers: per optimizer, the per-group base LRs
         # the schedule scales.
         self._base_lrs: list[list[float]] = []
@@ -272,6 +275,13 @@ class LMTrainerMixin:
                 f"step (total skipped this run: {self._skipped_steps})",
                 flush=True,
             )
+            # First few times, pinpoint WHICH parameters carry the non-finite
+            # gradient (grouped by a coarse module prefix). Turns a mysterious
+            # "grad norm nan" into "layer N's mixer backward overflowed", which
+            # is what a real fix needs. Budgeted so it never spams the log.
+            if self._nonfinite_diag_budget > 0:
+                self._nonfinite_diag_budget -= 1
+                self._report_nonfinite_grads()
             for opt in opts:
                 opt.zero_grad()
             self.log("train/grad_skips", float(self._skipped_steps))
@@ -294,6 +304,33 @@ class LMTrainerMixin:
             opt.optimizer.step()
         for opt in opts:
             opt.zero_grad()
+
+    def _report_nonfinite_grads(self) -> None:
+        """Print which parameters carry a non-finite gradient, aggregated by a
+        coarse module prefix (e.g. `transformer.layers.7.mixer`), so a skip
+        event names the layer/kernel whose backward overflowed. Called only on
+        the skip path, and only while the diagnostic budget lasts."""
+        by_prefix: dict[str, int] = {}
+        first_finite_loss = True
+        for name, p in self.model.named_parameters():
+            g = p.grad
+            if g is None or torch.isfinite(g).all():
+                continue
+            # keep the module path up to the mixer/moe/norm leaf, dropping the
+            # final weight/bias token so sibling params fold together
+            parts = name.split(".")
+            prefix = ".".join(parts[:-1]) if len(parts) > 1 else name
+            by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
+            first_finite_loss = False
+        if first_finite_loss:
+            print("  non-finite grads: (none on model params?)", flush=True)
+            return
+        ordered = sorted(by_prefix.items())
+        print(
+            f"  non-finite grads in {len(by_prefix)} param groups; "
+            f"earliest: {', '.join(k for k, _ in ordered[:6])}",
+            flush=True,
+        )
 
     def _head_ce(self, hidden: Tensor, weight: Tensor, target_ids: Tensor) -> Tensor:
         """Cross-entropy of a single output head (weight: (vocab, d_model)) over
