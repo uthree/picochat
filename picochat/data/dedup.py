@@ -31,6 +31,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+import numpy as np
+
 _WS = re.compile(r"\s+")
 
 # 2^61 - 1, a Mersenne prime: the universal-hash modulus for the MinHash
@@ -245,3 +247,102 @@ def filter_from_config(cfg: dict | None) -> CorpusFilter | None:
     if exact is None and minhash is None and contamination is None:
         return None
     return CorpusFilter(exact=exact, minhash=minhash, contamination=contamination)
+
+
+# ---------------------------------------------------------------------------
+# Row-level repetition filter (post-packing)
+# ---------------------------------------------------------------------------
+# The dedup above works on document *text*. This one works on the packed token
+# *rows* (block_size+1 wide) that actually feed the model, and drops the
+# degenerate ones -- rows dominated by a tiny set of tokens or by a long run of
+# a single token. Such rows arise from repetitive/boilerplate source (heavily
+# so in raw code corpora like the-stack: measured ~69% of its packed rows) and
+# push the linear-attention (Gated DeltaNet) bf16 backward into overflow, i.e.
+# a non-finite gradient. The trainer's skip-on-non-finite guard already keeps
+# those from poisoning the run, but every skipped step is wasted compute;
+# removing the rows up front recovers it. Both metrics are fully vectorized
+# numpy over the whole (n_rows, row_len) batch -- microseconds per row, versus
+# the Python-serial MinHash path -- so this is cheap enough to always leave on.
+
+
+def repetitive_row_mask(
+    rows: np.ndarray,
+    min_unique_ratio: float = 0.15,
+    max_run: int = 512,
+) -> np.ndarray:
+    """Boolean mask (True = DROP) over `rows` (shape (n, row_len)) flagging the
+    degenerate rows: those whose distinct-token ratio falls below
+    `min_unique_ratio` (cyclic / tiny-vocabulary repetition), or that contain a
+    run of one identical token longer than `max_run` (which is what actually
+    blows up the Gated DeltaNet recurrent state). Empty input -> empty mask."""
+    n = len(rows)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    row_len = rows.shape[1]
+
+    # distinct-token ratio, without a Python per-row np.unique: sort each row
+    # and count the positions where the sorted value changes.
+    sorted_rows = np.sort(rows, axis=1)
+    n_unique = (np.diff(sorted_rows, axis=1) != 0).sum(axis=1) + 1  # (n,)
+    low_unique = (n_unique / row_len) < min_unique_ratio
+
+    # longest run of an identical token per row, vectorized: for each position
+    # track the index of the last value-change; the gap to it is the current
+    # run length, and the per-row max is the longest run.
+    idx = np.arange(row_len)[None, :]
+    change = np.ones_like(rows, dtype=bool)
+    change[:, 1:] = rows[:, 1:] != rows[:, :-1]
+    last_change = np.maximum.accumulate(np.where(change, idx, 0), axis=1)
+    longest_run = (idx - last_change + 1).max(axis=1)  # (n,)
+    long_run = longest_run > max_run
+
+    return low_unique | long_run
+
+
+@dataclass
+class RowRepetitionFilter:
+    """Streaming row filter applied by base_setup after packing, before a batch
+    of rows is written to the shard. Carries the same thresholds as
+    `repetitive_row_mask` plus running counts for the end-of-run summary. One
+    instance per recipe run."""
+
+    min_unique_ratio: float = 0.15
+    max_run: int = 512
+    rows_seen: int = 0
+    rows_dropped: int = 0
+
+    def apply(self, rows: np.ndarray) -> np.ndarray:
+        """Return `rows` with the degenerate ones removed (a view/copy of the
+        kept rows), updating the counts."""
+        self.rows_seen += len(rows)
+        drop = repetitive_row_mask(rows, self.min_unique_ratio, self.max_run)
+        self.rows_dropped += int(drop.sum())
+        return rows[~drop]
+
+    def describe(self) -> str:
+        if self.rows_seen == 0:
+            return "row filter: no rows seen"
+        return (
+            f"row filter: dropped {self.rows_dropped:,}/{self.rows_seen:,} "
+            f"packed rows ({self.rows_dropped / self.rows_seen:.2%}) as "
+            f"degenerate (unique<{self.min_unique_ratio}, run>{self.max_run})"
+        )
+
+
+def row_filter_from_config(cfg: dict | None) -> RowRepetitionFilter | None:
+    """Build the post-packing row filter from a base_setup recipe's `filter:`
+    section (None -> off):
+
+        filter:
+            repetition_filter: true                 # defaults, or a dict:
+            # repetition_filter: {min_unique_ratio: 0.15, max_run: 512}
+
+    Independent of the text-level dedup keys in the same section; either can be
+    used without the other."""
+    if not cfg:
+        return None
+    rf = cfg.get("repetition_filter")
+    if not rf:
+        return None
+    kwargs = rf if isinstance(rf, dict) else {}
+    return RowRepetitionFilter(**kwargs)

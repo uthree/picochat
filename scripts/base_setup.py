@@ -44,7 +44,7 @@ from picochat.data.dataloader import (  # DTYPE: uint32; shared with the reader
     pack_docs,
     write_meta,
 )
-from picochat.data.dedup import filter_from_config
+from picochat.data.dedup import filter_from_config, row_filter_from_config
 from picochat.data.sources import (
     DatasetSpec,
     holdout_splits,
@@ -172,6 +172,7 @@ def process(
     num_threads: int | None = None,
     shard_tokens: int = DEFAULT_SHARD_TOKENS,
     corpus_filter=None,
+    row_filter=None,
 ) -> tuple[int, int]:
     """Encode every document of `spec` and pack them into fixed-length rows of
     block_size+1 tokens in shard files under the `output` directory (see
@@ -210,6 +211,13 @@ def process(
             encoded = enc.encode_ordinary_batch(batch, num_threads=num_threads)
             docs = [[bos_id, *ids, eos_id] for ids in encoded]
             rows = pack_docs(docs, block_size, pad_id, bos_id)
+            if row_filter is not None:
+                # Drop degenerate packed rows (near-constant / long single-token
+                # run) before they reach the shard -- they are wasted, NaN-prone
+                # training signal (see picochat.data.dedup.RowRepetitionFilter).
+                rows = row_filter.apply(rows)
+                if len(rows) == 0:
+                    continue
             writer.write(rows.reshape(-1))
             n_docs += len(batch)
             n_rows += len(rows)
@@ -258,6 +266,9 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int, pad_id: int) -> None:
     # Built once up front: the decontamination index downloads the benchmark
     # sets, and the dedup state must span every dataset in the recipe.
     corpus_filter = filter_from_config(cfg.get("filter"))
+    # Post-packing degenerate-row filter (cheap, vectorized; independent of the
+    # text-level dedup above). One instance spans every dataset in the recipe.
+    row_filter = row_filter_from_config(cfg.get("filter"))
     entries = expand_val_fraction(cfg["datasets"])
     for entry in entries:
         if "output" not in entry:
@@ -295,9 +306,12 @@ def run_config(cfg: dict, enc, bos_id: int, eos_id: int, pad_id: int) -> None:
             num_threads=num_threads,
             shard_tokens=entry.get("shard_tokens", shard_tokens),
             corpus_filter=corpus_filter,
+            row_filter=row_filter,
         )
     if corpus_filter is not None:
         print(corpus_filter.stats.describe())
+    if row_filter is not None:
+        print(row_filter.describe())
 
 
 def main():

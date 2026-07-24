@@ -1,20 +1,26 @@
-# Quick 200m experiment: core public corpus slices (per-source limits),
-# block 2048, to /workspace. Corpus hygiene on. No val split (val_fraction's
-# slice-split form isn't supported under streaming; benchmark_eval tracks
-# quality during training instead).
+# Quick 200m experiment: core public corpus slices, block 2048, to /workspace.
+# No text-level MinHash/decontam here: that Python path is CPU-bound and
+# serializes ahead of the multi-threaded tokenizer, dominating wall-clock on
+# real data at scale (a known perf limitation -- see picochat.data.dedup; fine
+# for the smoke corpus, too slow for a bulk run). Dedup/decontam stay available
+# via configs/base_setup/default.yml for non-time-boxed runs.
+#
+# The repetition_filter below is the cheap exception: a fully-vectorized
+# post-packing pass (~1s per 250k rows) that drops degenerate rows -- near-
+# constant / long single-token runs, ~70% of raw the-stack code -- which
+# otherwise overflow the Gated DeltaNet bf16 backward into non-finite
+# gradients (skipped at train time, but wasted compute). Keep it on.
 tokenizer: /workspace/picochat/weights/tokenizer.json
 output_dir: /workspace/picochat/data/200m
 streaming: true
 block_size: 2048
 filter:
-    exact_dedup: true
-    minhash_dedup: true
-    decontaminate: true
+    repetition_filter: true
 datasets:
-    - { preset: fineweb-edu,    output: fineweb-edu,    limit: 150000 }
-    - { preset: cosmopedia,     output: cosmopedia,     limit: 80000 }
-    - { preset: wikipedia-en,   output: wikipedia-en,   limit: 80000 }
-    - { preset: fineweb-edu-ja, output: fineweb-edu-ja, limit: 80000 }
-    - { preset: wikipedia-ja,   output: wikipedia-ja,   limit: 60000 }
-    - { preset: the-stack-smol, output: the-stack-smol, limit: 50000 }
-    - { preset: python-codes,   output: python-codes,   limit: 80000 }
+    - { preset: fineweb-edu,    output: fineweb-edu,    limit: 120000 }
+    - { preset: cosmopedia,     output: cosmopedia,     limit: 60000 }
+    - { preset: wikipedia-en,   output: wikipedia-en,   limit: 60000 }
+    - { preset: fineweb-edu-ja, output: fineweb-edu-ja, limit: 60000 }
+    - { preset: wikipedia-ja,   output: wikipedia-ja,   limit: 50000 }
+    - { preset: the-stack-smol, output: the-stack-smol, limit: 40000 }
+    - { preset: python-codes,   output: python-codes,   limit: 25000 }
