@@ -100,11 +100,10 @@ TEXT_PRESETS: dict[str, DatasetSpec] = {
     "the-stack-smol": DatasetSpec(
         "bigcode/the-stack-smol-xl", text_key="content"
     ),  # a few GB; stream + limit for a slice
-    # NOTE: codeparrot/github-code(+-clean) are loading-SCRIPT datasets, which
-    # the current `datasets` refuses to run ("Dataset scripts are no longer
-    # supported"); they do not load. Use codeparrot-clean instead. (bigcode's
-    # the-stack / the-stack-dedup / starcoderdata are all gated -- need HF auth.)
-    "github-code": DatasetSpec("codeparrot/github-code", text_key="code"),
+    # NOTE: no raw multi-language code dump is wired here on purpose --
+    # codeparrot/github-code(+-clean) are loading-SCRIPT datasets the current
+    # `datasets` refuses to run, and bigcode's the-stack / the-stack-dedup /
+    # starcoderdata are all gated (need HF auth). Use codeparrot-clean.
     # --- Literature and Novels
     # 青空文庫 (aozora bunko)
     "aozorabunko-clean": DatasetSpec("globis-university/aozorabunko-clean"),
