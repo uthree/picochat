@@ -85,6 +85,9 @@ class LMTrainerMixin:
         self.min_lr_ratio = min_lr_ratio
         self.grad_clip = grad_clip
         self.accumulate = accumulate
+        # Running count of optimizer steps skipped because the gradient went
+        # non-finite (see _optimizer_step's spike protection).
+        self._skipped_steps = 0
         # Set by configure_optimizers: per optimizer, the per-group base LRs
         # the schedule scales.
         self._base_lrs: list[list[float]] = []
@@ -240,13 +243,45 @@ class LMTrainerMixin:
         if not isinstance(opts, list):
             opts = [opts]  # Lightning unwraps a single optimizer
         self._apply_lr(opts)
-        if self.grad_clip:
-            # One global-norm clip over every parameter, matching the previous
-            # single-optimizer behavior; self.clip_gradients per optimizer
-            # would clip each subset against the threshold separately. (The
-            # bf16-mixed precision used here has no grad scaler, so clipping
-            # raw grads directly is safe.)
-            torch.nn.utils.clip_grad_norm_(self.parameters(), self.grad_clip)
+        # One global-norm clip over every parameter, matching the previous
+        # single-optimizer behavior; self.clip_gradients per optimizer would
+        # clip each subset against the threshold separately. (The bf16-mixed
+        # precision used here has no grad scaler, so clipping raw grads
+        # directly is safe.) clip_grad_norm_ returns the PRE-clip total norm,
+        # which doubles as our divergence detector below; when grad_clip is
+        # None we pass inf to measure the norm without clipping.
+        max_norm = self.grad_clip if self.grad_clip else float("inf")
+        total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm)
+        # Spike protection (skip-on-non-finite): a single pathological batch --
+        # e.g. a bf16 overflow in a mixer kernel, or a run of degenerate
+        # repetitive tokens -- yields a non-finite gradient. Norm-clipping
+        # canNOT rescue this: a NaN/Inf norm makes the clip scale NaN, and the
+        # optimizer would then write NaN into every weight, poisoning the whole
+        # run (the "loss plateaus, then suddenly goes NaN and never recovers"
+        # failure). Instead, drop this step entirely: zero the grads and leave
+        # the weights at their last good state, so the next well-behaved batch
+        # resumes training. This is the standard large-scale-training safeguard
+        # and is what lets a run survive the occasional hard batch that a bare
+        # grad-clip diverges on. NaNGuardCallback remains the backstop for
+        # genuine, sustained divergence (many consecutive skips).
+        if not torch.isfinite(total_norm):
+            self._skipped_steps += 1
+            print(
+                f"skip-on-non-finite: grad norm {total_norm.item()} at "
+                f"global_step {self.trainer.global_step}; skipping optimizer "
+                f"step (total skipped this run: {self._skipped_steps})",
+                flush=True,
+            )
+            for opt in opts:
+                opt.zero_grad()
+            self.log("train/grad_skips", float(self._skipped_steps))
+            return
+        # Log the healthy-step gradient norm and effective LR so divergence
+        # dynamics (a grad-norm ramp before a spike) are visible in TensorBoard
+        # -- previously only train_loss was logged, leaving NaN spikes
+        # undiagnosable after the fact.
+        self.log("train/grad_norm", total_norm)
+        self.log("train/lr", float(opts[0].param_groups[0]["lr"]))
         # Step the first optimizer through its Lightning wrapper and the rest
         # on the raw optimizer: Lightning counts every wrapped .step() into
         # trainer.global_step, so stepping both Muon and AdamW through

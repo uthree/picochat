@@ -104,7 +104,9 @@ def test_nan_guard_stops_on_nonfinite():
             self.global_step = 10
             self.should_stop = False
 
-    cb = NaNGuardCallback()
+    # patience=1 to assert immediate stop; the shipped default is higher (8)
+    # so transient, skip-protection-absorbed spikes don't halt a real run.
+    cb = NaNGuardCallback(patience=1)
     tr = T()
     # finite loss: keeps going
     cb.on_train_batch_end(tr, None, torch.tensor(2.5), None, 0)
@@ -139,3 +141,25 @@ def test_nan_guard_patience():
     cb2.on_train_batch_end(tr2, None, torch.tensor(1.0), None, 0)  # reset
     cb2.on_train_batch_end(tr2, None, torch.tensor(float("nan")), None, 0)
     assert tr2.should_stop is False  # only 1 bad since reset
+
+
+def test_nan_guard_default_patience_tolerates_transient_spikes():
+    # The shipped default must tolerate the odd skip-protection-absorbed spike
+    # (one NaN loss, then recovery) rather than halting a healthy run; it is a
+    # backstop for sustained divergence only.
+    import torch
+
+    from picochat.training.callbacks import NaNGuardCallback
+
+    cb = NaNGuardCallback()
+    assert cb.patience >= 5
+
+    class T:
+        global_step = 5
+        should_stop = False
+
+    tr = T()
+    # a lone NaN followed by a good step must not stop the run
+    cb.on_train_batch_end(tr, None, torch.tensor(float("nan")), None, 0)
+    cb.on_train_batch_end(tr, None, torch.tensor(1.0), None, 0)
+    assert tr.should_stop is False

@@ -119,18 +119,23 @@ def benchmark_callback_from_config(
 
 
 class NaNGuardCallback(L.Callback):
-    """Stop training the moment the loss goes non-finite (NaN/Inf), instead of
-    burning hours of GPU on a diverged run. A single spike is usually
-    unrecoverable at this scale (the optimizer step already poisoned the
-    weights), so the default patience of 1 halts immediately; raise it to
-    tolerate `patience` consecutive bad steps before stopping.
+    """Stop training when the loss stays non-finite (NaN/Inf), instead of
+    burning hours of GPU on a genuinely diverged run.
+
+    This is the *backstop*, not the first line of defense: the trainer's
+    manual optimizer step already skips any update whose gradient is non-finite
+    (LMTrainerMixin._optimizer_step's skip-on-non-finite), so an isolated hard
+    batch produces one NaN loss and then recovers on the next step with the
+    weights untouched. `patience` must therefore tolerate those transient,
+    already-absorbed spikes; only `patience` *consecutive* non-finite losses --
+    i.e. skipping isn't recovering the run -- count as real divergence and halt.
 
     Sets trainer.should_stop, which ends training gracefully after the current
     batch -- Lightning still writes the last checkpoint, so the pre-divergence
     state (from the previous good checkpoint) stays available.
     """
 
-    def __init__(self, patience: int = 1):
+    def __init__(self, patience: int = 8):
         self.patience = patience
         self._bad = 0
 

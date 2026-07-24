@@ -121,6 +121,49 @@ def test_muon_overfits_single_batch():
     assert loss.item() < first
 
 
+def test_optimizer_step_skips_on_nonfinite_grad():
+    """Spike protection: a batch whose gradient goes non-finite must NOT poison
+    the weights. Grad-clipping alone cannot save the run (a NaN total norm
+    makes the clip scale NaN, so the optimizer writes NaN into every param);
+    _optimizer_step instead drops the update, advancing _skipped_steps and
+    leaving untouched params at their last finite state. This is the guard that
+    lets a run survive the occasional hard batch instead of diverging to NaN.
+    """
+    import lightning as L
+    from torch.utils.data import DataLoader, TensorDataset
+
+    torch.manual_seed(0)
+    lm = TransformerLM(vocab_size=40, d_model=32, n_heads=4, n_layers=2)
+    gpt = GPT(lm, pad_idx=0, compile=False)
+    # Poison the output head so every batch's logits -> loss -> gradients are
+    # non-finite, forcing the skip path on each step.
+    with torch.no_grad():
+        lm.lmhead.weight.fill_(float("inf"))
+    embed_before = lm.embed.weight.detach().clone()
+
+    data = torch.randint(1, 40, (4, 8))
+    loader = DataLoader(
+        TensorDataset(data),
+        batch_size=2,
+        collate_fn=lambda rows: torch.stack([r[0] for r in rows]),
+    )
+    trainer = L.Trainer(
+        max_epochs=1,
+        limit_train_batches=2,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+    )
+    trainer.fit(gpt, loader)
+
+    # every step was skipped -> the embedding never received a NaN update
+    assert gpt._skipped_steps >= 1
+    assert torch.equal(lm.embed.weight, embed_before)
+    assert torch.isfinite(lm.embed.weight).all()
+
+
 def test_muon_param_split_with_nsa_layer():
     # Regression: a model deep enough to contain an NSA layer (block tail at
     # layers_per_block=4) must split cleanly. NSA's positional signal is
