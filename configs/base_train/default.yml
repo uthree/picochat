@@ -32,7 +32,7 @@ data:
         # -- computing & coding (~18%) --
         - { path: tiny-codes, weight: 1.0 }
         - { path: python-codes, weight: 0.5 }
-        - { path: the-stack-smol, weight: 2.0 } # long raw source files
+        - { path: codeparrot-clean, weight: 2.0 } # deduped Python source files
         # -- STEM / educational (~47%) --
         - { path: tiny-textbooks, weight: 1.0 }
         - { path: tiny-orca-textbooks, weight: 1.0 }

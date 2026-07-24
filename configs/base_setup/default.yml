@@ -8,10 +8,10 @@ streaming: false # small datasets: download once, then iterate from local cache
 # merged: one setup, one training run, one checkpoint). Selection criteria:
 #   - STEM / educational: textbook-style sets (tiny-/orca-/open-phi textbooks,
 #     cosmopedia) plus edu-filtered web (fineweb-edu).
-#   - computing & coding: tiny-codes, python-codes, the-stack-smol.
+#   - computing & coding: tiny-codes, python-codes, codeparrot-clean.
 #   - long documents (rows are packed to 16k tokens, but attention resets at
 #     document boundaries, so long-range signal comes from long DOCUMENTS):
-#     raw source files (the-stack-smol, ~20k tokens each), long-form textbooks
+#     raw source files (codeparrot-clean deduped Python), long-form textbooks
 #     (open-phi/textbooks), Japanese web novels (Syosetu711K).
 #   - multilingual: conversational coverage only, not knowledge depth --
 #     Japanese (user-facing: fineweb-edu-ja, wikipedia-ja, Syosetu711K) plus a
@@ -27,6 +27,7 @@ filter:
     exact_dedup: true
     minhash_dedup: true # near-duplicates (MinHash-LSH over char shingles)
     decontaminate: true # all registered eval tasks; or a list of task names
+    repetition_filter: true # drop degenerate packed rows (cheap, post-packing)
 
 datasets:
     # --- computing & coding ---
@@ -42,11 +43,11 @@ datasets:
           val_output: python-codes.val,
           val_fraction: 0.01,
       }
-    # Raw multi-language source files: the main long-document code source
-    # (~20k tokens each; 20k docs is ~400M tokens). The smol dump exposes no
-    # usable size metadata for val_fraction, so it is a train-only stream
-    # (code val coverage comes from tiny/python-codes).
-    - { preset: the-stack-smol, output: the-stack-smol, streaming: true, limit: 20000 }
+    # Deduped Python source files: the main long-document code source (codeparrot
+    # clean pass; ~2.5k tokens each). Streamed (no size metadata for
+    # val_fraction), so train-only -- code val coverage comes from
+    # tiny/python-codes. The repetition_filter drops its residual boilerplate.
+    - { preset: codeparrot-clean, output: codeparrot-clean, streaming: true, limit: 20000 }
 
     # --- STEM / educational (Phi-style) ---
     - { preset: tiny-textbooks, output: tiny-textbooks }

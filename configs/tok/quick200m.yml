@@ -9,6 +9,6 @@ data:
     - { preset: cosmopedia, weight: 2 }
     - { preset: wikipedia-en, weight: 3 }
     - { preset: python-codes, weight: 1 }
-    - { preset: the-stack-smol, weight: 3 }
+    - { preset: codeparrot-clean, weight: 3 }
     - { preset: fineweb-edu-ja, weight: 2 }
     - { preset: wikipedia-ja, weight: 2 }

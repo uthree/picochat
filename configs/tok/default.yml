@@ -30,7 +30,7 @@ data:
     - { preset: wikipedia-en, weight: 3 } # encyclopedic English
     # -- code: indentation, brackets and identifiers get their own merges --
     - { preset: python-codes, weight: 1 } # Python (prose + fenced code)
-    - { preset: the-stack-smol, weight: 3 } # multi-language source code
+    - { preset: codeparrot-clean, weight: 3 } # deduped Python source code
     # -- Japanese (user-facing): web/edu + encyclopedic + novels --
     - { preset: fineweb-edu-ja, weight: 2 } # Japanese edu web
     - { preset: wikipedia-ja, weight: 2 } # encyclopedic Japanese

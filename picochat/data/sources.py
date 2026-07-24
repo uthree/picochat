@@ -85,12 +85,25 @@ TEXT_PRESETS: dict[str, DatasetSpec] = {
     # 1.6M synthetic snippets across many languages, reasoning-augmented ("tiny"
     # theme, matches the TinyStories/tiny-textbooks curriculum).
     "tiny-codes": DatasetSpec("nampdn-ai/tiny-codes", text_key="response"),  # ~0.5GB
+    # Deduplicated, permissively-licensed Python from GitHub (codeparrot's clean
+    # pass over the-stack/github-code). Ungated, no loading script, streamable.
+    # The go-to raw-code source here: measured ~25% of its packed rows are still
+    # degenerate boilerplate, but the post-packing repetition_filter removes
+    # those (see picochat.data.dedup) -- versus ~78% for the-stack-smol-xl.
+    "codeparrot-clean": DatasetSpec(
+        "codeparrot/codeparrot-clean", text_key="content"
+    ),  # large; stream + limit for a slice
     # Small multi-language sample of The Stack (raw source files, ~30 languages).
-    # The "-xl" smol variant is loadable without dataset scripts and ungated.
+    # WARNING: low quality for training -- ~78% of its packed rows are degenerate
+    # (repetitive/boilerplate/generated source); prefer codeparrot-clean. Kept
+    # for reference/smoke only.
     "the-stack-smol": DatasetSpec(
         "bigcode/the-stack-smol-xl", text_key="content"
     ),  # a few GB; stream + limit for a slice
-    # Full The Stack GitHub dump -- huge (~1TB); stream a slice, don't download.
+    # NOTE: codeparrot/github-code(+-clean) are loading-SCRIPT datasets, which
+    # the current `datasets` refuses to run ("Dataset scripts are no longer
+    # supported"); they do not load. Use codeparrot-clean instead. (bigcode's
+    # the-stack / the-stack-dedup / starcoderdata are all gated -- need HF auth.)
     "github-code": DatasetSpec("codeparrot/github-code", text_key="code"),
     # --- Literature and Novels
     # 青空文庫 (aozora bunko)

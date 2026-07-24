@@ -15,7 +15,7 @@ data:
         - { path: wikipedia-en, weight: 3.0 }
         - { path: fineweb-edu-ja, weight: 2.0 }
         - { path: wikipedia-ja, weight: 2.0 }
-        - { path: the-stack-smol, weight: 3.0 }
+        - { path: codeparrot-clean, weight: 3.0 }
         - { path: python-codes, weight: 1.0 }
 optim:
     lr: 1.0e-4

@@ -22,5 +22,5 @@ datasets:
     - { preset: wikipedia-en,   output: wikipedia-en,   limit: 60000 }
     - { preset: fineweb-edu-ja, output: fineweb-edu-ja, limit: 60000 }
     - { preset: wikipedia-ja,   output: wikipedia-ja,   limit: 50000 }
-    - { preset: the-stack-smol, output: the-stack-smol, limit: 40000 }
+    - { preset: codeparrot-clean, output: codeparrot-clean, limit: 40000 }
     - { preset: python-codes,   output: python-codes,   limit: 25000 }

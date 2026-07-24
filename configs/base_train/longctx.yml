@@ -32,7 +32,7 @@ data:
     datasets:
         # Favor the genuinely long-form sources at long context -- short docs
         # packed into a 64k row just teach packing, not long-range modeling.
-        - { path: the-stack-smol, weight: 3.0 } # long raw source files
+        - { path: codeparrot-clean, weight: 3.0 } # long raw source files
         - { path: textbooks, weight: 2.0 } # long-form books
         - { path: cosmopedia, weight: 2.0 }
         - { path: fineweb-edu, weight: 2.0 }
